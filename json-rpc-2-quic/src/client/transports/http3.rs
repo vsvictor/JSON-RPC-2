@@ -12,12 +12,13 @@ use quinn::Endpoint;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use json_rpc_2_core::{closed, transport_error};
 use super::uri_host;
-use json_rpc_2_core::{
+use json_rpc_2_core::MAX_MESSAGE_BYTES;
+use json_rpc_2_transport::{
     CONTROL_PATH, ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
-    MAX_MESSAGE_BYTES, RpcClientTransport, TransportError,
+    RpcClientTransport, TransportError,
 };
+use json_rpc_2_transport::{closed, transport_error};
 
 pub type H3Sender = SendRequest<h3_quinn::OpenStreams, Bytes>;
 pub type H3Driver = JoinHandle<ConnectionError>;

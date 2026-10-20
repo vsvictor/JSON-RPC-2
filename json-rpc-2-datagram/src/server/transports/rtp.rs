@@ -13,14 +13,15 @@ use std::{
 
 use tokio::{net::UdpSocket, sync::Mutex, task::JoinSet};
 
-use json_rpc_2_core::{
-    CancellationToken, Transport, TransportFuture, TransportRuntime, log_control, log_json_rpc,
-    log_transport_error,
-};
-use json_rpc_2_core::{JsonRpcProtocol, MAX_MESSAGE_BYTES};
+use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_core::{
     RtcpControlPacket, RtcpControlPacketKind, RtpPacket, RtpPacketKind, decode_rtcp_control_packet,
     decode_rtp_packet, encode_rtcp_control_packet, encode_rtp_packet,
+};
+use json_rpc_2_transport::JsonRpcProtocol;
+use json_rpc_2_transport::{
+    CancellationToken, Transport, TransportFuture, TransportRuntime, log_control, log_json_rpc,
+    log_transport_error,
 };
 
 struct EndpointState {
@@ -225,10 +226,7 @@ async fn handle_data_packet(
                 log_transport_error("RTP/RTCP", peer, "ack", &error);
                 return;
             }
-            runtime
-                .metrics
-                .active_streams
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            runtime.metrics.stream_started();
             tasks.spawn(async move {
                 let started = Instant::now();
                 let response = protocol.handle_message(&packet.payload).await;
@@ -266,10 +264,7 @@ async fn handle_data_packet(
                     true,
                 )
                 .await;
-                runtime
-                    .metrics
-                    .active_streams
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                runtime.metrics.stream_finished();
             });
         }
         RequestAction::Ack => {
@@ -311,10 +306,7 @@ async fn cache_request_state(
 
     let session = sessions.entry(peer).or_default();
     if is_new_peer {
-        runtime
-            .metrics
-            .active_sessions
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        runtime.metrics.session_started();
     }
     session.last_seen = Some(Instant::now());
     prune_peer(session, runtime);
@@ -376,10 +368,7 @@ fn prune_sessions(
         keep
     });
     if removed > 0 {
-        runtime
-            .metrics
-            .active_sessions
-            .fetch_sub(removed, std::sync::atomic::Ordering::Relaxed);
+        runtime.metrics.sessions_finished(removed);
     }
 }
 

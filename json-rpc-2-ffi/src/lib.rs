@@ -3,9 +3,10 @@
 //! This crate does **not** reimplement the JSON-RPC 2.0 protocol or any
 //! transport: it is a thin binding layer that drives the existing
 //! [`json_rpc_2::client::RpcClient`] and every client transport the crate
-//! ships (`tcp`, `udp`, `rtp`, `rudp`, `srt`, `udplite`, `dccp`, `sctp`, `http1`, `quic`,
-//! `http3`, `ws-tcp`, `ws-udp`, `ws-rtp`, `ws-rudp`, `ws-srt`, `ws-udplite`, `ws-dccp`,
-//! `ws-sctp`, `ws-quic`, `ws-http1`, `ws-http3`), exposing
+//! ships (`tcp`, `udp`, `rtp`, `rudp`, `srt`, `udplite`, `dccp`, `sctp`, `mqtt`, `coap`,
+//! `amqp`, `http1`, `quic`, `http3`, `ws-tcp`, `ws-udp`, `ws-rtp`, `ws-rudp`, `ws-srt`,
+//! `ws-udplite`, `ws-dccp`, `ws-sctp`, `ws-mqtt`, `ws-coap`, `ws-amqp`, `ws-quic`,
+//! `ws-http1`, `ws-http3`), exposing
 //! an async-free, blocking API (methods block the calling thread on a
 //! dedicated Tokio runtime) that UniFFI turns into idiomatic Kotlin and
 //! Swift bindings. The Kotlin/Swift sides wrap these blocking calls in
@@ -13,40 +14,48 @@
 
 #[cfg(any(feature = "quic", feature = "http3"))]
 use std::net::{Ipv4Addr, Ipv6Addr};
+#[cfg(any(feature = "mqtt", feature = "amqp"))]
+use std::time::Duration;
 use std::{
     net::{IpAddr, SocketAddr},
     sync::{Arc, OnceLock},
 };
 
 use bytes::Bytes;
+#[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
+use json_rpc_2::UdpLiteConfig;
+#[cfg(feature = "amqp")]
+use json_rpc_2::client::transports::amqp::AmqpClientTransport;
+#[cfg(feature = "coap")]
+use json_rpc_2::client::transports::coap::CoapClientTransport;
 #[cfg(all(feature = "dccp", any(target_os = "linux", target_os = "android")))]
 use json_rpc_2::client::transports::dccp::DccpClientTransport;
 #[cfg(feature = "http1")]
 use json_rpc_2::client::transports::http1::Http1ClientTransport;
 #[cfg(feature = "http3")]
 use json_rpc_2::client::transports::http3::Http3ClientTransport;
+#[cfg(feature = "mqtt")]
+use json_rpc_2::client::transports::mqtt::MqttClientTransport;
 #[cfg(feature = "quic")]
 use json_rpc_2::client::transports::quic::QuicClientTransport;
 #[cfg(feature = "rtp")]
 use json_rpc_2::client::transports::rtp::RtpClientTransport;
 #[cfg(feature = "rudp")]
 use json_rpc_2::client::transports::rudp::RudpClientTransport;
-#[cfg(feature = "mqtt")]
-use json_rpc_2::client::transports::mqtt::MqttClientTransport;
-#[cfg(feature = "coap")]
-use json_rpc_2::client::transports::coap::CoapClientTransport;
-#[cfg(feature = "amqp")]
-use json_rpc_2::client::transports::amqp::AmqpClientTransport;
 #[cfg(all(feature = "sctp", any(target_os = "linux", target_os = "android")))]
 use json_rpc_2::client::transports::sctp::SctpClientTransport;
 #[cfg(feature = "srt")]
 use json_rpc_2::client::transports::srt::SrtClientTransport;
 #[cfg(feature = "tcp")]
 use json_rpc_2::client::transports::tcp::TcpClientTransport;
-#[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
-use json_rpc_2::client::transports::udplite::UdpLiteClientTransport;
 #[cfg(feature = "udp")]
 use json_rpc_2::client::transports::udp::UdpClientTransport;
+#[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
+use json_rpc_2::client::transports::udplite::UdpLiteClientTransport;
+#[cfg(all(feature = "websocket", feature = "amqp"))]
+use json_rpc_2::client::transports::websocket::amqp::AmqpWebSocketClientTransport;
+#[cfg(all(feature = "websocket", feature = "coap"))]
+use json_rpc_2::client::transports::websocket::coap::CoapWebSocketClientTransport;
 #[cfg(all(
     feature = "websocket",
     feature = "dccp",
@@ -57,18 +66,14 @@ use json_rpc_2::client::transports::websocket::dccp::DccpWebSocketClientTranspor
 use json_rpc_2::client::transports::websocket::http1::Http1WebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "http3"))]
 use json_rpc_2::client::transports::websocket::http3::Http3WebSocketClientTransport;
+#[cfg(all(feature = "websocket", feature = "mqtt"))]
+use json_rpc_2::client::transports::websocket::mqtt::MqttWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "quic"))]
 use json_rpc_2::client::transports::websocket::quic::QuicWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "rtp"))]
 use json_rpc_2::client::transports::websocket::rtp::RtpWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "rudp"))]
 use json_rpc_2::client::transports::websocket::rudp::RudpWebSocketClientTransport;
-#[cfg(all(feature = "websocket", feature = "mqtt"))]
-use json_rpc_2::client::transports::websocket::mqtt::MqttWebSocketClientTransport;
-#[cfg(all(feature = "websocket", feature = "coap"))]
-use json_rpc_2::client::transports::websocket::coap::CoapWebSocketClientTransport;
-#[cfg(all(feature = "websocket", feature = "amqp"))]
-use json_rpc_2::client::transports::websocket::amqp::AmqpWebSocketClientTransport;
 #[cfg(all(
     feature = "websocket",
     feature = "sctp",
@@ -79,14 +84,14 @@ use json_rpc_2::client::transports::websocket::sctp::SctpWebSocketClientTranspor
 use json_rpc_2::client::transports::websocket::srt::SrtWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "tcp"))]
 use json_rpc_2::client::transports::websocket::tcp::TcpWebSocketClientTransport;
+#[cfg(all(feature = "websocket", feature = "udp"))]
+use json_rpc_2::client::transports::websocket::udp::UdpWebSocketClientTransport;
 #[cfg(all(
     feature = "websocket",
     feature = "udplite",
     any(target_os = "linux", target_os = "android")
 ))]
 use json_rpc_2::client::transports::websocket::udplite::UdpLiteWebSocketClientTransport;
-#[cfg(all(feature = "websocket", feature = "udp"))]
-use json_rpc_2::client::transports::websocket::udp::UdpWebSocketClientTransport;
 #[cfg(feature = "http3")]
 use json_rpc_2::server::multi::H3_ALPN;
 #[cfg(feature = "quic")]
@@ -101,8 +106,6 @@ use json_rpc_2::{
         RpcClientError, RpcClientTransport,
     },
 };
-#[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
-use json_rpc_2::UdpLiteConfig;
 #[cfg(any(feature = "quic", feature = "http3"))]
 use quinn::crypto::rustls::QuicClientConfig;
 #[cfg(any(feature = "quic", feature = "http3"))]
@@ -280,6 +283,38 @@ pub enum FfiTransportKind {
 impl FfiTransportKind {
     fn is_tls(self) -> bool {
         self.security().is_tls()
+    }
+
+    fn is_external_broker(self) -> bool {
+        #[cfg(feature = "mqtt")]
+        if matches!(self, Self::Mqtt) {
+            return true;
+        }
+        #[cfg(feature = "amqp")]
+        if matches!(self, Self::Amqp) {
+            return true;
+        }
+        #[cfg(all(feature = "websocket", feature = "mqtt"))]
+        if matches!(self, Self::WsMqtt) {
+            return true;
+        }
+        #[cfg(all(feature = "websocket", feature = "amqp"))]
+        if matches!(self, Self::WsAmqp) {
+            return true;
+        }
+        false
+    }
+
+    fn is_amqp(self) -> bool {
+        #[cfg(feature = "amqp")]
+        if matches!(self, Self::Amqp) {
+            return true;
+        }
+        #[cfg(all(feature = "websocket", feature = "amqp"))]
+        if matches!(self, Self::WsAmqp) {
+            return true;
+        }
+        false
     }
 }
 
@@ -498,18 +533,23 @@ impl TransportCapabilities for FfiTransportKind {
     }
 }
 
-/// Where and how to connect. `ca_pem` and `server_name` are only used by the
+/// Where and how to connect. For MQTT/AMQP, `broker_url` overrides `host` and
+/// `port`; credentials can be embedded in that URL, which is never formatted
+/// for debug output. `broker_route` selects the request topic/queue. `ca_pem`
+/// and `server_name` are only used by the
 /// TLS-based transports (`quic`, `http3`, `ws-quic`, `ws-http3`); the self-signed
 /// certificate the server publishes must be trusted explicitly, there is no
 /// public CA to fall back on. `srt_passphrase` is only used by `srt` and
 /// `ws-srt`. `udplite_*_coverage` is only used by `udplite` and
 /// `ws-udplite`.
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct ConnectOptions {
-    /// Host name or IP address of the server.
+    /// Host name or IP address. For MQTT/AMQP this is used only when
+    /// `broker_url` is omitted.
     pub host: String,
     /// Port of the chosen transport (see the server's `.env`, e.g.
-    /// `JSON_RPC_TCP_PORT`, `JSON_RPC_WS_HTTP1_PORT`, ...).
+    /// `JSON_RPC_TCP_PORT`). For MQTT/AMQP this is used only when
+    /// `broker_url` is omitted.
     pub port: u16,
     /// PEM-encoded certificate(s) to trust; required for `quic`, `http3`,
     /// `ws-quic`, and `ws-http3`.
@@ -523,6 +563,16 @@ pub struct ConnectOptions {
     pub udplite_send_coverage: Option<u16>,
     /// UDP-Lite inbound checksum coverage in bytes (`0` = full coverage).
     pub udplite_recv_coverage: Option<u16>,
+    /// External MQTT/AMQP broker URL. Credentials belong in the URL and are never logged.
+    pub broker_url: Option<String>,
+    /// MQTT request topic or AMQP request queue. Uses the transport default when omitted.
+    pub broker_route: Option<String>,
+    /// Optional PEM CA bundle (currently used by MQTT `mqtts://`).
+    pub broker_ca_pem: Option<String>,
+    /// Broker operation timeout in milliseconds (default: 10 seconds).
+    pub broker_operation_timeout_ms: Option<u64>,
+    /// Broker response timeout in milliseconds (default: 30 seconds).
+    pub broker_response_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -549,10 +599,18 @@ pub struct RudpConnectOptions {
     pub port: u16,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct MqttConnectOptions {
     pub host: String,
     pub port: u16,
+    /// External MQTT URL (`mqtt://` or `mqtts://`); credentials may be embedded in the URL.
+    pub broker_url: Option<String>,
+    /// Request topic; omitted means `json-rpc-2/requests`.
+    pub request_topic: Option<String>,
+    /// Optional PEM CA bundle for `mqtts://`.
+    pub ca_pem: Option<String>,
+    pub operation_timeout_ms: Option<u64>,
+    pub response_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -561,13 +619,19 @@ pub struct CoapConnectOptions {
     pub port: u16,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct AmqpConnectOptions {
     pub host: String,
     pub port: u16,
+    /// External AMQP URL (`amqp://` or `amqps://`); credentials and vhost may be in the URL.
+    pub broker_url: Option<String>,
+    /// Request queue; omitted means `json-rpc-2.requests`.
+    pub request_queue: Option<String>,
+    pub operation_timeout_ms: Option<u64>,
+    pub response_timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct SrtConnectOptions {
     pub host: String,
     pub port: u16,
@@ -1322,6 +1386,151 @@ async fn resolve(host: &str, port: u16) -> Result<SocketAddr, FfiError> {
         .ok_or_else(|| transport_error(format!("cannot resolve {host}")))
 }
 
+#[cfg(any(feature = "mqtt", feature = "amqp"))]
+fn broker_authority(host: &str, port: u16) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+#[cfg(any(feature = "mqtt", feature = "amqp"))]
+fn broker_timeout(milliseconds: Option<u64>, default: Duration) -> Result<Duration, FfiError> {
+    match milliseconds {
+        Some(0) => Err(FfiError::InvalidConfiguration {
+            details: "broker timeout must be greater than zero milliseconds".into(),
+        }),
+        Some(milliseconds) => Ok(Duration::from_millis(milliseconds)),
+        None => Ok(default),
+    }
+}
+
+fn validate_broker_options(
+    kind: FfiTransportKind,
+    options: &ConnectOptions,
+) -> Result<(), FfiError> {
+    if !kind.is_external_broker()
+        && (options.broker_url.is_some()
+            || options.broker_route.is_some()
+            || options.broker_ca_pem.is_some()
+            || options.broker_operation_timeout_ms.is_some()
+            || options.broker_response_timeout_ms.is_some())
+    {
+        return Err(FfiError::InvalidConfiguration {
+            details: "broker options can only be used with MQTT or AMQP transports".into(),
+        });
+    }
+    if kind.is_amqp() {
+        if options.broker_ca_pem.is_some() {
+            return Err(FfiError::InvalidConfiguration {
+                details: "custom AMQP CA certificates are unsupported; amqps:// uses system roots"
+                    .into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mqtt")]
+fn mqtt_config(
+    options: &ConnectOptions,
+    websocket: bool,
+) -> Result<json_rpc_2::MqttConfig, FfiError> {
+    let mut config = json_rpc_2::MqttConfig::default();
+    config.broker_url = match &options.broker_url {
+        Some(url) => url.clone(),
+        None if !options.host.trim().is_empty() && options.port != 0 => {
+            format!("mqtt://{}", broker_authority(&options.host, options.port))
+        }
+        None => {
+            return Err(FfiError::InvalidConfiguration {
+                details: "MQTT requires broker_url or a nonempty host and nonzero port".into(),
+            });
+        }
+    };
+    if !config.broker_url.starts_with("mqtt://") && !config.broker_url.starts_with("mqtts://") {
+        return Err(FfiError::InvalidConfiguration {
+            details: "MQTT broker_url must use mqtt:// or mqtts://".into(),
+        });
+    }
+    if options.broker_ca_pem.is_some() && !config.broker_url.starts_with("mqtts://") {
+        return Err(FfiError::InvalidConfiguration {
+            details: "broker_ca_pem requires an mqtts:// broker_url".into(),
+        });
+    }
+    if let Some(route) = &options.broker_route {
+        config.request_topic = route.clone();
+    } else if websocket {
+        config.request_topic = "json-rpc-2/ws/requests".into();
+    }
+    if config.request_topic.trim().is_empty()
+        || config.request_topic.chars().any(char::is_control)
+        || config.request_topic.contains(['#', '+', '\0'])
+    {
+        return Err(FfiError::InvalidConfiguration {
+            details: "MQTT request topic must be nonempty and contain no control characters".into(),
+        });
+    }
+    config.ca_certificate = options
+        .broker_ca_pem
+        .as_ref()
+        .map(|pem| pem.as_bytes().to_vec());
+    config.operation_timeout =
+        broker_timeout(options.broker_operation_timeout_ms, Duration::from_secs(10))?;
+    config.response_timeout =
+        broker_timeout(options.broker_response_timeout_ms, Duration::from_secs(30))?;
+    Ok(config)
+}
+
+#[cfg(feature = "amqp")]
+fn amqp_config(
+    options: &ConnectOptions,
+    websocket: bool,
+) -> Result<json_rpc_2::AmqpConfig, FfiError> {
+    if options.broker_ca_pem.is_some() {
+        return Err(FfiError::InvalidConfiguration {
+            details: "custom AMQP CA certificates are unsupported; amqps:// uses system roots"
+                .into(),
+        });
+    }
+    let mut config = json_rpc_2::AmqpConfig::default();
+    config.broker_url = match &options.broker_url {
+        Some(url) => url.clone(),
+        None if !options.host.trim().is_empty() && options.port != 0 => {
+            format!("amqp://{}", broker_authority(&options.host, options.port))
+        }
+        None => {
+            return Err(FfiError::InvalidConfiguration {
+                details: "AMQP requires broker_url or a nonempty host and nonzero port".into(),
+            });
+        }
+    };
+    if !config.broker_url.starts_with("amqp://") && !config.broker_url.starts_with("amqps://") {
+        return Err(FfiError::InvalidConfiguration {
+            details: "AMQP broker_url must use amqp:// or amqps://".into(),
+        });
+    }
+    if let Some(route) = &options.broker_route {
+        config.request_queue = route.clone();
+    } else if websocket {
+        config.request_queue = "json-rpc-2.ws.requests".into();
+    }
+    if config.request_queue.trim().is_empty()
+        || config.request_queue.chars().any(char::is_control)
+        || config.request_queue.starts_with("amq.")
+    {
+        return Err(FfiError::InvalidConfiguration {
+            details: "AMQP request queue must be nonempty and contain no control characters".into(),
+        });
+    }
+    config.operation_timeout =
+        broker_timeout(options.broker_operation_timeout_ms, Duration::from_secs(10))?;
+    config.response_timeout =
+        broker_timeout(options.broker_response_timeout_ms, Duration::from_secs(30))?;
+    Ok(config)
+}
+
 /// The unspecified address of `ip`'s family: a client socket must be of the
 /// same address family as the server, the OS then picks the interface.
 #[cfg(any(feature = "quic", feature = "http3"))]
@@ -1354,6 +1563,11 @@ impl TcpConnectOptions {
             srt_passphrase: None,
             udplite_send_coverage: None,
             udplite_recv_coverage: None,
+            broker_url: None,
+            broker_route: None,
+            broker_ca_pem: None,
+            broker_operation_timeout_ms: None,
+            broker_response_timeout_ms: None,
         }
     }
 }
@@ -1369,6 +1583,11 @@ impl UdpConnectOptions {
             srt_passphrase: None,
             udplite_send_coverage: None,
             udplite_recv_coverage: None,
+            broker_url: None,
+            broker_route: None,
+            broker_ca_pem: None,
+            broker_operation_timeout_ms: None,
+            broker_response_timeout_ms: None,
         }
     }
 }
@@ -1384,6 +1603,11 @@ impl RtpConnectOptions {
             srt_passphrase: None,
             udplite_send_coverage: None,
             udplite_recv_coverage: None,
+            broker_url: None,
+            broker_route: None,
+            broker_ca_pem: None,
+            broker_operation_timeout_ms: None,
+            broker_response_timeout_ms: None,
         }
     }
 }
@@ -1399,6 +1623,11 @@ impl RudpConnectOptions {
             srt_passphrase: None,
             udplite_send_coverage: None,
             udplite_recv_coverage: None,
+            broker_url: None,
+            broker_route: None,
+            broker_ca_pem: None,
+            broker_operation_timeout_ms: None,
+            broker_response_timeout_ms: None,
         }
     }
 }
@@ -1414,6 +1643,11 @@ impl MqttConnectOptions {
             srt_passphrase: None,
             udplite_send_coverage: None,
             udplite_recv_coverage: None,
+            broker_url: self.broker_url,
+            broker_route: self.request_topic,
+            broker_ca_pem: self.ca_pem,
+            broker_operation_timeout_ms: self.operation_timeout_ms,
+            broker_response_timeout_ms: self.response_timeout_ms,
         }
     }
 }
@@ -1429,6 +1663,11 @@ impl CoapConnectOptions {
             srt_passphrase: None,
             udplite_send_coverage: None,
             udplite_recv_coverage: None,
+            broker_url: None,
+            broker_route: None,
+            broker_ca_pem: None,
+            broker_operation_timeout_ms: None,
+            broker_response_timeout_ms: None,
         }
     }
 }
@@ -1444,6 +1683,11 @@ impl AmqpConnectOptions {
             srt_passphrase: None,
             udplite_send_coverage: None,
             udplite_recv_coverage: None,
+            broker_url: self.broker_url,
+            broker_route: self.request_queue,
+            broker_ca_pem: None,
+            broker_operation_timeout_ms: self.operation_timeout_ms,
+            broker_response_timeout_ms: self.response_timeout_ms,
         }
     }
 }
@@ -1459,6 +1703,11 @@ impl SrtConnectOptions {
             srt_passphrase: Some(self.passphrase),
             udplite_send_coverage: None,
             udplite_recv_coverage: None,
+            broker_url: None,
+            broker_route: None,
+            broker_ca_pem: None,
+            broker_operation_timeout_ms: None,
+            broker_response_timeout_ms: None,
         }
     }
 }
@@ -1474,6 +1723,11 @@ impl UdpLiteConnectOptions {
             srt_passphrase: None,
             udplite_send_coverage: self.send_coverage,
             udplite_recv_coverage: self.recv_coverage,
+            broker_url: None,
+            broker_route: None,
+            broker_ca_pem: None,
+            broker_operation_timeout_ms: None,
+            broker_response_timeout_ms: None,
         }
     }
 }
@@ -1489,6 +1743,11 @@ impl DccpConnectOptions {
             srt_passphrase: None,
             udplite_send_coverage: None,
             udplite_recv_coverage: None,
+            broker_url: None,
+            broker_route: None,
+            broker_ca_pem: None,
+            broker_operation_timeout_ms: None,
+            broker_response_timeout_ms: None,
         }
     }
 }
@@ -1504,6 +1763,11 @@ impl SctpConnectOptions {
             srt_passphrase: None,
             udplite_send_coverage: None,
             udplite_recv_coverage: None,
+            broker_url: None,
+            broker_route: None,
+            broker_ca_pem: None,
+            broker_operation_timeout_ms: None,
+            broker_response_timeout_ms: None,
         }
     }
 }
@@ -1524,6 +1788,11 @@ impl QuicConnectOptions {
             srt_passphrase: None,
             udplite_send_coverage: None,
             udplite_recv_coverage: None,
+            broker_url: None,
+            broker_route: None,
+            broker_ca_pem: None,
+            broker_operation_timeout_ms: None,
+            broker_response_timeout_ms: None,
         }
     }
 }
@@ -1572,7 +1841,12 @@ impl RpcClient {
     #[uniffi::constructor]
     pub fn connect(kind: FfiTransportKind, options: ConnectOptions) -> Result<Arc<Self>, FfiError> {
         runtime().block_on(async move {
-            let to = resolve(&options.host, options.port).await?;
+            validate_broker_options(kind, &options)?;
+            let to = if kind.is_external_broker() {
+                SocketAddr::from(([127, 0, 0, 1], 0))
+            } else {
+                resolve(&options.host, options.port).await?
+            };
             #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
             let udplite = UdpLiteConfig {
                 send_checksum_coverage: options.udplite_send_coverage.unwrap_or(8),
@@ -1594,7 +1868,10 @@ impl RpcClient {
                 feature = "websocket",
                 any(target_os = "linux", target_os = "android")
             ))]
-            if matches!(kind, FfiTransportKind::UdpLite | FfiTransportKind::WsUdpLite) {
+            if matches!(
+                kind,
+                FfiTransportKind::UdpLite | FfiTransportKind::WsUdpLite
+            ) {
                 udplite.validate().map_err(transport_error)?;
             }
             #[cfg(all(
@@ -1613,6 +1890,17 @@ impl RpcClient {
                     "srt_passphrase is required for the {kind:?} transport"
                 )));
             }
+            #[cfg(all(feature = "srt", feature = "websocket"))]
+            if matches!(kind, FfiTransportKind::Srt | FfiTransportKind::WsSrt)
+                && !options
+                    .srt_passphrase
+                    .as_deref()
+                    .is_some_and(|passphrase| (10..=79).contains(&passphrase.len()))
+            {
+                return Err(FfiError::InvalidConfiguration {
+                    details: "SRT passphrase must contain 10..=79 bytes".into(),
+                });
+            }
             #[cfg(all(feature = "srt", not(feature = "websocket")))]
             if matches!(kind, FfiTransportKind::Srt)
                 && options.srt_passphrase.as_deref().is_none_or(str::is_empty)
@@ -1620,6 +1908,17 @@ impl RpcClient {
                 return Err(transport_error(format!(
                     "srt_passphrase is required for the {kind:?} transport"
                 )));
+            }
+            #[cfg(all(feature = "srt", not(feature = "websocket")))]
+            if matches!(kind, FfiTransportKind::Srt)
+                && !options
+                    .srt_passphrase
+                    .as_deref()
+                    .is_some_and(|passphrase| (10..=79).contains(&passphrase.len()))
+            {
+                return Err(FfiError::InvalidConfiguration {
+                    details: "SRT passphrase must contain 10..=79 bytes".into(),
+                });
             }
 
             let transport = match kind {
@@ -1649,7 +1948,7 @@ impl RpcClient {
                 ),
                 #[cfg(feature = "mqtt")]
                 FfiTransportKind::Mqtt => AnyTransport::Mqtt(
-                    MqttClientTransport::connect(to)
+                    MqttClientTransport::connect_with_config(mqtt_config(&options, false)?)
                         .await
                         .map_err(transport_error)?,
                 ),
@@ -1661,7 +1960,7 @@ impl RpcClient {
                 ),
                 #[cfg(feature = "amqp")]
                 FfiTransportKind::Amqp => AnyTransport::Amqp(
-                    AmqpClientTransport::connect(to)
+                    AmqpClientTransport::connect_with_config(amqp_config(&options, false)?)
                         .await
                         .map_err(transport_error)?,
                 ),
@@ -1728,7 +2027,7 @@ impl RpcClient {
                 ),
                 #[cfg(all(feature = "websocket", feature = "mqtt"))]
                 FfiTransportKind::WsMqtt => AnyTransport::WsMqtt(
-                    MqttWebSocketClientTransport::connect(to)
+                    MqttWebSocketClientTransport::connect_with_config(mqtt_config(&options, true)?)
                         .await
                         .map_err(transport_error)?,
                 ),
@@ -1740,7 +2039,7 @@ impl RpcClient {
                 ),
                 #[cfg(all(feature = "websocket", feature = "amqp"))]
                 FfiTransportKind::WsAmqp => AnyTransport::WsAmqp(
-                    AmqpWebSocketClientTransport::connect(to)
+                    AmqpWebSocketClientTransport::connect_with_config(amqp_config(&options, true)?)
                         .await
                         .map_err(transport_error)?,
                 ),
@@ -2117,4 +2416,164 @@ pub fn connect_ws_http3(options: QuicConnectOptions) -> Result<Arc<RpcClient>, F
         );
         Ok(wrap_client(transport))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options() -> ConnectOptions {
+        ConnectOptions {
+            host: "localhost".into(),
+            port: 1883,
+            ca_pem: None,
+            server_name: None,
+            srt_passphrase: None,
+            udplite_send_coverage: None,
+            udplite_recv_coverage: None,
+            broker_url: None,
+            broker_route: None,
+            broker_ca_pem: None,
+            broker_operation_timeout_ms: None,
+            broker_response_timeout_ms: None,
+        }
+    }
+
+    #[cfg(feature = "tcp")]
+    #[test]
+    fn broker_options_are_not_silently_ignored_for_socket_transports() {
+        let mut options = options();
+        options.broker_url = Some("mqtt://broker".into());
+        assert!(matches!(
+            validate_broker_options(FfiTransportKind::Tcp, &options),
+            Err(FfiError::InvalidConfiguration { .. })
+        ));
+    }
+
+    #[cfg(feature = "mqtt")]
+    #[test]
+    fn mqtt_configuration_uses_external_url_route_timeouts_and_ca() {
+        let mut options = options();
+        options.broker_url = Some("mqtts://user:password@broker.example:8883".into());
+        options.host.clear();
+        options.port = 0;
+        options.broker_route = Some("service/rpc".into());
+        options.broker_ca_pem = Some("PEM CA".into());
+        options.broker_operation_timeout_ms = Some(1200);
+        options.broker_response_timeout_ms = Some(3400);
+
+        let config = mqtt_config(&options, false).expect("valid MQTT configuration");
+        assert_eq!(
+            config.broker_url,
+            "mqtts://user:password@broker.example:8883"
+        );
+        assert_eq!(config.request_topic, "service/rpc");
+        assert_eq!(config.ca_certificate.as_deref(), Some(b"PEM CA".as_slice()));
+        assert_eq!(config.operation_timeout, Duration::from_millis(1200));
+        assert_eq!(config.response_timeout, Duration::from_millis(3400));
+    }
+
+    #[cfg(feature = "mqtt")]
+    #[test]
+    fn mqtt_configuration_has_websocket_route_and_rejects_bad_urls() {
+        let mut options = options();
+        options.broker_url = Some("http://broker".into());
+        let error = match mqtt_config(&options, true) {
+            Err(error) => error,
+            Ok(_) => panic!("unsupported URL scheme was accepted"),
+        };
+        assert!(matches!(error, FfiError::InvalidConfiguration { .. }));
+
+        options.broker_url = None;
+        let config = mqtt_config(&options, true).expect("defaults are valid");
+        assert_eq!(config.request_topic, "json-rpc-2/ws/requests");
+        assert_eq!(config.broker_url, "mqtt://localhost:1883");
+
+        options.broker_ca_pem = Some("PEM CA".into());
+        assert!(matches!(
+            mqtt_config(&options, false),
+            Err(FfiError::InvalidConfiguration { .. })
+        ));
+
+        options.broker_ca_pem = None;
+        options.broker_url = None;
+        options.broker_route = Some("rpc/+".into());
+        assert!(matches!(
+            mqtt_config(&options, false),
+            Err(FfiError::InvalidConfiguration { .. })
+        ));
+    }
+
+    #[cfg(feature = "mqtt")]
+    #[test]
+    fn mqtt_connect_dispatch_validates_broker_config_without_resolving_legacy_host() {
+        let mut options = options();
+        options.host = "unresolvable.invalid".into();
+        options.broker_url = Some("http://broker".into());
+        let error = match RpcClient::connect(FfiTransportKind::Mqtt, options) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid MQTT URL was accepted"),
+        };
+        assert!(matches!(error, FfiError::InvalidConfiguration { .. }));
+    }
+
+    #[cfg(feature = "amqp")]
+    #[test]
+    fn amqp_configuration_uses_url_queue_and_websocket_default() {
+        let mut options = options();
+        options.broker_url = Some("amqps://user:password@broker.example/vhost".into());
+        options.host.clear();
+        options.port = 0;
+        options.broker_route = Some("service.queue".into());
+        options.broker_operation_timeout_ms = Some(1500);
+        let config = amqp_config(&options, false).expect("valid AMQP configuration");
+        assert_eq!(
+            config.broker_url,
+            "amqps://user:password@broker.example/vhost"
+        );
+        assert_eq!(config.request_queue, "service.queue");
+        assert_eq!(config.operation_timeout, Duration::from_millis(1500));
+
+        options.broker_url = None;
+        options.host = "localhost".into();
+        options.port = 5672;
+        options.broker_route = None;
+        let config = amqp_config(&options, true).expect("default AMQP config");
+        assert_eq!(config.request_queue, "json-rpc-2.ws.requests");
+        options.broker_route = Some("amq.reserved".into());
+        assert!(matches!(
+            amqp_config(&options, false),
+            Err(FfiError::InvalidConfiguration { .. })
+        ));
+    }
+
+    #[cfg(feature = "amqp")]
+    #[test]
+    fn amqp_configuration_rejects_zero_timeout() {
+        let mut options = options();
+        options.broker_operation_timeout_ms = Some(0);
+        assert!(matches!(
+            amqp_config(&options, false),
+            Err(FfiError::InvalidConfiguration { .. })
+        ));
+
+        options.broker_operation_timeout_ms = None;
+        options.broker_ca_pem = Some("PEM CA".into());
+        assert!(matches!(
+            amqp_config(&options, false),
+            Err(FfiError::InvalidConfiguration { .. })
+        ));
+    }
+
+    #[cfg(feature = "srt")]
+    #[test]
+    fn srt_connect_dispatch_rejects_native_invalid_passphrase_length() {
+        let mut options = options();
+        options.srt_passphrase = Some("short".into());
+        let error = match RpcClient::connect(FfiTransportKind::Srt, options) {
+            Err(error) => error,
+            Ok(_) => panic!("short SRT passphrase was accepted"),
+        };
+        assert!(matches!(error, FfiError::InvalidConfiguration { .. }));
+    }
 }

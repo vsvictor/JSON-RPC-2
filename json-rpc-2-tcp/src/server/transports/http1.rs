@@ -11,11 +11,12 @@ use axum::{
 use std::{io, sync::Arc, time::Instant};
 use tokio::net::TcpListener;
 
-use json_rpc_2_core::{
+use json_rpc_2_core::MAX_MESSAGE_BYTES;
+use json_rpc_2_transport::JsonRpcProtocol;
+use json_rpc_2_transport::{
     CONTROL_PATH, CancellationToken, Transport, TransportFuture, TransportRuntime, log_control,
     log_json_rpc,
 };
-use json_rpc_2_core::{JsonRpcProtocol, MAX_MESSAGE_BYTES};
 
 /// HTTP/1.1 transport with JSON-RPC requests at `POST /`.
 pub struct Http1Transport {

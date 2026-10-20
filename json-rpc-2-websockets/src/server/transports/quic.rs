@@ -6,12 +6,13 @@ use super::{
     CancellationToken, WebSocketMessage, WebSocketProtocol, WebSocketTransport,
     WebSocketTransportFuture,
 };
-use json_rpc_2_core::{
-    MAX_MESSAGE_BYTES, QUIC_NO_ERROR, TransportRuntime, log_control, log_json_rpc,
-    log_transport_error, multiplex::StreamMultiplexor,
-};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
+use json_rpc_2_core::MAX_MESSAGE_BYTES;
+use json_rpc_2_transport::multiplex::StreamMultiplexor;
+use json_rpc_2_transport::{
+    QUIC_NO_ERROR, TransportRuntime, log_control, log_json_rpc, log_transport_error,
+};
 use quinn::{Connection, Endpoint};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio_tungstenite::{

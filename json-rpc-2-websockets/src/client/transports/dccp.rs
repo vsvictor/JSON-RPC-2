@@ -2,8 +2,8 @@
 
 use std::net::SocketAddr;
 
-use json_rpc_2_core::{RpcClientTransport, TransportError};
 use json_rpc_2_datagram::client::transports::dccp::DccpClientTransport;
+use json_rpc_2_transport::{RpcClientTransport, TransportError};
 
 use super::DatagramWebSocketClientTransport;
 
@@ -25,7 +25,10 @@ impl DccpWebSocketClientTransport {
 }
 
 impl RpcClientTransport for DccpWebSocketClientTransport {
-    fn send<'a>(&'a self, message: bytes::Bytes) -> json_rpc_2_core::ClientTransportFuture<'a> {
+    fn send<'a>(
+        &'a self,
+        message: bytes::Bytes,
+    ) -> json_rpc_2_transport::ClientTransportFuture<'a> {
         self.inner.send(message)
     }
 
@@ -33,7 +36,7 @@ impl RpcClientTransport for DccpWebSocketClientTransport {
         &'a self,
         message: bytes::Bytes,
         expects_response: bool,
-    ) -> json_rpc_2_core::ClientTransportFuture<'a> {
+    ) -> json_rpc_2_transport::ClientTransportFuture<'a> {
         self.inner.send_with_expectation(message, expects_response)
     }
 
@@ -45,15 +48,15 @@ impl RpcClientTransport for DccpWebSocketClientTransport {
         self.inner.peer()
     }
 
-    fn transport_ping<'a>(&'a self) -> json_rpc_2_core::ClientPingFuture<'a> {
+    fn transport_ping<'a>(&'a self) -> json_rpc_2_transport::ClientPingFuture<'a> {
         self.inner.transport_ping()
     }
 
-    fn reconnect<'a>(&'a self) -> json_rpc_2_core::ClientRecoverFuture<'a> {
+    fn reconnect<'a>(&'a self) -> json_rpc_2_transport::ClientRecoverFuture<'a> {
         self.inner.reconnect()
     }
 
-    fn close<'a>(&'a self) -> json_rpc_2_core::ClientCloseFuture<'a> {
+    fn close<'a>(&'a self) -> json_rpc_2_transport::ClientCloseFuture<'a> {
         self.inner.close()
     }
 }

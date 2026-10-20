@@ -1,11 +1,20 @@
 //! Compatibility facade re-exporting the split core/client/server crates.
 
+pub use json_rpc_2_client::ClientLimits;
 pub use json_rpc_2_core::*;
-pub use json_rpc_2_server::{
-    JsonRpcProtocol, MultiTransportServer, RegistrationError, RpcServer, RunningServer,
-    ServerDispatcher, ServerDispatcherBuilder, ServerMetricsSnapshot, ServerShutdownPolicy,
-    TransportKind, TransportLimits,
+#[cfg(feature = "amqp")]
+pub use json_rpc_2_iot::AmqpConfig;
+#[cfg(feature = "mqtt")]
+pub use json_rpc_2_iot::MqttConfig;
+pub use json_rpc_2_runtime::{
+    HasBind, HasTransport, HealthHandle, HealthSnapshot, MissingBind, MultiTransportServer,
+    MultiTransportServerBuilder, NoTransport, RunningServer, TransportKind,
 };
+pub use json_rpc_2_server::{
+    JsonRpcProtocol, RegistrationError, RpcServer, ServerDispatcher, ServerDispatcherBuilder,
+    ServerLimits, ServerMetricsSnapshot, TransportLimits,
+};
+pub use json_rpc_2_transport::*;
 
 pub mod client {
     pub use json_rpc_2_client::*;
@@ -21,16 +30,16 @@ pub mod client {
         pub use json_rpc_2_datagram::client::transports::sctp;
         #[cfg(feature = "srt")]
         pub use json_rpc_2_datagram::client::transports::srt;
-        #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
-        pub use json_rpc_2_datagram::client::transports::udplite;
         #[cfg(feature = "udp")]
         pub use json_rpc_2_datagram::client::transports::udp;
-        #[cfg(feature = "mqtt")]
-        pub use json_rpc_2_iot::client::transports::mqtt;
-        #[cfg(feature = "coap")]
-        pub use json_rpc_2_iot::client::transports::coap;
+        #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
+        pub use json_rpc_2_datagram::client::transports::udplite;
         #[cfg(feature = "amqp")]
         pub use json_rpc_2_iot::client::transports::amqp;
+        #[cfg(feature = "coap")]
+        pub use json_rpc_2_iot::client::transports::coap;
+        #[cfg(feature = "mqtt")]
+        pub use json_rpc_2_iot::client::transports::mqtt;
         #[cfg(feature = "http3")]
         pub use json_rpc_2_quic::client::transports::http3;
         #[cfg(feature = "quic")]
@@ -48,22 +57,9 @@ pub mod client {
 }
 
 pub mod transports {
-    #[cfg(any(
-        feature = "tcp",
-        feature = "http1",
-        all(feature = "websocket", feature = "tcp"),
-        all(feature = "websocket", feature = "http1")
-    ))]
-    pub use json_rpc_2_server::apply_tcp_listener_tuning;
-    #[cfg(any(feature = "tcp", all(feature = "websocket", feature = "tcp")))]
-    pub use json_rpc_2_server::apply_tcp_stream_tuning;
-    pub use json_rpc_2_server::{
-        CONTROL_PATH, CONTROL_PING, CONTROL_PONG, CancellationToken, H3_NO_ERROR, QUIC_NO_ERROR,
-        RunningTransport, RuntimeMetrics, RuntimeMetricsSnapshot, Transport, TransportFuture,
-        TransportRuntime, log_control, log_json_rpc, log_transport_error,
-    };
+    pub use json_rpc_2_transport::*;
     pub mod multiplex {
-        pub use json_rpc_2_server::multiplex::{StreamMultiplexor, StreamMultiplexorHandle};
+        pub use json_rpc_2_transport::multiplex::{StreamMultiplexor, StreamMultiplexorHandle};
     }
 
     #[cfg(feature = "dccp")]
@@ -76,16 +72,16 @@ pub mod transports {
     pub use json_rpc_2_datagram::server::transports::sctp;
     #[cfg(feature = "srt")]
     pub use json_rpc_2_datagram::server::transports::srt;
-    #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
-    pub use json_rpc_2_datagram::server::transports::udplite;
     #[cfg(feature = "udp")]
     pub use json_rpc_2_datagram::server::transports::udp;
-    #[cfg(feature = "mqtt")]
-    pub use json_rpc_2_iot::server::transports::mqtt;
-    #[cfg(feature = "coap")]
-    pub use json_rpc_2_iot::server::transports::coap;
+    #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
+    pub use json_rpc_2_datagram::server::transports::udplite;
     #[cfg(feature = "amqp")]
     pub use json_rpc_2_iot::server::transports::amqp;
+    #[cfg(feature = "coap")]
+    pub use json_rpc_2_iot::server::transports::coap;
+    #[cfg(feature = "mqtt")]
+    pub use json_rpc_2_iot::server::transports::mqtt;
     #[cfg(feature = "http3")]
     pub use json_rpc_2_quic::server::transports::http3;
     #[cfg(feature = "quic")]
@@ -102,15 +98,17 @@ pub mod transports {
 }
 
 pub mod server {
+    pub use json_rpc_2_runtime::{
+        HasBind, HasTransport, HealthHandle, HealthSnapshot, MissingBind, MultiTransportServer,
+        MultiTransportServerBuilder, NoTransport, RunningServer, TransportKind,
+    };
     pub use json_rpc_2_server::{
-        HasBind, HasTransport, HealthHandle, HealthSnapshot, JsonRpcProtocol, MissingBind,
-        MultiTransportServer, MultiTransportServerBuilder, NoTransport, RegistrationError,
-        RpcServer, RunningServer, ServerDispatcher, ServerDispatcherBuilder, ServerMetricsSnapshot,
-        ServerShutdownPolicy, TransportKind, TransportLimits,
+        JsonRpcProtocol, RegistrationError, RpcServer, ServerDispatcher, ServerDispatcherBuilder,
+        ServerLimits, ServerMetricsSnapshot, TransportLimits,
     };
 
     pub mod multi {
-        pub use json_rpc_2_server::multi::*;
+        pub use json_rpc_2_runtime::multi::*;
     }
 
     pub mod transports {

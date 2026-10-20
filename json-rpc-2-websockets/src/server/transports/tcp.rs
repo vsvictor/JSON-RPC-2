@@ -14,9 +14,10 @@ use super::{
     CancellationToken, WebSocketMessage, WebSocketProtocol, WebSocketTransport,
     WebSocketTransportFuture,
 };
-use json_rpc_2_core::{
-    MAX_MESSAGE_BYTES, TransportRuntime, apply_tcp_stream_tuning, log_control, log_json_rpc,
-    log_transport_error, multiplex::StreamMultiplexor,
+use json_rpc_2_core::MAX_MESSAGE_BYTES;
+use json_rpc_2_transport::multiplex::StreamMultiplexor;
+use json_rpc_2_transport::{
+    TransportRuntime, apply_tcp_stream_tuning, log_control, log_json_rpc, log_transport_error,
 };
 
 const MAX_WS_MESSAGE_BYTES: usize = MAX_MESSAGE_BYTES;

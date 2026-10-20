@@ -4,7 +4,8 @@ use bytes::BytesMut;
 use libfuzzer_sys::fuzz_target;
 use tokio_util::codec::{Decoder, LinesCodec};
 
-use json_rpc_2_server::{CONTROL_PING, JsonRpcProtocol, RpcServer};
+use json_rpc_2_server::{JsonRpcProtocol, RpcServer};
+use json_rpc_2_transport::CONTROL_PING;
 use serde_json::json;
 
 fn server() -> RpcServer {

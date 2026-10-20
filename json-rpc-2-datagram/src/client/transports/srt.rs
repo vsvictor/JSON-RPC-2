@@ -1,52 +1,63 @@
-//! Secure reliable JSON-RPC over SRT-style UDP datagrams.
+//! JSON-RPC over standard, encrypted libsrt caller connections.
+
+#[path = "../../srt_native.rs"]
+pub(crate) mod native;
 
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::SocketAddr,
     sync::{
-        Arc,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use bytes::Bytes;
-use tokio::{
-    net::UdpSocket,
-    sync::{Mutex, mpsc},
-    task::JoinHandle,
-    time::Instant,
+use json_rpc_2_core::{SrtConfig, UdpReliabilityConfig};
+use json_rpc_2_transport::{
+    ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
+    RpcClientTransport, TransportError, closed, expects_response,
 };
+use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use json_rpc_2_core::{closed, transport_error};
-use json_rpc_2_core::{
-    ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
-    RpcClientTransport, TransportError,
-};
-use json_rpc_2_core::{SrtConfig, SrtCrypto, SrtPacket, SrtPacketKind, UdpReliabilityConfig};
+use native::{Frame, Kind, NativeSocket};
 
-#[derive(Clone, Debug)]
-enum PendingEvent {
-    Ack,
-    Response(Bytes),
-    Pong,
+type Pending = Arc<StdMutex<HashMap<u64, oneshot::Sender<Result<Frame, String>>>>>;
+
+struct Connection {
+    socket: Arc<NativeSocket>,
+    pending: Pending,
+    stop: CancellationToken,
 }
 
-struct ReceiverState {
-    socket: Arc<UdpSocket>,
-    shutdown: CancellationToken,
-    task: JoinHandle<()>,
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        self.socket.close();
+        self.pending.lock().unwrap().clear();
+    }
 }
 
-/// SRT client transport with encrypted payloads and application-level ARQ.
+struct Registration {
+    pending: Pending,
+    id: u64,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// Multiplexed caller. Reliability and encryption are provided exclusively by libsrt.
 pub struct SrtClientTransport {
     address: SocketAddr,
-    reliability: UdpReliabilityConfig,
-    crypto: Arc<SrtCrypto>,
-    next_sequence: AtomicU32,
-    next_packet_id: AtomicU64,
-    pending: Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<PendingEvent>>>>,
-    state: Mutex<Option<ReceiverState>>,
+    config: SrtConfig,
+    timeout: Duration,
+    next_id: AtomicU64,
+    state: Mutex<Option<Arc<Connection>>>,
 }
 
 impl SrtClientTransport {
@@ -56,7 +67,12 @@ impl SrtClientTransport {
     ) -> Result<Self, TransportError> {
         Self::connect_with_config(
             address,
-            UdpReliabilityConfig::default(),
+            // Live SRT's default 120ms playout latency applies in each
+            // direction. UDP's 300ms ARQ budget is not a useful RPC default.
+            UdpReliabilityConfig {
+                retransmit_interval: Duration::from_secs(1),
+                ..Default::default()
+            },
             SrtConfig {
                 passphrase: passphrase.into(),
             },
@@ -64,340 +80,201 @@ impl SrtClientTransport {
         .await
     }
 
+    /// The legacy reliability configuration supplies the operation timeout only.
+    /// libsrt handles retransmissions; application requests are never replayed.
     pub async fn connect_with_config(
         address: SocketAddr,
         reliability: UdpReliabilityConfig,
-        srt_config: SrtConfig,
+        config: SrtConfig,
     ) -> Result<Self, TransportError> {
-        validate_config(&reliability)?;
-        srt_config.validate().map_err(TransportError::new)?;
-        let crypto = Arc::new(SrtCrypto::new(&srt_config).map_err(TransportError::new)?);
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        let state = Some(
-            Self::open(
-                address,
-                reliability.clone(),
-                Arc::clone(&pending),
-                Arc::clone(&crypto),
-            )
-            .await?,
-        );
+        let timeout = reliability
+            .retransmit_interval
+            .checked_mul(reliability.max_retransmits.saturating_add(1))
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| {
+                TransportError::new("SRT operation timeout must be positive and finite")
+            })?;
+        let connection = Self::open(address, &config).await?;
         Ok(Self {
             address,
-            reliability,
-            crypto,
-            next_sequence: AtomicU32::new(1),
-            next_packet_id: AtomicU64::new(1),
-            pending,
-            state: Mutex::new(state),
+            config,
+            timeout,
+            next_id: AtomicU64::new(1),
+            state: Mutex::new(Some(connection)),
         })
     }
 
     async fn open(
         address: SocketAddr,
-        reliability: UdpReliabilityConfig,
-        pending: Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<PendingEvent>>>>,
-        crypto: Arc<SrtCrypto>,
-    ) -> Result<ReceiverState, TransportError> {
-        let socket = Arc::new(open_socket(address).await?);
-        let shutdown = CancellationToken::new();
-        let task = tokio::spawn(run_receiver(
-            Arc::clone(&socket),
-            pending,
-            shutdown.clone(),
-            reliability,
-            crypto,
-        ));
-        Ok(ReceiverState {
-            socket,
-            shutdown,
-            task,
-        })
-    }
-
-    async fn current_socket(&self) -> Result<Arc<UdpSocket>, TransportError> {
-        self.state
-            .lock()
-            .await
-            .as_ref()
-            .map(|state| Arc::clone(&state.socket))
-            .ok_or_else(closed)
-    }
-
-    fn next_sequence(&self) -> u32 {
-        self.next_sequence.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn next_packet_id(&self) -> u64 {
-        self.next_packet_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    async fn register_pending(&self, packet_id: u64) -> mpsc::UnboundedReceiver<PendingEvent> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.pending.lock().await.insert(packet_id, tx);
-        rx
-    }
-
-    async fn clear_pending(&self, packet_id: u64) {
-        self.pending.lock().await.remove(&packet_id);
-    }
-
-    async fn fail_all_pending(&self) {
-        self.pending.lock().await.clear();
-    }
-
-    async fn send_reliably(
-        &self,
-        packet: SrtPacket,
-        terminal: SrtPacketKind,
-        cancel: Option<CancellationToken>,
-    ) -> Result<Option<Bytes>, TransportError> {
-        let packet_id = packet.packet_id;
-        let encoded = self
-            .crypto
-            .encode_packet(&packet)
-            .map_err(TransportError::new)?;
-        if encoded.len() > self.reliability.max_packet_size {
-            return Err(TransportError::new(format!(
-                "SRT packet exceeds configured packet limit ({} > {})",
-                encoded.len(),
-                self.reliability.max_packet_size
-            )));
-        }
-        let mut pending = self.register_pending(packet_id).await;
-        let result = self
-            .send_reliably_inner(encoded, terminal, cancel.as_ref(), &mut pending)
-            .await;
-        self.clear_pending(packet_id).await;
-        result
-    }
-
-    async fn send_reliably_inner(
-        &self,
-        encoded: Vec<u8>,
-        terminal: SrtPacketKind,
-        cancel: Option<&CancellationToken>,
-        pending: &mut mpsc::UnboundedReceiver<PendingEvent>,
-    ) -> Result<Option<Bytes>, TransportError> {
-        let socket = self.current_socket().await?;
-        let interval = self.reliability.retransmit_interval;
-        for attempt in 0..=self.reliability.max_retransmits {
-            socket.send(&encoded).await.map_err(transport_error)?;
-            let deadline = Instant::now() + interval;
-            loop {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                let event = match cancel {
-                    Some(cancel) => {
-                        tokio::select! {
-                            _ = cancel.cancelled() => return Err(TransportError::new("request cancelled")),
-                            event = tokio::time::timeout(remaining, pending.recv()) => event,
+        config: &SrtConfig,
+    ) -> Result<Arc<Connection>, TransportError> {
+        let socket = Arc::new(
+            NativeSocket::connect(address, config)
+                .await
+                .map_err(native::transport_error)?,
+        );
+        let pending: Pending = Arc::new(StdMutex::new(HashMap::new()));
+        let stop = CancellationToken::new();
+        let connection = Arc::new(Connection {
+            socket: socket.clone(),
+            pending: pending.clone(),
+            stop: stop.clone(),
+        });
+        tokio::spawn(async move {
+            let error = loop {
+                let result = tokio::select! {
+                    _ = stop.cancelled() => break "SRT connection closed".to_owned(),
+                    result = socket.recv() => result,
+                };
+                match result {
+                    Ok(frame) if frame.kind == Kind::Drain => {
+                        // Ordered SRT messages ensure all prior responses have
+                        // reached their pending callers before this barrier ACK.
+                        if let Err(error) = socket
+                            .send(Frame {
+                                kind: Kind::Drained,
+                                id: frame.id,
+                                payload: Bytes::new(),
+                            })
+                            .await
+                        {
+                            break error.to_string();
                         }
                     }
-                    None => tokio::time::timeout(remaining, pending.recv()).await,
-                };
-                match event {
-                    Ok(Some(PendingEvent::Ack)) if terminal == SrtPacketKind::Ack => {
-                        return Ok(None);
+                    Ok(frame) if matches!(frame.kind, Kind::Response | Kind::Ack | Kind::Pong) => {
+                        if let Some(sender) = pending.lock().unwrap().remove(&frame.id) {
+                            let _ = sender.send(Ok(frame));
+                        }
                     }
-                    Ok(Some(PendingEvent::Response(response)))
-                        if terminal == SrtPacketKind::Response =>
-                    {
-                        return Ok(Some(response));
-                    }
-                    Ok(Some(PendingEvent::Pong)) if terminal == SrtPacketKind::Pong => {
-                        return Ok(None);
-                    }
-                    Ok(Some(_)) => continue,
-                    Ok(None) => return Err(TransportError::new("SRT transport receiver stopped")),
-                    Err(_) => break,
+                    Ok(_) => break "unexpected SRT server application frame".to_owned(),
+                    Err(error) => break error.to_string(),
                 }
+            };
+            socket.close();
+            for (_, sender) in pending.lock().unwrap().drain() {
+                let _ = sender.send(Err(error.clone()));
             }
-            if attempt == self.reliability.max_retransmits {
-                return Err(TransportError::new(format!(
-                    "SRT transport timed out waiting for {} after {} send attempt(s)",
-                    packet_kind_name(terminal),
-                    attempt + 1,
-                )));
+        });
+        Ok(connection)
+    }
+
+    async fn exchange(
+        &self,
+        message: Bytes,
+        kind: Kind,
+        expects_response: bool,
+        cancel: CancellationToken,
+    ) -> Result<Option<Bytes>, TransportError> {
+        let connection = self.state.lock().await.clone().ok_or_else(closed)?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        // Bound outstanding requests independently of remote peer behavior.
+        {
+            let mut pending = connection.pending.lock().unwrap();
+            if pending.len() >= 1024 {
+                return Err(TransportError::new("SRT outstanding request limit reached"));
+            }
+            pending.insert(id, tx);
+        }
+        let _registration = Registration {
+            pending: connection.pending.clone(),
+            id,
+        };
+        let operation = async {
+            connection
+                .socket
+                .send(Frame {
+                    kind,
+                    id,
+                    payload: message,
+                })
+                .await
+                .map_err(native::transport_error)?;
+            let frame = rx
+                .await
+                .map_err(|_| closed())?
+                .map_err(TransportError::new)?;
+            match (kind, frame.kind, expects_response) {
+                (Kind::Ping, Kind::Pong, _) | (Kind::Request, Kind::Ack, false) => Ok(None),
+                (Kind::Request, Kind::Response, true) => Ok(Some(frame.payload)),
+                (Kind::Request, Kind::Response, false) => Ok(None),
+                (Kind::Request, Kind::Ack, true) => Ok(None),
+                _ => Err(TransportError::new(
+                    "unexpected SRT application control frame",
+                )),
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(TransportError::new("request cancelled")),
+            _ = connection.stop.cancelled() => Err(closed()),
+            result = tokio::time::timeout(self.timeout, operation) => {
+                result.map_err(|_| TransportError::new("SRT operation timed out (request was not replayed)"))?
             }
         }
-        Err(TransportError::new("SRT transport exhausted retries"))
     }
 }
 
 impl RpcClientTransport for SrtClientTransport {
     fn send<'a>(&'a self, message: Bytes) -> ClientTransportFuture<'a> {
-        Box::pin(async move {
-            let expects_response = crate::expects_response(&message);
-            self.send_with_expectation(message, expects_response).await
-        })
+        let expected = expects_response(&message);
+        self.send_with_expectation(message, expected)
     }
 
     fn send_with_expectation<'a>(
         &'a self,
         message: Bytes,
-        expects_response: bool,
+        expected: bool,
     ) -> ClientTransportFuture<'a> {
-        Box::pin(async move {
-            let packet_id = self.next_packet_id();
-            let packet = SrtPacket::request(self.next_sequence(), packet_id, message.to_vec());
-            self.send_reliably(
-                packet,
-                if expects_response {
-                    SrtPacketKind::Response
-                } else {
-                    SrtPacketKind::Ack
-                },
-                None,
-            )
-            .await
-        })
+        self.send_cancelable(message, expected, CancellationToken::new())
     }
 
     fn send_cancelable<'a>(
         &'a self,
         message: Bytes,
-        expects_response: bool,
+        expected: bool,
         cancel: CancellationToken,
     ) -> ClientTransportFuture<'a> {
-        Box::pin(async move {
-            let packet_id = self.next_packet_id();
-            let packet = SrtPacket::request(self.next_sequence(), packet_id, message.to_vec());
-            self.send_reliably(
-                packet,
-                if expects_response {
-                    SrtPacketKind::Response
-                } else {
-                    SrtPacketKind::Ack
-                },
-                Some(cancel),
-            )
-            .await
-        })
-    }
-
-    fn transport_ping<'a>(&'a self) -> ClientPingFuture<'a> {
-        Box::pin(async move {
-            let packet_id = self.next_packet_id();
-            let packet = SrtPacket::ping(self.next_sequence(), packet_id);
-            self.send_reliably(packet, SrtPacketKind::Pong, None)
-                .await
-                .map(|_| ())
-        })
+        Box::pin(self.exchange(message, Kind::Request, expected, cancel))
     }
 
     fn kind(&self) -> &'static str {
         "srt"
     }
-
     fn peer(&self) -> Option<String> {
         Some(self.address.to_string())
     }
 
+    fn transport_ping<'a>(&'a self) -> ClientPingFuture<'a> {
+        Box::pin(async move {
+            self.exchange(Bytes::new(), Kind::Ping, false, CancellationToken::new())
+                .await
+                .map(|_| ())
+        })
+    }
+
     fn reconnect<'a>(&'a self) -> ClientRecoverFuture<'a> {
         Box::pin(async move {
-            let replacement = Self::open(
-                self.address,
-                self.reliability.clone(),
-                Arc::clone(&self.pending),
-                Arc::clone(&self.crypto),
-            )
-            .await?;
-            let previous = self.state.lock().await.replace(replacement);
-            self.fail_all_pending().await;
-            if let Some(state) = previous {
-                state.shutdown.cancel();
-                let _ = state.task.await;
+            // Serialize reconnect/close; closing the old generation fails its pending calls.
+            let mut state = self.state.lock().await;
+            if let Some(old) = state.take() {
+                old.stop.cancel();
+                old.socket.close();
+                old.pending.lock().unwrap().clear();
             }
+            *state = Some(Self::open(self.address, &self.config).await?);
             Ok(())
         })
     }
 
     fn close<'a>(&'a self) -> ClientCloseFuture<'a> {
         Box::pin(async move {
-            let previous = self.state.lock().await.take();
-            self.fail_all_pending().await;
-            if let Some(state) = previous {
-                state.shutdown.cancel();
-                let _ = state.task.await;
+            if let Some(old) = self.state.lock().await.take() {
+                old.stop.cancel();
+                old.socket.close();
+                old.pending.lock().unwrap().clear();
             }
             Ok(())
         })
-    }
-}
-
-async fn open_socket(address: SocketAddr) -> Result<UdpSocket, TransportError> {
-    let local = SocketAddr::new(unspecified(address.ip()), 0);
-    let socket = UdpSocket::bind(local).await.map_err(transport_error)?;
-    socket.connect(address).await.map_err(transport_error)?;
-    Ok(socket)
-}
-
-async fn run_receiver(
-    socket: Arc<UdpSocket>,
-    pending: Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<PendingEvent>>>>,
-    shutdown: CancellationToken,
-    reliability: UdpReliabilityConfig,
-    crypto: Arc<SrtCrypto>,
-) {
-    let mut buffer = vec![0u8; reliability.max_packet_size];
-    loop {
-        let received = tokio::select! {
-            received = socket.recv(&mut buffer) => Some(received),
-            _ = shutdown.cancelled() => None,
-        };
-        let Some(received) = received else { break };
-        let size = match received {
-            Ok(size) => size,
-            Err(_) => break,
-        };
-        let packet = match crypto.decode_packet(&buffer[..size]) {
-            Ok(packet) => packet,
-            Err(_) => continue,
-        };
-        let event = match packet.kind {
-            SrtPacketKind::Ack => PendingEvent::Ack,
-            SrtPacketKind::Response => PendingEvent::Response(Bytes::from(packet.payload)),
-            SrtPacketKind::Pong => PendingEvent::Pong,
-            SrtPacketKind::Request | SrtPacketKind::Ping => continue,
-        };
-        if let Some(sender) = pending.lock().await.get(&packet.packet_id).cloned() {
-            let _ = sender.send(event);
-        }
-    }
-}
-
-fn validate_config(config: &UdpReliabilityConfig) -> Result<(), TransportError> {
-    if config.max_retransmits == 0 {
-        return Err(TransportError::new(
-            "SRT max_retransmits must be at least 1",
-        ));
-    }
-    if config.retransmit_interval.is_zero() {
-        return Err(TransportError::new(
-            "SRT retransmit_interval must be greater than zero",
-        ));
-    }
-    if config.max_packet_size == 0 {
-        return Err(TransportError::new(
-            "SRT max_packet_size must be greater than zero",
-        ));
-    }
-    Ok(())
-}
-
-fn packet_kind_name(kind: SrtPacketKind) -> &'static str {
-    match kind {
-        SrtPacketKind::Request => "request",
-        SrtPacketKind::Response => "response",
-        SrtPacketKind::Ack => "ack",
-        SrtPacketKind::Ping => "pong",
-        SrtPacketKind::Pong => "pong",
-    }
-}
-
-fn unspecified(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
     }
 }

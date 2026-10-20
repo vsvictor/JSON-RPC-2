@@ -8,7 +8,7 @@ pub mod rudp;
 pub mod sctp;
 #[cfg(feature = "srt")]
 pub mod srt;
-#[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
-pub mod udplite;
 #[cfg(feature = "udp")]
 pub mod udp;
+#[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
+pub mod udplite;

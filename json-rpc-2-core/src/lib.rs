@@ -1,12 +1,10 @@
 //! Shared JSON-RPC 2.0 wire types and protocol constants.
 
 mod amqp;
-pub mod client_transport;
 mod coap;
 mod mqtt;
 mod rtp;
 mod rudp;
-pub mod server_transport;
 mod srt;
 mod udp_lite;
 mod udp_reliable;
@@ -16,11 +14,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use amqp::{AmqpFrame, AmqpMessageKind, decode_amqp_frame, encode_amqp_frame};
-pub use client_transport::{
-    ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
-    RpcClientTransport, TransportError, closed, connect_tcp_stream, expects_response,
-    transport_error,
-};
 pub use coap::{CoapMessage, CoapMessageType, decode_coap_message, encode_coap_message};
 pub use mqtt::{MqttPacket, MqttPacketKind, decode_mqtt_packet, encode_mqtt_packet};
 pub use rtp::{
@@ -28,12 +21,6 @@ pub use rtp::{
     decode_rtp_packet, encode_rtcp_control_packet, encode_rtp_packet,
 };
 pub use rudp::{RudpPacket, RudpPacketKind, decode_rudp_packet, encode_rudp_packet};
-pub use server_transport::{
-    CancellationToken, H3_NO_ERROR, JsonRpcProtocol, ProtocolFuture, QUIC_NO_ERROR,
-    RunningTransport, RuntimeMetrics, RuntimeMetricsSnapshot, ServerShutdownPolicy, Transport,
-    TransportFuture, TransportLimits, TransportRuntime, apply_tcp_listener_tuning,
-    apply_tcp_stream_tuning, log_control, log_json_rpc, log_transport_error, multiplex,
-};
 pub use srt::{SrtConfig, SrtCrypto, SrtPacket, SrtPacketKind};
 pub use udp_lite::UdpLiteConfig;
 pub use udp_reliable::{
@@ -49,130 +36,6 @@ pub use websocket::{
 
 pub const VERSION: &str = "2.0";
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
-pub const CONTROL_PATH: &str = "/.well-known/json-rpc-2/ping";
-pub const CONTROL_PING: &[u8] = b"#json-rpc-2-control-ping";
-pub const CONTROL_PONG: &[u8] = b"#json-rpc-2-control-pong";
-pub const QUIC_ALPN: &[u8] = b"json-rpc-2";
-pub const WS_QUIC_ALPN: &[u8] = b"json-rpc-2-ws";
-pub const H3_ALPN: &[u8] = b"h3";
-
-/// Whether a transport serializes exchanges on one carrier or multiplexes
-/// concurrent exchanges over independent streams.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum TransportMultiplexing {
-    Serialized,
-    Multiplexed,
-}
-
-/// Whether a transport requires TLS.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum TransportSecurity {
-    Plain,
-    Tls,
-}
-
-impl TransportSecurity {
-    pub fn is_tls(self) -> bool {
-        matches!(self, Self::Tls)
-    }
-}
-
-/// The underlying socket family a transport binds to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum TransportSocket {
-    Tcp,
-    Udp,
-    Dccp,
-    Sctp,
-}
-
-impl TransportSocket {
-    pub fn is_udp(self) -> bool {
-        matches!(self, Self::Udp)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Tcp => "TCP",
-            Self::Udp => "UDP",
-            Self::Dccp => "DCCP",
-            Self::Sctp => "SCTP",
-        }
-    }
-}
-
-/// Structured capability set for a concrete transport kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TransportCapabilitySet {
-    pub multiplexing: TransportMultiplexing,
-    pub security: TransportSecurity,
-    pub socket: TransportSocket,
-    pub supports_ping: bool,
-}
-
-/// TCP congestion control profile used by TCP-based transports.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "kebab-case")]
-pub enum TcpCongestionControl {
-    #[default]
-    SystemDefault,
-    Bbr,
-}
-
-impl TcpCongestionControl {
-    pub fn as_socket_name(self) -> Option<&'static [u8]> {
-        match self {
-            Self::SystemDefault => None,
-            Self::Bbr => Some(b"bbr"),
-        }
-    }
-}
-
-/// Tuning knobs shared by TCP-based transports.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
-pub struct TcpTuningConfig {
-    /// Disable Nagle's algorithm on connected sockets.
-    pub no_delay: bool,
-    /// Per-socket congestion control override.
-    pub congestion_control: TcpCongestionControl,
-    /// Enable TCP Fast Open where the OS and the transport adapter support it.
-    pub fast_open: bool,
-    /// Pending Fast Open queue length used by server listeners when Fast Open
-    /// is enabled.
-    pub fast_open_queue_len: u32,
-}
-
-impl Default for TcpTuningConfig {
-    fn default() -> Self {
-        Self {
-            no_delay: true,
-            congestion_control: TcpCongestionControl::SystemDefault,
-            fast_open: false,
-            fast_open_queue_len: 1024,
-        }
-    }
-}
-
-/// Capability model implemented by transport kinds and transport adapters.
-pub trait TransportCapabilities {
-    fn capabilities(&self) -> TransportCapabilitySet;
-
-    fn multiplexing(&self) -> TransportMultiplexing {
-        self.capabilities().multiplexing
-    }
-
-    fn security(&self) -> TransportSecurity {
-        self.capabilities().security
-    }
-
-    fn socket(&self) -> TransportSocket {
-        self.capabilities().socket
-    }
-
-    fn supports_ping(&self) -> bool {
-        self.capabilities().supports_ping
-    }
-}
 
 /// JSON-RPC request identifier. The protocol allows strings, numbers, and null.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]

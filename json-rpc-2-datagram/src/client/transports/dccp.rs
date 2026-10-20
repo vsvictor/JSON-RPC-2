@@ -5,11 +5,11 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use tokio::sync::Mutex;
 
-use json_rpc_2_core::{closed, transport_error};
-use json_rpc_2_core::{
+use json_rpc_2_transport::{
     CONTROL_PING, CONTROL_PONG, ClientCloseFuture, ClientPingFuture, ClientRecoverFuture,
     ClientTransportFuture, RpcClientTransport, TransportError, expects_response,
 };
+use json_rpc_2_transport::{closed, transport_error};
 
 /// One JSON-RPC message per DCCP datagram over a persistent DCCP session.
 pub struct DccpClientTransport {

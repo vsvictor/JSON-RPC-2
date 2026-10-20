@@ -6,11 +6,13 @@ use h3::server::RequestResolver;
 use quinn::Endpoint;
 use std::{io, sync::Arc, time::Instant};
 
-use json_rpc_2_core::{
+use json_rpc_2_core::MAX_MESSAGE_BYTES;
+use json_rpc_2_transport::JsonRpcProtocol;
+use json_rpc_2_transport::multiplex::StreamMultiplexor;
+use json_rpc_2_transport::{
     CONTROL_PATH, CancellationToken, H3_NO_ERROR, Transport, TransportFuture, TransportRuntime,
-    log_control, log_json_rpc, log_transport_error, multiplex::StreamMultiplexor,
+    log_control, log_json_rpc, log_transport_error,
 };
-use json_rpc_2_core::{JsonRpcProtocol, MAX_MESSAGE_BYTES};
 
 /// HTTP/3 transport over an endpoint configured with the `h3` ALPN protocol.
 pub struct Http3Transport {

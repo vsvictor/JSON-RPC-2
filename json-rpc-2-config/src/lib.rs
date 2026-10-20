@@ -1,14 +1,14 @@
 use std::{
+    fmt,
     net::IpAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use json_rpc_2::{
-    SrtConfig, TcpCongestionControl, TcpTuningConfig, TransportCapabilities, TransportKind,
-    UdpLiteConfig,
-    UdpReliabilityConfig, client::ReconnectPolicy,
-    server::TransportLimits as ServerTransportLimits,
+    AmqpConfig, MqttConfig, SrtConfig, TcpCongestionControl, TcpTuningConfig,
+    TransportCapabilities, TransportKind, UdpLiteConfig, UdpReliabilityConfig,
+    client::ReconnectPolicy, server::TransportLimits as ServerTransportLimits,
 };
 
 pub const SERVER_HOST: &str = "mobilespace.local";
@@ -36,7 +36,8 @@ are required: set them in .env.
                                                 ws-quic, ws-http1, ws-http3, ws-mqtt, ws-coap, ws-amqp
                                                 (udplite/ws-udplite, dccp/ws-dccp and sctp/ws-sctp: Linux/Android only)
 Server:
-  --bind <IPS>        * JSON_RPC_BIND           local addresses to listen on, comma-separated:
+  --bind <IPS>          JSON_RPC_BIND           local addresses to listen on, comma-separated
+                                                (required when any local-listener transport is selected):
                                                 127.0.0.1,::1 (this machine only),
                                                 0.0.0.0,:: (every interface, LAN),
                                                 192.168.0.10 (one interface)
@@ -65,13 +66,15 @@ Client:
   --reconnect-max-elapsed-ms <N> JSON_RPC_RECONNECT_MAX_ELAPSED_MS
                                                 total reconnect budget for one failure streak
   --tcp-nodelay <BOOL>      JSON_RPC_TCP_NODELAY
-                                                disable Nagle on TCP-based sockets
+                                                disable Nagle on adapter-owned TCP sockets only
   --tcp-congestion <NAME>   JSON_RPC_TCP_CONGESTION
-                                                system or bbr
+                                                system or bbr, adapter-owned TCP sockets only
   --tcp-fastopen <BOOL>     JSON_RPC_TCP_FASTOPEN
-                                                enable TCP Fast Open where the OS supports it
+                                                enable TCP Fast Open on supported adapter-owned TCP sockets
   --tcp-fastopen-queue-len <N> JSON_RPC_TCP_FASTOPEN_QUEUE_LEN
                                                 Fast Open listener queue length
+TCP tuning applies only to tcp/http1/ws-tcp/ws-http1, never MQTT/AMQP broker library sockets.
+In mixed selections it affects only those local TCP adapters; broker socket tuning is not exposed.
   --udp-retransmit-ms <N>   JSON_RPC_UDP_RETRANSMIT_MS
                                                 delay between UDP retransmits
   --udp-max-retransmits <N> JSON_RPC_UDP_MAX_RETRANSMITS
@@ -90,16 +93,42 @@ Client:
                                                 (0 = full coverage, >=8 = partial coverage)
   --srt-passphrase <TEXT>       JSON_RPC_SRT_PASSPHRASE
                                                 shared passphrase for srt and ws-srt
-Ports (server and client), one per transport, required for every used transport:
+  --mqtt-url <URL>              JSON_RPC_MQTT_URL
+                                                external MQTT 3.1.1 broker URL (mqtt:// or mqtts://);
+                                                credentials may be in URL, mqtts uses system roots
+  --mqtt-topic <TOPIC>           JSON_RPC_MQTT_TOPIC
+                                                request topic for the MQTT RPC service
+  --mqtt-ws-topic <TOPIC>        JSON_RPC_WS_MQTT_TOPIC
+                                                request topic for WebSocket/MQTT
+  --mqtt-operation-timeout-ms <N> JSON_RPC_MQTT_OPERATION_TIMEOUT_MS
+                                                broker operation timeout
+  --mqtt-response-timeout-ms <N> JSON_RPC_MQTT_RESPONSE_TIMEOUT_MS
+                                                response timeout
+  --mqtt-ca <PATH>               JSON_RPC_MQTT_CA
+                                                optional PEM CA bundle for mqtts://
+  --amqp-url <URL>               JSON_RPC_AMQP_URL
+                                                external AMQP 0-9-1 broker URL (amqp:// or amqps://);
+                                                credentials/vhost may be in URL, amqps uses system roots
+  --amqp-queue <QUEUE>            JSON_RPC_AMQP_QUEUE
+                                                request queue for the AMQP RPC service
+  --amqp-ws-queue <QUEUE>         JSON_RPC_WS_AMQP_QUEUE
+                                                request queue for WebSocket/AMQP
+  --amqp-operation-timeout-ms <N> JSON_RPC_AMQP_OPERATION_TIMEOUT_MS
+                                                broker operation timeout
+  --amqp-response-timeout-ms <N> JSON_RPC_AMQP_RESPONSE_TIMEOUT_MS
+                                                response timeout
+Ports (server and client) apply to local socket transports and are required for each selected
+local-listener transport. MQTT and AMQP use the external broker URL and service route above;
+their legacy port options are deprecated and rejected:
   --tcp-port <N>      * JSON_RPC_TCP_PORT       TCP
   --udp-port <N>      * JSON_RPC_UDP_PORT       reliable UDP
   --rtp-port <N>      * JSON_RPC_RTP_PORT       RTP/RTCP over UDP
   --rudp-port <N>     * JSON_RPC_RUDP_PORT      Reliable UDP with explicit sequencing
   --srt-port <N>      * JSON_RPC_SRT_PORT       Encrypted reliable UDP-style transport
   --udplite-port <N>  * JSON_RPC_UDPLITE_PORT   UDP-Lite with partial checksum coverage (Linux/Android only)
-  --mqtt-port <N>     * JSON_RPC_MQTT_PORT      MQTT-style publish/subscribe over TCP
+  --mqtt-port <N>       JSON_RPC_MQTT_PORT      deprecated; use --mqtt-url (external broker)
   --coap-port <N>     * JSON_RPC_COAP_PORT      CoAP-style constrained application transport over UDP
-  --amqp-port <N>     * JSON_RPC_AMQP_PORT      AMQP-style message queuing over TCP
+  --amqp-port <N>       JSON_RPC_AMQP_PORT      deprecated; use --amqp-url (external broker)
   --dccp-port <N>     * JSON_RPC_DCCP_PORT      DCCP (Linux/Android only)
   --sctp-port <N>     * JSON_RPC_SCTP_PORT      SCTP (Linux/Android only)
   --quic-port <N>     * JSON_RPC_QUIC_PORT      UDP
@@ -111,9 +140,9 @@ Ports (server and client), one per transport, required for every used transport:
   --ws-rudp-port <N>  * JSON_RPC_WS_RUDP_PORT   WebSocket over reliable RUDP
   --ws-srt-port <N>   * JSON_RPC_WS_SRT_PORT    WebSocket over encrypted SRT-style UDP
   --ws-udplite-port <N> * JSON_RPC_WS_UDPLITE_PORT WebSocket over UDP-Lite (Linux/Android only)
-  --ws-mqtt-port <N>  * JSON_RPC_WS_MQTT_PORT   WebSocket over MQTT-style transport
+  --ws-mqtt-port <N>    JSON_RPC_WS_MQTT_PORT   deprecated; use --mqtt-url and --mqtt-ws-topic
   --ws-coap-port <N>  * JSON_RPC_WS_COAP_PORT   WebSocket over CoAP-style transport
-  --ws-amqp-port <N>  * JSON_RPC_WS_AMQP_PORT   WebSocket over AMQP-style transport
+  --ws-amqp-port <N>    JSON_RPC_WS_AMQP_PORT   deprecated; use --amqp-url and --amqp-ws-queue
   --ws-dccp-port <N>  * JSON_RPC_WS_DCCP_PORT   DCCP (Linux/Android only)
   --ws-sctp-port <N>  * JSON_RPC_WS_SCTP_PORT   SCTP (Linux/Android only)
   --ws-quic-port <N>  * JSON_RPC_WS_QUIC_PORT   UDP
@@ -158,7 +187,7 @@ pub struct ScriptProfiles {
     pub e2e_port_base: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeOptions {
     pub transports: Vec<TransportKind>,
     pub bind: Vec<IpAddr>,
@@ -168,10 +197,22 @@ pub struct RuntimeOptions {
     pub request_timeout: Duration,
     pub reconnect: ReconnectPolicy,
     pub server_limits: ServerTransportLimits,
+    /// Applies only to adapter-owned TCP/HTTP1/WebSocket TCP sockets, not broker library sockets.
     pub tcp_tuning: TcpTuningConfig,
     pub udp_reliability: UdpReliabilityConfig,
     pub udplite: UdpLiteConfig,
     pub srt: Option<SrtConfig>,
+    pub mqtt_url: String,
+    pub mqtt_topic: String,
+    pub mqtt_ws_topic: String,
+    pub mqtt_operation_timeout: Duration,
+    pub mqtt_response_timeout: Duration,
+    pub mqtt_ca: Option<PathBuf>,
+    pub amqp_url: String,
+    pub amqp_queue: String,
+    pub amqp_ws_queue: String,
+    pub amqp_operation_timeout: Duration,
+    pub amqp_response_timeout: Duration,
     pub cert: PathBuf,
     pub key: Option<PathBuf>,
     pub ca: Option<PathBuf>,
@@ -179,8 +220,50 @@ pub struct RuntimeOptions {
     pub scripts: ScriptProfiles,
 }
 
+impl fmt::Debug for RuntimeOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeOptions")
+            .field("transports", &self.transports)
+            .field("bind", &self.bind)
+            .field("hosts", &self.hosts)
+            .field("ports", &self.ports)
+            .field("max_missed_pongs", &self.max_missed_pongs)
+            .field("request_timeout", &self.request_timeout)
+            .field("reconnect", &self.reconnect)
+            .field("server_limits", &self.server_limits)
+            .field("tcp_tuning", &self.tcp_tuning)
+            .field("udp_reliability", &self.udp_reliability)
+            .field("udplite", &self.udplite)
+            .field("srt", &self.srt.as_ref().map(|_| "<redacted>"))
+            .field("mqtt_url", &"<redacted>")
+            .field("mqtt_topic", &self.mqtt_topic)
+            .field("mqtt_ws_topic", &self.mqtt_ws_topic)
+            .field("mqtt_operation_timeout", &self.mqtt_operation_timeout)
+            .field("mqtt_response_timeout", &self.mqtt_response_timeout)
+            .field("mqtt_ca", &self.mqtt_ca)
+            .field("amqp_url", &"<redacted>")
+            .field("amqp_queue", &self.amqp_queue)
+            .field("amqp_ws_queue", &self.amqp_ws_queue)
+            .field("amqp_operation_timeout", &self.amqp_operation_timeout)
+            .field("amqp_response_timeout", &self.amqp_response_timeout)
+            .field("cert", &self.cert)
+            .field("key", &self.key)
+            .field("ca", &self.ca)
+            .field("server_name", &self.server_name)
+            .field("scripts", &self.scripts)
+            .finish()
+    }
+}
+
 impl RuntimeOptions {
     pub fn from_env() -> Result<Self, String> {
+        let options = Self::from_env_unvalidated()?;
+        validate_runtime_options(&options)?;
+        Ok(options)
+    }
+
+    fn from_env_unvalidated() -> Result<Self, String> {
         let mut ports = [None; TRANSPORT_SLOT_COUNT];
         for kind in TransportKind::ALL.iter().copied() {
             ports[kind.index()] = parse_setting(kind.port_setting(), parse_port)?;
@@ -257,18 +340,45 @@ impl RuntimeOptions {
                 .unwrap_or(Duration::from_secs(30)),
             },
             udplite: UdpLiteConfig {
-                send_checksum_coverage: parse_setting(
-                    "JSON_RPC_UDPLITE_SEND_CSCOV",
-                    parse_u16,
-                )?
-                .unwrap_or(8),
-                recv_checksum_coverage: parse_setting(
-                    "JSON_RPC_UDPLITE_RECV_CSCOV",
-                    parse_u16,
-                )?
-                .unwrap_or(8),
+                send_checksum_coverage: parse_setting("JSON_RPC_UDPLITE_SEND_CSCOV", parse_u16)?
+                    .unwrap_or(8),
+                recv_checksum_coverage: parse_setting("JSON_RPC_UDPLITE_RECV_CSCOV", parse_u16)?
+                    .unwrap_or(8),
             },
             srt: setting("JSON_RPC_SRT_PASSPHRASE").map(|passphrase| SrtConfig { passphrase }),
+            mqtt_url: setting("JSON_RPC_MQTT_URL")
+                .unwrap_or_else(|| "mqtt://127.0.0.1:1883".to_owned()),
+            mqtt_topic: setting("JSON_RPC_MQTT_TOPIC")
+                .unwrap_or_else(|| "json-rpc-2/requests".to_owned()),
+            mqtt_ws_topic: setting("JSON_RPC_WS_MQTT_TOPIC")
+                .unwrap_or_else(|| "json-rpc-2/ws/requests".to_owned()),
+            mqtt_operation_timeout: parse_setting(
+                "JSON_RPC_MQTT_OPERATION_TIMEOUT_MS",
+                parse_duration_ms,
+            )?
+            .unwrap_or(Duration::from_secs(10)),
+            mqtt_response_timeout: parse_setting(
+                "JSON_RPC_MQTT_RESPONSE_TIMEOUT_MS",
+                parse_duration_ms,
+            )?
+            .unwrap_or(Duration::from_secs(30)),
+            mqtt_ca: setting("JSON_RPC_MQTT_CA").map(PathBuf::from),
+            amqp_url: setting("JSON_RPC_AMQP_URL")
+                .unwrap_or_else(|| "amqp://guest:guest@127.0.0.1:5672/%2f".to_owned()),
+            amqp_queue: setting("JSON_RPC_AMQP_QUEUE")
+                .unwrap_or_else(|| "json-rpc-2.requests".to_owned()),
+            amqp_ws_queue: setting("JSON_RPC_WS_AMQP_QUEUE")
+                .unwrap_or_else(|| "json-rpc-2.ws.requests".to_owned()),
+            amqp_operation_timeout: parse_setting(
+                "JSON_RPC_AMQP_OPERATION_TIMEOUT_MS",
+                parse_duration_ms,
+            )?
+            .unwrap_or(Duration::from_secs(10)),
+            amqp_response_timeout: parse_setting(
+                "JSON_RPC_AMQP_RESPONSE_TIMEOUT_MS",
+                parse_duration_ms,
+            )?
+            .unwrap_or(Duration::from_secs(30)),
             cert: setting("JSON_RPC_CERT").map_or_else(
                 || std::env::temp_dir().join("json-rpc-2").join("cert.pem"),
                 PathBuf::from,
@@ -295,7 +405,6 @@ impl RuntimeOptions {
                     .unwrap_or(41_400),
             },
         };
-        validate_runtime_options(&options)?;
         Ok(options)
     }
 
@@ -303,11 +412,64 @@ impl RuntimeOptions {
         self.ports[kind.index()].expect("port checked")
     }
 
+    pub fn mqtt_config(&self, websocket: bool) -> Result<MqttConfig, String> {
+        let mut config = MqttConfig::default();
+        config.broker_url = self.mqtt_url.clone();
+        config.request_topic = if websocket {
+            self.mqtt_ws_topic.clone()
+        } else {
+            self.mqtt_topic.clone()
+        };
+        config.operation_timeout = self.mqtt_operation_timeout;
+        config.response_timeout = self.mqtt_response_timeout;
+        config.ca_certificate = self
+            .mqtt_ca
+            .as_ref()
+            .map(|path| {
+                std::fs::read(path).map_err(|error| {
+                    format!("cannot read MQTT CA file {}: {error}", path.display())
+                })
+            })
+            .transpose()?;
+        Ok(config)
+    }
+
+    pub fn amqp_config(&self, websocket: bool) -> AmqpConfig {
+        let mut config = AmqpConfig::default();
+        config.broker_url = self.amqp_url.clone();
+        config.request_queue = if websocket {
+            self.amqp_ws_queue.clone()
+        } else {
+            self.amqp_queue.clone()
+        };
+        config.operation_timeout = self.amqp_operation_timeout;
+        config.response_timeout = self.amqp_response_timeout;
+        config
+    }
+
     pub fn check_ports(&self) -> Result<(), String> {
+        for kind in self
+            .transports
+            .iter()
+            .copied()
+            .filter(|kind| kind.is_broker())
+        {
+            if self.ports[kind.index()].is_some() {
+                let setting = match kind {
+                    TransportKind::Mqtt | TransportKind::WebSocketMqtt => "JSON_RPC_MQTT_URL",
+                    TransportKind::Amqp | TransportKind::WebSocketAmqp => "JSON_RPC_AMQP_URL",
+                    _ => unreachable!("only broker transports reach this branch"),
+                };
+                return Err(format!(
+                    "{} is an external broker endpoint, not a local listener; configure {setting} instead",
+                    kind.port_setting()
+                ));
+            }
+        }
         let missing: Vec<String> = self
             .transports
             .iter()
-            .filter(|kind| self.ports[kind.index()].is_none())
+            .filter(|kind| !kind.is_broker() && self.ports[kind.index()].is_none())
             .map(|kind| format!("{} ({})", kind.port_setting(), kind.port_option()))
             .collect();
         if !missing.is_empty() {
@@ -315,7 +477,11 @@ impl RuntimeOptions {
         }
         for (index, first) in self.transports.iter().enumerate() {
             for second in &self.transports[index + 1..] {
-                if first.socket() == second.socket() && self.port(*first) == self.port(*second) {
+                if !first.is_broker()
+                    && !second.is_broker()
+                    && first.socket() == second.socket()
+                    && self.port(*first) == self.port(*second)
+                {
                     return Err(format!(
                         "{} and {} use the same {} port {}",
                         first.port_setting(),
@@ -349,8 +515,9 @@ pub enum CommandConfig {
 pub fn parse_command(mut args: impl Iterator<Item = String>) -> Result<CommandConfig, String> {
     let client = match args.next().as_deref() {
         None | Some("demo") => {
-            let mut options = RuntimeOptions::from_env()?;
+            let mut options = RuntimeOptions::from_env_unvalidated()?;
             options.transports = TransportKind::ALL.to_vec();
+            validate_runtime_options(&options)?;
             options.check_ports()?;
             return Ok(CommandConfig::Demo(options));
         }
@@ -360,7 +527,7 @@ pub fn parse_command(mut args: impl Iterator<Item = String>) -> Result<CommandCo
         Some(other) => return Err(format!("unknown command {other}")),
     };
 
-    let mut options = RuntimeOptions::from_env()?;
+    let mut options = RuntimeOptions::from_env_unvalidated()?;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -434,17 +601,40 @@ pub fn parse_command(mut args: impl Iterator<Item = String>) -> Result<CommandCo
                     .map_err(|error| format!("--udp-dedup-cache-ttl-ms: {error}"))?;
             }
             "--udplite-send-cscov" => {
-                options.udplite.send_checksum_coverage =
-                    parse_u16(&value()?).map_err(|error| format!("--udplite-send-cscov: {error}"))?;
+                options.udplite.send_checksum_coverage = parse_u16(&value()?)
+                    .map_err(|error| format!("--udplite-send-cscov: {error}"))?;
             }
             "--udplite-recv-cscov" => {
-                options.udplite.recv_checksum_coverage =
-                    parse_u16(&value()?).map_err(|error| format!("--udplite-recv-cscov: {error}"))?;
+                options.udplite.recv_checksum_coverage = parse_u16(&value()?)
+                    .map_err(|error| format!("--udplite-recv-cscov: {error}"))?;
             }
             "--srt-passphrase" => {
                 options.srt = Some(SrtConfig {
                     passphrase: value()?,
                 });
+            }
+            "--mqtt-url" => options.mqtt_url = value()?,
+            "--mqtt-topic" => options.mqtt_topic = value()?,
+            "--mqtt-ws-topic" => options.mqtt_ws_topic = value()?,
+            "--mqtt-operation-timeout-ms" => {
+                options.mqtt_operation_timeout = parse_duration_ms(&value()?)
+                    .map_err(|error| format!("--mqtt-operation-timeout-ms: {error}"))?;
+            }
+            "--mqtt-response-timeout-ms" => {
+                options.mqtt_response_timeout = parse_duration_ms(&value()?)
+                    .map_err(|error| format!("--mqtt-response-timeout-ms: {error}"))?;
+            }
+            "--mqtt-ca" => options.mqtt_ca = Some(value()?.into()),
+            "--amqp-url" => options.amqp_url = value()?,
+            "--amqp-queue" => options.amqp_queue = value()?,
+            "--amqp-ws-queue" => options.amqp_ws_queue = value()?,
+            "--amqp-operation-timeout-ms" => {
+                options.amqp_operation_timeout = parse_duration_ms(&value()?)
+                    .map_err(|error| format!("--amqp-operation-timeout-ms: {error}"))?;
+            }
+            "--amqp-response-timeout-ms" => {
+                options.amqp_response_timeout = parse_duration_ms(&value()?)
+                    .map_err(|error| format!("--amqp-response-timeout-ms: {error}"))?;
             }
             option if option.ends_with("-port") => {
                 let kind = TransportKind::ALL
@@ -466,7 +656,7 @@ pub fn parse_command(mut args: impl Iterator<Item = String>) -> Result<CommandCo
     options.check_ports()?;
     if client {
         Ok(CommandConfig::Client(options))
-    } else if options.bind.is_empty() {
+    } else if options.bind.is_empty() && options.transports.iter().any(|kind| !kind.is_broker()) {
         Err("listen address not set: JSON_RPC_BIND (--bind)".into())
     } else {
         Ok(CommandConfig::Server(options))
@@ -569,7 +759,12 @@ impl KindSettings for TransportKind {
     }
 }
 
-const PATH_SETTINGS: [&str; 3] = ["JSON_RPC_CERT", "JSON_RPC_KEY", "JSON_RPC_CA"];
+const PATH_SETTINGS: [&str; 4] = [
+    "JSON_RPC_CERT",
+    "JSON_RPC_KEY",
+    "JSON_RPC_CA",
+    "JSON_RPC_MQTT_CA",
+];
 
 fn setting(name: &str) -> Option<String> {
     std::env::var(name)
@@ -654,7 +849,9 @@ fn parse_positive_u32(value: &str) -> Result<u32, String> {
 }
 
 fn parse_u16(value: &str) -> Result<u16, String> {
-    value.parse().map_err(|_| format!("invalid integer {value}"))
+    value
+        .parse()
+        .map_err(|_| format!("invalid integer {value}"))
 }
 
 fn parse_bool(value: &str) -> Result<bool, String> {
@@ -741,8 +938,143 @@ fn validate_runtime_options(options: &RuntimeOptions) -> Result<(), String> {
     {
         return Err("JSON_RPC_SRT_PASSPHRASE (--srt-passphrase) is required for srt/ws-srt".into());
     }
-    if let Some(config) = &options.srt {
-        config.validate()?;
+    if options
+        .transports
+        .iter()
+        .any(|kind| matches!(kind, TransportKind::Srt | TransportKind::WebSocketSrt))
+    {
+        if let Some(config) = &options.srt {
+            validate_srt_passphrase(&config.passphrase)?;
+        }
+    }
+    if options
+        .transports
+        .iter()
+        .any(|kind| matches!(kind, TransportKind::Mqtt | TransportKind::WebSocketMqtt))
+    {
+        validate_broker_url(
+            &options.mqtt_url,
+            &["mqtt://", "mqtts://"],
+            "JSON_RPC_MQTT_URL",
+        )?;
+        if options.mqtt_ca.is_some() && !options.mqtt_url.starts_with("mqtts://") {
+            return Err("JSON_RPC_MQTT_CA requires a mqtts:// broker URL".into());
+        }
+        validate_mqtt_topic(&options.mqtt_topic, "JSON_RPC_MQTT_TOPIC")?;
+        validate_mqtt_topic(&options.mqtt_ws_topic, "JSON_RPC_WS_MQTT_TOPIC")?;
+        if options.mqtt_operation_timeout.is_zero() || options.mqtt_response_timeout.is_zero() {
+            return Err("MQTT operation and response timeouts must be greater than zero".into());
+        }
+    }
+    if options
+        .transports
+        .iter()
+        .any(|kind| matches!(kind, TransportKind::Amqp | TransportKind::WebSocketAmqp))
+    {
+        validate_broker_url(
+            &options.amqp_url,
+            &["amqp://", "amqps://"],
+            "JSON_RPC_AMQP_URL",
+        )?;
+        validate_amqp_queue(&options.amqp_queue, "JSON_RPC_AMQP_QUEUE")?;
+        validate_amqp_queue(&options.amqp_ws_queue, "JSON_RPC_WS_AMQP_QUEUE")?;
+        if options.amqp_operation_timeout.is_zero() || options.amqp_response_timeout.is_zero() {
+            return Err("AMQP operation and response timeouts must be greater than zero".into());
+        }
     }
     Ok(())
+}
+
+fn validate_broker_url(value: &str, schemes: &[&str], setting: &str) -> Result<(), String> {
+    if !schemes.iter().any(|scheme| value.starts_with(scheme))
+        || value.chars().any(char::is_whitespace)
+        || value
+            .split_once("://")
+            .is_none_or(|(_, authority)| authority.is_empty() || authority.starts_with('/'))
+    {
+        return Err(format!(
+            "{setting} must be a nonempty URL using {}",
+            schemes.join(" or ")
+        ));
+    }
+    Ok(())
+}
+
+fn validate_service_route(route: &str, setting: &str) -> Result<(), String> {
+    if route.trim().is_empty() || route.chars().any(char::is_control) {
+        return Err(format!(
+            "{setting} must be a nonempty route without control characters"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mqtt_topic(topic: &str, setting: &str) -> Result<(), String> {
+    validate_service_route(topic, setting)?;
+    if topic.contains(['#', '+', '\0']) {
+        return Err(format!(
+            "{setting} must be an exact MQTT topic without wildcards or NUL"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_amqp_queue(queue: &str, setting: &str) -> Result<(), String> {
+    validate_service_route(queue, setting)?;
+    if queue.starts_with("amq.") {
+        return Err(format!("{setting} must not use the reserved amq. prefix"));
+    }
+    Ok(())
+}
+
+fn validate_srt_passphrase(passphrase: &str) -> Result<(), String> {
+    let byte_len = passphrase.len();
+    if !(10..=79).contains(&byte_len) {
+        return Err(format!(
+            "SRT passphrase must contain 10..=79 bytes (got {byte_len})"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broker_urls_require_supported_schemes_and_valid_authority() {
+        assert!(
+            validate_broker_url("mqtt://localhost:1883", &["mqtt://", "mqtts://"], "MQTT").is_ok()
+        );
+        assert!(
+            validate_broker_url(
+                "mqtts://user:secret@broker",
+                &["mqtt://", "mqtts://"],
+                "MQTT"
+            )
+            .is_ok()
+        );
+        assert!(validate_broker_url("http://broker", &["mqtt://", "mqtts://"], "MQTT").is_err());
+        assert!(validate_broker_url("mqtt://", &["mqtt://", "mqtts://"], "MQTT").is_err());
+    }
+
+    #[test]
+    fn broker_routes_reject_empty_and_control_characters() {
+        assert!(validate_service_route("rpc/requests", "ROUTE").is_ok());
+        assert!(validate_service_route("  ", "ROUTE").is_err());
+        assert!(validate_service_route("rpc\nrequests", "ROUTE").is_err());
+        assert!(validate_mqtt_topic("rpc/+", "TOPIC").is_err());
+        assert!(validate_mqtt_topic("rpc/#", "TOPIC").is_err());
+        assert!(validate_amqp_queue("amq.reserved", "QUEUE").is_err());
+        assert!(validate_amqp_queue("rpc.requests", "QUEUE").is_ok());
+    }
+
+    #[test]
+    fn srt_passphrase_uses_native_byte_length_limits() {
+        assert!(validate_srt_passphrase("1234567890").is_ok());
+        assert!(validate_srt_passphrase(&"x".repeat(79)).is_ok());
+        assert!(validate_srt_passphrase("123456789").is_err());
+        assert!(validate_srt_passphrase(&"x".repeat(80)).is_err());
+        assert!(validate_srt_passphrase(&"é".repeat(5)).is_ok());
+    }
 }

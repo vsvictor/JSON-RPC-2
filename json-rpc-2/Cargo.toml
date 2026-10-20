@@ -7,21 +7,21 @@ readme = "README.md"
 
 [features]
 default = ["tcp", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "websocket", "mqtt", "coap", "amqp"]
-tcp = ["json-rpc-2-tcp/tcp", "json-rpc-2-websockets/tcp", "json-rpc-2-server/tcp"]
-udp = ["json-rpc-2-datagram/udp", "json-rpc-2-websockets/udp", "json-rpc-2-server/udp"]
-rtp = ["json-rpc-2-datagram/rtp", "json-rpc-2-websockets/rtp", "json-rpc-2-server/rtp"]
-rudp = ["json-rpc-2-datagram/rudp", "json-rpc-2-websockets/rudp", "json-rpc-2-server/rudp"]
-srt = ["json-rpc-2-datagram/srt", "json-rpc-2-websockets/srt", "json-rpc-2-server/srt"]
-udplite = ["json-rpc-2-datagram/udplite", "json-rpc-2-websockets/udplite", "json-rpc-2-server/udplite"]
-dccp = ["json-rpc-2-datagram/dccp", "json-rpc-2-websockets/dccp", "json-rpc-2-server/dccp"]
-sctp = ["json-rpc-2-datagram/sctp", "json-rpc-2-websockets/sctp", "json-rpc-2-server/sctp"]
-quic = ["json-rpc-2-quic/quic", "json-rpc-2-websockets/quic", "json-rpc-2-server/quic"]
-http1 = ["json-rpc-2-tcp/http1", "json-rpc-2-websockets/http1", "json-rpc-2-server/http1"]
-http3 = ["json-rpc-2-quic/http3", "json-rpc-2-websockets/http3", "json-rpc-2-server/http3"]
-websocket = ["json-rpc-2-websockets/websocket", "json-rpc-2-server/websocket"]
-mqtt = ["json-rpc-2-iot/mqtt", "json-rpc-2-websockets/mqtt", "json-rpc-2-server/mqtt"]
-coap = ["json-rpc-2-iot/coap", "json-rpc-2-websockets/coap", "json-rpc-2-server/coap"]
-amqp = ["json-rpc-2-iot/amqp", "json-rpc-2-websockets/amqp", "json-rpc-2-server/amqp"]
+tcp = ["json-rpc-2-tcp/tcp", "json-rpc-2-websockets/tcp", "json-rpc-2-runtime/tcp"]
+udp = ["json-rpc-2-datagram/udp", "json-rpc-2-websockets/udp", "json-rpc-2-runtime/udp"]
+rtp = ["json-rpc-2-datagram/rtp", "json-rpc-2-websockets/rtp", "json-rpc-2-runtime/rtp"]
+rudp = ["json-rpc-2-datagram/rudp", "json-rpc-2-websockets/rudp", "json-rpc-2-runtime/rudp"]
+srt = ["json-rpc-2-datagram/srt", "json-rpc-2-websockets/srt", "json-rpc-2-runtime/srt"]
+udplite = ["json-rpc-2-datagram/udplite", "json-rpc-2-websockets/udplite", "json-rpc-2-runtime/udplite"]
+dccp = ["json-rpc-2-datagram/dccp", "json-rpc-2-websockets/dccp", "json-rpc-2-runtime/dccp"]
+sctp = ["json-rpc-2-datagram/sctp", "json-rpc-2-websockets/sctp", "json-rpc-2-runtime/sctp"]
+quic = ["json-rpc-2-quic/quic", "json-rpc-2-websockets/quic", "json-rpc-2-runtime/quic"]
+http1 = ["json-rpc-2-tcp/http1", "json-rpc-2-websockets/http1", "json-rpc-2-runtime/http1"]
+http3 = ["json-rpc-2-quic/http3", "json-rpc-2-websockets/http3", "json-rpc-2-runtime/http3"]
+websocket = ["json-rpc-2-websockets/websocket", "json-rpc-2-runtime/websocket"]
+mqtt = ["json-rpc-2-iot/mqtt", "json-rpc-2-websockets/mqtt", "json-rpc-2-runtime/mqtt"]
+coap = ["json-rpc-2-iot/coap", "json-rpc-2-websockets/coap", "json-rpc-2-runtime/coap"]
+amqp = ["json-rpc-2-iot/amqp", "json-rpc-2-websockets/amqp", "json-rpc-2-runtime/amqp"]
 
 [dependencies]
 json-rpc-2-client = { path = "../json-rpc-2-client", default-features = false }
@@ -30,5 +30,11 @@ json-rpc-2-datagram = { path = "../json-rpc-2-datagram", default-features = fals
 json-rpc-2-iot = { path = "../json-rpc-2-iot", default-features = false }
 json-rpc-2-quic = { path = "../json-rpc-2-quic", default-features = false }
 json-rpc-2-server = { path = "../json-rpc-2-server", default-features = false }
+json-rpc-2-runtime = { path = "../json-rpc-2-runtime", default-features = false }
+json-rpc-2-transport = { path = "../json-rpc-2-transport" }
 json-rpc-2-tcp = { path = "../json-rpc-2-tcp", default-features = false }
 json-rpc-2-websockets = { path = "../json-rpc-2-websockets", default-features = false }
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }

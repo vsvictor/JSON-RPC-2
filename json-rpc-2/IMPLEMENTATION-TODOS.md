@@ -36,7 +36,7 @@ Status notation:
   - `RpcClientConfig`
   - `ClientLivenessConfig`
   - `ReconnectPolicy`
-  - `TransportLimits`
+  - `ClientLimits` (`TransportLimits` compatibility alias)
   - actor/session loop (`run_session`)
 - `json-rpc-2-config/src/lib.rs`
   - env loading with overlay support
@@ -59,12 +59,12 @@ Status notation:
   - immutable dispatch map
   - concurrent batch handling
   - `Bytes` response path
-- `json-rpc-2-core/src/lib.rs`
+- `json-rpc-2-transport/src/lib.rs`
   - `TransportCapabilitySet`
   - `TransportMultiplexing`
   - `TransportSecurity`
   - `TransportSocket`
-- `json-rpc-2-server/src/multi.rs`
+- `json-rpc-2-runtime/src/multi.rs`
   - `TransportKind` capability mapping
   - capability-based validation
 
@@ -82,7 +82,7 @@ Status notation:
   - `ClientMetricsSnapshot`
 - `json-rpc-2-server/src/lib.rs`
   - `ServerMetricsSnapshot`
-- `json-rpc-2-server/src/multi.rs`
+- `json-rpc-2-runtime/src/multi.rs`
   - `HealthHandle::snapshot()`
   - `HealthHandle::json()`
   - `HealthHandle::prometheus()`
@@ -96,16 +96,16 @@ Status notation:
 | `reliable-udp-transport` | done | A reliable UDP transport was added with typed retry/dedup config, client retransmission logic, server-side duplicate suppression, CLI/config wiring, and FFI exposure. |
 | `rtp-transports` | done | RTP/RTCP over UDP was added as a separate datagram transport with explicit RTP headers, RTCP control packets, shared retry/dedup policy, builder/config wiring, tests, and FFI exposure. |
 | `rudp-transports` | done | RUDP was added as a separate reliable datagram transport with its own packet format, explicit sequencing, shared retry/dedup policy, builder/config wiring, and FFI exposure. |
-| `srt-transports` | done | SRT-style encrypted reliable UDP transport was added with passphrase-driven crypto config, shared retry/dedup policy, builder/config wiring, and FFI exposure. |
+| `srt-transports` | done | Native libsrt caller/listener transport owns standard handshake, ARQ, congestion control, and encryption; JSON-RPC framing, runtime/config wiring, and FFI exposure remain separate. |
 | `udplite-transports` | done | UDP-Lite was added as a separate datagram transport with checksum-coverage config, shared retry/dedup policy, builder/config wiring, Linux/Android socket support, and FFI exposure. |
 | `websocket-over-udp` | done | WebSocket-style framing now also runs over the reliable UDP carrier through dedicated client/server transports, server builder wiring, config/env support, tests, and FFI entry points. |
 | `websocket-over-rtp` | done | WebSocket-style framing now also runs over the RTP/RTCP carrier through dedicated client/server transports, shared WebSocket crate wiring, config/env support, tests, and FFI entry points. |
 | `websocket-over-rudp` | done | WebSocket-style framing now also runs over the RUDP carrier through dedicated client/server transports, shared WebSocket crate wiring, config/env support, tests, and FFI entry points. |
-| `websocket-over-srt` | done | WebSocket-style framing now also runs over the encrypted SRT-style carrier through dedicated client/server transports, shared WebSocket crate wiring, config/env support, tests, and FFI entry points. |
+| `websocket-over-srt` | done | The dedicated WebSocket-style envelope runs over standard SRT message delivery, not the former private JSRT carrier. |
 | `websocket-over-udplite` | done | WebSocket-style framing now also runs over the UDP-Lite carrier through dedicated client/server transports, shared WebSocket crate wiring, config/env support, Linux/Android socket support, tests, and FFI entry points. |
 | `dccp-transports` | done | Raw DCCP and WebSocket-over-DCCP transports were added with platform-aware socket support, builder/config/env wiring, tests, docs, tools, and FFI exposure on Linux/Android. |
 | `sctp-transports` | done | Raw SCTP and WebSocket-over-SCTP transports were added with platform-aware socket support, builder/config/env wiring, tests, docs, tools, and FFI exposure on Linux/Android. |
-| `iot-transports` | done | MQTT, CoAP, and AMQP were added as a dedicated `json-rpc-2-iot` transport-family crate, reusing real MQTT/CoAP/AMQP wire framing, with builder/config/env wiring, tests, and FFI exposure. |
+| `iot-transports` | done | `json-rpc-2-iot` owns MQTT 3.1.1 and AMQP 0-9-1 external-broker clients/services plus the limited CoAP adapter, with runtime/config/FFI wiring. RPC services subscribe/consume instead of pretending to be brokers. |
 | `websocket-over-iot` | done | WebSocket-style framing now also runs over the MQTT, CoAP, and AMQP carriers through dedicated client/server transports, shared WebSocket crate wiring, config/env support, tests, and FFI entry points. |
 | `ffi-config-redesign` | done | FFI now exposes clearer transport-specific connection options and explicit typed connect entry points. |
 | `docs-contracts-ffi` | done | FFI and transport semantics are documented alongside the richer runtime contracts and feature model. |
@@ -125,72 +125,72 @@ Status notation:
 - `json-rpc-2-core/src/rudp.rs`
   - RUDP packet/header format for JSON-RPC data and control traffic
 - `json-rpc-2-core/src/srt.rs`
-  - encrypted SRT-style packet/header format plus shared-passphrase crypto config
+  - SRT configuration; legacy private packet helpers are not used by native SRT
 - `json-rpc-2-core/src/udp_lite.rs`
   - UDP-Lite checksum-coverage config shared across runtime/config/FFI layers
 - `json-rpc-2-core/src/mqtt.rs`
-  - MQTT fixed-header/remaining-length wire format for JSON-RPC payloads
+  - legacy wire helpers, not the standard broker transport implementation
 - `json-rpc-2-core/src/coap.rs`
   - CoAP header/message wire format for JSON-RPC payloads
 - `json-rpc-2-core/src/amqp.rs`
-  - simplified single-channel AMQP frame wire format for JSON-RPC payloads
-- `json-rpc-2-client/src/transports/udp.rs`
+  - legacy wire helpers, not the standard broker transport implementation
+- `json-rpc-2-datagram/src/client/transports/udp.rs`
   - retry / ACK / ping-pong client transport
-- `json-rpc-2-client/src/transports/rtp.rs`
+- `json-rpc-2-datagram/src/client/transports/rtp.rs`
   - RTP request/response client transport with RTCP control handling
-- `json-rpc-2-client/src/transports/rudp.rs`
+- `json-rpc-2-datagram/src/client/transports/rudp.rs`
   - RUDP request/response client transport with explicit sequence numbers
-- `json-rpc-2-client/src/transports/srt.rs`
-  - encrypted SRT-style request/response client transport
-- `json-rpc-2-client/src/transports/udplite.rs`
+- `json-rpc-2-datagram/src/client/transports/srt.rs`
+  - native libsrt request/response caller
+- `json-rpc-2-datagram/src/client/transports/udplite.rs`
   - UDP-Lite request/response client transport with configurable checksum coverage
-- `json-rpc-2-client/src/transports/mqtt.rs`
-  - MQTT request/response client transport over a persistent TCP connection
-- `json-rpc-2-client/src/transports/coap.rs`
+- `json-rpc-2-iot/src/client/transports/mqtt.rs`
+  - MQTT 3.1.1 request/reply client using an external broker
+- `json-rpc-2-iot/src/client/transports/coap.rs`
   - CoAP request/response client transport over UDP
-- `json-rpc-2-client/src/transports/amqp.rs`
-  - AMQP request/response client transport over a persistent TCP connection
-- `json-rpc-2-server/src/transports/udp.rs`
+- `json-rpc-2-iot/src/client/transports/amqp.rs`
+  - AMQP 0-9-1 request/reply client using an external broker
+- `json-rpc-2-datagram/src/server/transports/udp.rs`
   - deduplication and cached-response replay
-- `json-rpc-2-server/src/transports/rtp.rs`
+- `json-rpc-2-datagram/src/server/transports/rtp.rs`
   - RTP server transport with RTCP ACK/ping/pong handling
-- `json-rpc-2-server/src/transports/rudp.rs`
+- `json-rpc-2-datagram/src/server/transports/rudp.rs`
   - RUDP server transport with deduplication and cached-response replay
-- `json-rpc-2-server/src/transports/srt.rs`
-  - encrypted SRT-style server transport with deduplication and cached-response replay
-- `json-rpc-2-server/src/transports/udplite.rs`
+- `json-rpc-2-datagram/src/server/transports/srt.rs`
+  - standard libsrt listener and JSON-RPC message dispatch
+- `json-rpc-2-datagram/src/server/transports/udplite.rs`
   - UDP-Lite server transport with deduplication and cached-response replay
-- `json-rpc-2-server/src/transports/mqtt.rs`
-  - MQTT server transport with topic routing and PINGREQ/PINGRESP handling
-- `json-rpc-2-server/src/transports/coap.rs`
+- `json-rpc-2-iot/src/server/transports/mqtt.rs`
+  - MQTT broker subscriber with request/reply topic routing
+- `json-rpc-2-iot/src/server/transports/coap.rs`
   - CoAP server transport with request/response correlation over UDP
-- `json-rpc-2-server/src/transports/amqp.rs`
-  - AMQP server transport with content-frame routing and heartbeat handling
-- `json-rpc-2-client/src/transports/websocket/udp.rs`
+- `json-rpc-2-iot/src/server/transports/amqp.rs`
+  - AMQP broker consumer with queue routing and response correlation
+- `json-rpc-2-websockets/src/client/transports/udp.rs`
   - WebSocket-style framing over reliable UDP on the client
-- `json-rpc-2-server/src/transports/websocket/udp.rs`
+- `json-rpc-2-websockets/src/server/transports/udp.rs`
   - WebSocket-style framing over reliable UDP on the server
-- `json-rpc-2-server/src/transports/websocket/rtp.rs`
+- `json-rpc-2-websockets/src/server/transports/rtp.rs`
   - WebSocket-style framing over RTP/RTCP on the server
-- `json-rpc-2-server/src/transports/websocket/rudp.rs`
+- `json-rpc-2-websockets/src/server/transports/rudp.rs`
   - WebSocket-style framing over RUDP on the server
-- `json-rpc-2-server/src/transports/websocket/srt.rs`
-  - WebSocket-style framing over encrypted SRT-style UDP on the server
-- `json-rpc-2-server/src/transports/websocket/udplite.rs`
+- `json-rpc-2-websockets/src/server/transports/srt.rs`
+  - WebSocket-style framing over standard libsrt messages on the server
+- `json-rpc-2-websockets/src/server/transports/udplite.rs`
   - WebSocket-style framing over UDP-Lite on the server
-- `json-rpc-2-server/src/transports/websocket/mqtt.rs`
+- `json-rpc-2-websockets/src/server/transports/mqtt.rs`
   - WebSocket-style framing over MQTT on the server
-- `json-rpc-2-server/src/transports/websocket/coap.rs`
+- `json-rpc-2-websockets/src/server/transports/coap.rs`
   - WebSocket-style framing over CoAP on the server
-- `json-rpc-2-server/src/transports/websocket/amqp.rs`
+- `json-rpc-2-websockets/src/server/transports/amqp.rs`
   - WebSocket-style framing over AMQP on the server
 - `json-rpc-2-iot/src/lib.rs`
-  - dedicated transport-family crate wiring MQTT/CoAP/AMQP (raw + WebSocket) for client and server
-- `json-rpc-2-websockets/src/rudp_client.rs`
+  - dedicated transport-family crate owning MQTT/CoAP/AMQP client and server adapters
+- `json-rpc-2-websockets/src/client/transports/rudp.rs`
   - public WebSocket-over-RUDP client wrapper
-- `json-rpc-2-websockets/src/srt_client.rs`
+- `json-rpc-2-websockets/src/client/transports/srt.rs`
   - public WebSocket-over-SRT client wrapper
-- `json-rpc-2-websockets/src/udplite_client.rs`
+- `json-rpc-2-websockets/src/client/transports/udplite.rs`
   - public WebSocket-over-UDP-Lite client wrapper
 - `tools/check-features.sh`
   - supported feature matrix compilation
@@ -201,8 +201,8 @@ Recent follow-up work added an RTP/RTCP transport beside the existing reliable
 UDP adapter.
 
 - Shared packet/wire contract: `json-rpc-2-core/src/rtp.rs`
-- Server transport: `json-rpc-2-server/src/transports/rtp.rs`
-- Client transport: `json-rpc-2-client/src/transports/rtp.rs`
+- Server transport: `json-rpc-2-datagram/src/server/transports/rtp.rs`
+- Client transport: `json-rpc-2-datagram/src/client/transports/rtp.rs`
 - Multi-transport server wiring:
   - `TransportKind::Rtp`
   - `MultiTransportServer::set_rtp_port(...)`
@@ -235,8 +235,8 @@ Why it matters:
 ### Main implementation points
 
 - `json-rpc-2-server/tests/property.rs`
-- `json-rpc-2-server/tests/server.rs`
-- `json-rpc-2-server/tests/e2e_matrix.rs`
+- `json-rpc-2-runtime/tests/server.rs`
+- `json-rpc-2-runtime/tests/e2e_matrix.rs`
 - `json-rpc-2-server/tests/interop_external.rs`
 - `json-rpc-2-server/fuzz/`
 - `json-rpc-2-server/benches/rpc_dispatch.rs`
@@ -277,8 +277,8 @@ For todo-backed implementation work, the expected documentation shape is now:
 Recent follow-up work added explicit TCP tuning support rather than relying on
 the operating-system defaults implicitly.
 
-- Shared config type: `json-rpc-2-core::TcpTuningConfig`
-- Congestion profile enum: `json-rpc-2-core::TcpCongestionControl`
+- Shared config type: `json-rpc-2-transport::TcpTuningConfig`
+- Congestion profile enum: `json-rpc-2-transport::TcpCongestionControl`
 - Server wiring: `MultiTransportServer::set_tcp_tuning(...)`
 - Config/env wiring: `json-rpc-2-config` parses
   `JSON_RPC_TCP_NODELAY`, `JSON_RPC_TCP_CONGESTION`,
@@ -303,8 +303,8 @@ Recent follow-up work also added a dedicated UDP transport with application-leve
 reliability rather than relying on TCP-style streams.
 
 - Shared packet/wire contract: `json-rpc-2-core/src/udp_reliable.rs`
-- Server transport: `json-rpc-2-server/src/transports/udp.rs`
-- Client transport: `json-rpc-2-client/src/transports/udp.rs`
+- Server transport: `json-rpc-2-datagram/src/server/transports/udp.rs`
+- Client transport: `json-rpc-2-datagram/src/client/transports/udp.rs`
 - Multi-transport server wiring:
   - `TransportKind::Udp`
   - `MultiTransportServer::set_udp_port(...)`

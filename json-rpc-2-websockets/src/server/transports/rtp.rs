@@ -17,14 +17,13 @@ use super::{
     CancellationToken, WebSocketMessage, WebSocketProtocol, WebSocketTransport,
     WebSocketTransportFuture,
 };
-use json_rpc_2_core::{
-    MAX_MESSAGE_BYTES, TransportRuntime, log_control, log_json_rpc, log_transport_error,
-};
+use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_core::{
     RtcpControlPacket, RtcpControlPacketKind, RtpPacket, RtpPacketKind, decode_rtcp_control_packet,
     decode_rtp_packet, decode_websocket_message, encode_rtcp_control_packet, encode_rtp_packet,
     encode_websocket_message, websocket_message_bytes,
 };
+use json_rpc_2_transport::{TransportRuntime, log_control, log_json_rpc, log_transport_error};
 
 struct EndpointState {
     ssrc: u32,
@@ -244,10 +243,7 @@ async fn handle_data_packet(
                     return;
                 }
             };
-            runtime
-                .metrics
-                .active_streams
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            runtime.metrics.stream_started();
             tasks.spawn(async move {
                 let request_bytes = inbound
                     .as_ref()
@@ -295,10 +291,7 @@ async fn handle_data_packet(
                     true,
                 )
                 .await;
-                runtime
-                    .metrics
-                    .active_streams
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                runtime.metrics.stream_finished();
             });
         }
         RequestAction::Ack => {
@@ -340,10 +333,7 @@ async fn cache_request_state(
 
     let session = sessions.entry(peer).or_default();
     if is_new_peer {
-        runtime
-            .metrics
-            .active_sessions
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        runtime.metrics.session_started();
     }
     session.last_seen = Some(Instant::now());
     prune_peer(session, runtime);
@@ -405,10 +395,7 @@ fn prune_sessions(
         keep
     });
     if removed > 0 {
-        runtime
-            .metrics
-            .active_sessions
-            .fetch_sub(removed, std::sync::atomic::Ordering::Relaxed);
+        runtime.metrics.sessions_finished(removed);
     }
 }
 

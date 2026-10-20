@@ -3,8 +3,8 @@
 use std::{io, net::SocketAddr, sync::Arc};
 
 use super::{WebSocketProtocol, WebSocketTransportFuture, protocol_adapter};
-use json_rpc_2_core::{CancellationToken, Transport};
 use json_rpc_2_datagram::server::transports::dccp::DccpTransport;
+use json_rpc_2_transport::{CancellationToken, Transport};
 
 /// Dedicated WebSocket-style framing over DCCP datagrams.
 pub struct DccpWebSocketTransport {
@@ -18,7 +18,7 @@ impl DccpWebSocketTransport {
         })
     }
 
-    pub fn with_runtime(mut self, runtime: Arc<json_rpc_2_core::TransportRuntime>) -> Self {
+    pub fn with_runtime(mut self, runtime: Arc<json_rpc_2_transport::TransportRuntime>) -> Self {
         self.inner = self.inner.with_runtime(runtime);
         self
     }

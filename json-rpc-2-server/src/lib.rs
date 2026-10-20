@@ -15,22 +15,10 @@ use std::{
 use tokio::task::JoinSet;
 
 pub use json_rpc_2_core::*;
+pub use json_rpc_2_transport::{JsonRpcProtocol, ProtocolFuture, ServerLimits};
+pub type TransportLimits = ServerLimits;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
-
-pub mod multi;
-
-pub use multi::{
-    HasBind, HasTransport, HealthHandle, HealthSnapshot, MissingBind, MultiTransportServer,
-    MultiTransportServerBuilder, NoTransport, RunningServer, TransportKind,
-};
-#[cfg(all(feature = "websocket", any(feature = "dccp", feature = "sctp")))]
-pub use json_rpc_2_websockets::server::transports::protocol_adapter;
-#[cfg(feature = "websocket")]
-pub use json_rpc_2_websockets::server::transports::{
-    JsonRpcWebSocket, WebSocketFuture, WebSocketMessage, WebSocketProtocol, WebSocketTransport,
-    WebSocketTransportFuture,
-};
 
 /// Errors encountered while registering a server method.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,7 +72,7 @@ impl ServerMetrics {
 #[derive(Clone)]
 pub struct RpcServer {
     methods: Arc<ArcSwap<MethodMap>>,
-    limits: TransportLimits,
+    limits: ServerLimits,
     request_permits: Arc<Semaphore>,
     metrics: Arc<ServerMetrics>,
 }
@@ -97,10 +85,10 @@ impl Default for RpcServer {
 
 impl RpcServer {
     pub fn new() -> Self {
-        Self::new_with_limits(TransportLimits::default())
+        Self::new_with_limits(ServerLimits::default())
     }
 
-    pub fn new_with_limits(limits: TransportLimits) -> Self {
+    pub fn new_with_limits(limits: ServerLimits) -> Self {
         assert!(
             limits.max_connections > 0 && limits.max_concurrent_requests > 0,
             "server limits must be greater than zero"
@@ -117,7 +105,7 @@ impl RpcServer {
         ServerDispatcherBuilder::new()
     }
 
-    pub fn limits(&self) -> &TransportLimits {
+    pub fn limits(&self) -> &ServerLimits {
         &self.limits
     }
 
@@ -310,8 +298,8 @@ fn serialize(value: &Value) -> Bytes {
 
 mod dispatcher {
     use super::{
-        Future, MethodMap, RegistrationError, RpcError, RpcServer, Semaphore, ServerMetrics,
-        TransportLimits,
+        Future, MethodMap, RegistrationError, RpcError, RpcServer, Semaphore, ServerLimits,
+        ServerMetrics,
     };
     use arc_swap::ArcSwap;
     use std::{marker::PhantomData, sync::Arc};
@@ -321,7 +309,7 @@ mod dispatcher {
 
     pub struct Builder<State> {
         methods: MethodMap,
-        limits: TransportLimits,
+        limits: ServerLimits,
         state: PhantomData<State>,
     }
 
@@ -329,7 +317,7 @@ mod dispatcher {
         pub fn new() -> Self {
             Self {
                 methods: MethodMap::new(),
-                limits: TransportLimits::default(),
+                limits: ServerLimits::default(),
                 state: PhantomData,
             }
         }
@@ -378,9 +366,13 @@ mod dispatcher {
     }
 
     impl<State> Builder<State> {
-        pub fn set_transport_limits(mut self, limits: TransportLimits) -> Self {
+        pub fn set_limits(mut self, limits: ServerLimits) -> Self {
             self.limits = limits;
             self
+        }
+
+        pub fn set_transport_limits(self, limits: ServerLimits) -> Self {
+            self.set_limits(limits)
         }
 
         fn insert<F, Fut>(&mut self, name: String, handler: F) -> Result<(), RegistrationError>

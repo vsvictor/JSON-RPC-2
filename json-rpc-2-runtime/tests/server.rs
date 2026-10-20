@@ -7,67 +7,55 @@ use std::{
 };
 
 use bytes::Bytes;
+use json_rpc_2_client::{RpcClient, RpcClientError, RpcClientTransport, TransportError};
+use json_rpc_2_core::SrtConfig;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use json_rpc_2_datagram::client::transports::dccp::DccpClientTransport;
 #[cfg(feature = "rtp")]
 use json_rpc_2_datagram::client::transports::rtp::RtpClientTransport;
 #[cfg(feature = "rudp")]
 use json_rpc_2_datagram::client::transports::rudp::RudpClientTransport;
-#[cfg(feature = "mqtt")]
-use json_rpc_2_iot::client::transports::mqtt::MqttClientTransport;
-#[cfg(feature = "coap")]
-use json_rpc_2_iot::client::transports::coap::CoapClientTransport;
-#[cfg(feature = "amqp")]
-use json_rpc_2_iot::client::transports::amqp::AmqpClientTransport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use json_rpc_2_datagram::client::transports::sctp::SctpClientTransport;
 #[cfg(feature = "srt")]
 use json_rpc_2_datagram::client::transports::srt::SrtClientTransport;
+use json_rpc_2_datagram::client::transports::udp::UdpClientTransport;
 #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
 use json_rpc_2_datagram::client::transports::udplite::UdpLiteClientTransport;
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use json_rpc_2_websockets::client::transports::dccp::DccpWebSocketClientTransport;
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use json_rpc_2_websockets::client::transports::sctp::SctpWebSocketClientTransport;
-use json_rpc_2_client::{RpcClient, RpcClientError, RpcClientTransport, TransportError};
-use json_rpc_2_datagram::client::transports::udp::UdpClientTransport;
-use json_rpc_2_quic::client::transports::{http3::Http3ClientTransport, quic::QuicClientTransport};
-use json_rpc_2_tcp::client::transports::{http1::Http1ClientTransport, tcp::TcpClientTransport};
-use json_rpc_2_websockets::client::transports::{
-    http1::Http1WebSocketClientTransport, http3::Http3WebSocketClientTransport,
-    quic::QuicWebSocketClientTransport, tcp::TcpWebSocketClientTransport,
-    udp::UdpWebSocketClientTransport,
-};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use json_rpc_2_datagram::server::transports::dccp::DccpTransport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use json_rpc_2_datagram::server::transports::sctp::SctpTransport;
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use json_rpc_2_websockets::server::transports::dccp::DccpWebSocketTransport;
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use json_rpc_2_websockets::server::transports::sctp::SctpWebSocketTransport;
-use json_rpc_2_server::{
-    H3_ALPN, JsonRpcProtocol, MultiTransportServer, QUIC_ALPN, RegistrationError, RpcError,
-    RpcServer, RunningServer, RunningTransport, SrtConfig, Transport, TransportKind, WS_QUIC_ALPN,
-};
 use json_rpc_2_datagram::server::transports::udp::UdpTransport;
+#[cfg(feature = "amqp")]
+use json_rpc_2_iot::client::transports::amqp::AmqpClientTransport;
+#[cfg(feature = "coap")]
+use json_rpc_2_iot::client::transports::coap::CoapClientTransport;
+#[cfg(feature = "mqtt")]
+use json_rpc_2_iot::client::transports::mqtt::MqttClientTransport;
+use json_rpc_2_quic::client::transports::{http3::Http3ClientTransport, quic::QuicClientTransport};
 use json_rpc_2_quic::server::transports::{http3::Http3Transport, quic::QuicTransport};
-use json_rpc_2_tcp::server::transports::{http1::Http1Transport, tcp::TcpTransport};
-use json_rpc_2_websockets::server::transports::{
-    JsonRpcWebSocket, WebSocketProtocol, WebSocketTransport,
-    http1::Http1WebSocketTransport, http3::Http3WebSocketTransport,
-    quic::QuicWebSocketTransport, tcp::TcpWebSocketTransport, udp::UdpWebSocketTransport,
+use json_rpc_2_runtime::{
+    H3_ALPN, MultiTransportServer, QUIC_ALPN, RunningServer, RunningTransport, Transport,
+    TransportKind, WS_QUIC_ALPN,
 };
+use json_rpc_2_server::{JsonRpcProtocol, RegistrationError, RpcError, RpcServer};
+use json_rpc_2_tcp::client::transports::{http1::Http1ClientTransport, tcp::TcpClientTransport};
+use json_rpc_2_tcp::server::transports::{http1::Http1Transport, tcp::TcpTransport};
+#[cfg(all(feature = "websocket", feature = "amqp"))]
+use json_rpc_2_websockets::client::transports::amqp::AmqpWebSocketClientTransport;
+#[cfg(all(feature = "websocket", feature = "coap"))]
+use json_rpc_2_websockets::client::transports::coap::CoapWebSocketClientTransport;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use json_rpc_2_websockets::client::transports::dccp::DccpWebSocketClientTransport;
+#[cfg(all(feature = "websocket", feature = "mqtt"))]
+use json_rpc_2_websockets::client::transports::mqtt::MqttWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "rtp"))]
 use json_rpc_2_websockets::client::transports::rtp::RtpWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "rudp"))]
 use json_rpc_2_websockets::client::transports::rudp::RudpWebSocketClientTransport;
-#[cfg(all(feature = "websocket", feature = "mqtt"))]
-use json_rpc_2_websockets::client::transports::mqtt::MqttWebSocketClientTransport;
-#[cfg(all(feature = "websocket", feature = "coap"))]
-use json_rpc_2_websockets::client::transports::coap::CoapWebSocketClientTransport;
-#[cfg(all(feature = "websocket", feature = "amqp"))]
-use json_rpc_2_websockets::client::transports::amqp::AmqpWebSocketClientTransport;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use json_rpc_2_websockets::client::transports::sctp::SctpWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "srt"))]
 use json_rpc_2_websockets::client::transports::srt::SrtWebSocketClientTransport;
 #[cfg(all(
@@ -76,6 +64,20 @@ use json_rpc_2_websockets::client::transports::srt::SrtWebSocketClientTransport;
     any(target_os = "linux", target_os = "android")
 ))]
 use json_rpc_2_websockets::client::transports::udplite::UdpLiteWebSocketClientTransport;
+use json_rpc_2_websockets::client::transports::{
+    http1::Http1WebSocketClientTransport, http3::Http3WebSocketClientTransport,
+    quic::QuicWebSocketClientTransport, tcp::TcpWebSocketClientTransport,
+    udp::UdpWebSocketClientTransport,
+};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use json_rpc_2_websockets::server::transports::dccp::DccpWebSocketTransport;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use json_rpc_2_websockets::server::transports::sctp::SctpWebSocketTransport;
+use json_rpc_2_websockets::server::transports::{
+    JsonRpcWebSocket, WebSocketProtocol, WebSocketTransport, http1::Http1WebSocketTransport,
+    http3::Http3WebSocketTransport, quic::QuicWebSocketTransport, tcp::TcpWebSocketTransport,
+    udp::UdpWebSocketTransport,
+};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::{Value, json};
@@ -590,18 +592,10 @@ async fn serves_every_transport_on_every_bind_address() {
     let builder = builder.set_rtp_port(0);
     #[cfg(feature = "rudp")]
     let builder = builder.set_rudp_port(0).set_ws_rudp_port(0);
-    #[cfg(feature = "mqtt")]
-    let builder = builder.set_mqtt_port(0);
-    #[cfg(all(feature = "websocket", feature = "mqtt"))]
-    let builder = builder.set_ws_mqtt_port(0);
     #[cfg(feature = "coap")]
     let builder = builder.set_coap_port(0);
     #[cfg(all(feature = "websocket", feature = "coap"))]
     let builder = builder.set_ws_coap_port(0);
-    #[cfg(feature = "amqp")]
-    let builder = builder.set_amqp_port(0);
-    #[cfg(all(feature = "websocket", feature = "amqp"))]
-    let builder = builder.set_ws_amqp_port(0);
     #[cfg(feature = "srt")]
     let builder = builder
         .set_srt_config(SrtConfig {
@@ -615,11 +609,19 @@ async fn serves_every_transport_on_every_bind_address() {
     let running: RunningServer = server.start().await.unwrap();
     assert_eq!(
         running.listeners().count(),
-        ADDRESS_FAMILIES.len() * TransportKind::ALL.len()
+        ADDRESS_FAMILIES.len()
+            * TransportKind::ALL
+                .iter()
+                .filter(|kind| !kind.is_broker())
+                .count()
     );
 
     for ip in ips {
-        for kind in TransportKind::ALL.iter().copied() {
+        for kind in TransportKind::ALL
+            .iter()
+            .copied()
+            .filter(|kind| !kind.is_broker())
+        {
             let to = running.address(kind, ip).unwrap();
             assert_ne!(to.port(), 0, "{kind:?} {ip}");
             let client = RpcClient::new(connect(kind, to, &certificate).await);

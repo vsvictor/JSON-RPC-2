@@ -6,11 +6,14 @@ members = [
     "json-rpc-2-config",
     "json-rpc-2-core",
     "json-rpc-2-datagram",
+    "json-rpc-2-ext",
     "json-rpc-2-ffi",
     "json-rpc-2-iot",
     "json-rpc-2-quic",
     "json-rpc-2-server",
     "json-rpc-2-tcp",
+    "json-rpc-2-transport",
+    "json-rpc-2-runtime",
     "json-rpc-2-websockets",
 ]
 default-members = [
@@ -20,10 +23,13 @@ default-members = [
     "json-rpc-2-config",
     "json-rpc-2-core",
     "json-rpc-2-datagram",
+    "json-rpc-2-ext",
     "json-rpc-2-iot",
     "json-rpc-2-quic",
     "json-rpc-2-server",
     "json-rpc-2-tcp",
+    "json-rpc-2-transport",
+    "json-rpc-2-runtime",
     "json-rpc-2-websockets",
 ]
 resolver = "3"

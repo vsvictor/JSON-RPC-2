@@ -23,7 +23,8 @@ use tokio::task::JoinHandle;
 pub use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
-use crate::{TcpCongestionControl, TcpTuningConfig, UdpReliabilityConfig};
+use crate::{TcpCongestionControl, TcpTuningConfig};
+use json_rpc_2_core::UdpReliabilityConfig;
 
 /// QUIC application close code for a graceful raw QUIC shutdown.
 pub const QUIC_NO_ERROR: u32 = 0;
@@ -43,12 +44,12 @@ pub trait JsonRpcProtocol: Send + Sync + 'static {
 
 /// Runtime limits for the server dispatcher and transport fan-out.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransportLimits {
+pub struct ServerLimits {
     pub max_connections: usize,
     pub max_concurrent_requests: usize,
 }
 
-impl Default for TransportLimits {
+impl Default for ServerLimits {
     fn default() -> Self {
         Self {
             max_connections: 4096,
@@ -56,6 +57,9 @@ impl Default for TransportLimits {
         }
     }
 }
+
+/// Compatibility alias for the server-side limits type.
+pub type TransportLimits = ServerLimits;
 
 /// Graceful shutdown behavior shared by transport adapters.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,9 +80,9 @@ pub type TransportFuture = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
 
 #[derive(Default)]
 pub struct RuntimeMetrics {
-    pub active_sessions: AtomicUsize,
-    pub active_streams: AtomicUsize,
-    pub reconnect_attempts: AtomicU64,
+    active_sessions: AtomicUsize,
+    active_streams: AtomicUsize,
+    reconnect_attempts: AtomicU64,
 }
 
 /// Observable transport/runtime health metrics.
@@ -90,6 +94,42 @@ pub struct RuntimeMetricsSnapshot {
 }
 
 impl RuntimeMetrics {
+    pub fn session_started(&self) {
+        self.sessions_started(1);
+    }
+
+    pub fn session_finished(&self) {
+        self.sessions_finished(1);
+    }
+
+    pub fn sessions_started(&self, count: usize) {
+        self.active_sessions.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn sessions_finished(&self, count: usize) {
+        self.active_sessions.fetch_sub(count, Ordering::Relaxed);
+    }
+
+    pub fn stream_started(&self) {
+        self.streams_started(1);
+    }
+
+    pub fn stream_finished(&self) {
+        self.streams_finished(1);
+    }
+
+    pub fn streams_started(&self, count: usize) {
+        self.active_streams.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn streams_finished(&self, count: usize) {
+        self.active_streams.fetch_sub(count, Ordering::Relaxed);
+    }
+
+    pub fn reconnect_attempted(&self) {
+        self.reconnect_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> RuntimeMetricsSnapshot {
         RuntimeMetricsSnapshot {
             active_sessions: self.active_sessions.load(Ordering::Relaxed),
@@ -101,7 +141,7 @@ impl RuntimeMetrics {
 
 /// Immutable transport runtime knobs shared by running server transports.
 pub struct TransportRuntime {
-    pub limits: TransportLimits,
+    pub limits: ServerLimits,
     pub shutdown: ServerShutdownPolicy,
     pub tcp_tuning: TcpTuningConfig,
     pub udp_reliability: UdpReliabilityConfig,
@@ -111,7 +151,7 @@ pub struct TransportRuntime {
 impl Default for TransportRuntime {
     fn default() -> Self {
         Self {
-            limits: TransportLimits::default(),
+            limits: ServerLimits::default(),
             shutdown: ServerShutdownPolicy::default(),
             tcp_tuning: TcpTuningConfig::default(),
             udp_reliability: UdpReliabilityConfig::default(),
@@ -122,7 +162,7 @@ impl Default for TransportRuntime {
 
 impl TransportRuntime {
     pub fn new(
-        limits: TransportLimits,
+        limits: ServerLimits,
         shutdown: ServerShutdownPolicy,
         tcp_tuning: TcpTuningConfig,
         udp_reliability: UdpReliabilityConfig,
@@ -359,7 +399,10 @@ where
     Ok(())
 }
 
-fn apply_tcp_fast_open_listener(socket: &socket2::Socket, tuning: &TcpTuningConfig) -> io::Result<()> {
+fn apply_tcp_fast_open_listener(
+    socket: &socket2::Socket,
+    tuning: &TcpTuningConfig,
+) -> io::Result<()> {
     if !tuning.fast_open {
         return Ok(());
     }
@@ -405,11 +448,7 @@ fn serialize_value(value: &Value) -> String {
 
 /// Shared multiplexor for transports that fan out independent stream sessions.
 pub mod multiplex {
-    use std::{
-        future::Future,
-        io,
-        sync::{Arc, atomic::Ordering},
-    };
+    use std::{future::Future, io, sync::Arc};
 
     use tokio::sync::Semaphore;
     use tokio_util::task::TaskTracker;
@@ -474,14 +513,14 @@ pub mod multiplex {
                 .acquire_owned()
                 .await
                 .map_err(|_| io::Error::other("session multiplexor closed"))?;
-            self.metrics.active_sessions.fetch_add(1, Ordering::Relaxed);
-            self.metrics.active_streams.fetch_add(1, Ordering::Relaxed);
+            self.metrics.session_started();
+            self.metrics.stream_started();
             let metrics = self.metrics.clone();
             self.sessions.spawn(async move {
                 let _permit = permit;
                 session.await;
-                metrics.active_streams.fetch_sub(1, Ordering::Relaxed);
-                metrics.active_sessions.fetch_sub(1, Ordering::Relaxed);
+                metrics.stream_finished();
+                metrics.session_finished();
             });
             Ok(())
         }

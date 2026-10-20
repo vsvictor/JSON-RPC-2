@@ -4,73 +4,25 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-checks=(
-  "cargo check -q -p json-rpc-2 --no-default-features --features tcp"
-  "cargo check -q -p json-rpc-2 --no-default-features --features udp"
-  "cargo check -q -p json-rpc-2 --no-default-features --features rtp"
-  "cargo check -q -p json-rpc-2 --no-default-features --features rudp"
-  "cargo check -q -p json-rpc-2 --no-default-features --features srt"
-  "cargo check -q -p json-rpc-2 --no-default-features --features mqtt"
-  "cargo check -q -p json-rpc-2 --no-default-features --features coap"
-  "cargo check -q -p json-rpc-2 --no-default-features --features amqp"
-  "cargo check -q -p json-rpc-2 --no-default-features --features http1"
-  "cargo check -q -p json-rpc-2 --no-default-features --features quic"
-  "cargo check -q -p json-rpc-2 --no-default-features --features http3"
-  "cargo check -q -p json-rpc-2 --no-default-features --features 'tcp,websocket'"
-  "cargo check -q -p json-rpc-2 --no-default-features --features 'udp,websocket'"
-  "cargo check -q -p json-rpc-2 --no-default-features --features 'rtp,websocket'"
-  "cargo check -q -p json-rpc-2 --no-default-features --features 'rudp,websocket'"
-  "cargo check -q -p json-rpc-2 --no-default-features --features 'srt,websocket'"
-  "cargo check -q -p json-rpc-2 --no-default-features --features 'mqtt,websocket'"
-  "cargo check -q -p json-rpc-2 --no-default-features --features 'coap,websocket'"
-  "cargo check -q -p json-rpc-2 --no-default-features --features 'amqp,websocket'"
-  "cargo check -q -p json-rpc-2 --no-default-features --features 'http1,websocket'"
-  "cargo check -q -p json-rpc-2 --no-default-features --features 'quic,websocket'"
-  "cargo check -q -p json-rpc-2 --no-default-features --features 'http3,websocket'"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features tcp"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features udp"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features rtp"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features rudp"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features srt"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features mqtt"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features coap"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features amqp"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features http1"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features quic"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features http3"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'tcp,websocket'"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'udp,websocket'"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'rtp,websocket'"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'rudp,websocket'"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'srt,websocket'"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'mqtt,websocket'"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'coap,websocket'"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'amqp,websocket'"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'http1,websocket'"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'quic,websocket'"
-  "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'http3,websocket'"
-)
+transport_features=(tcp udp rtp rudp srt mqtt coap amqp http1 quic http3)
+for package in json-rpc-2 json-rpc-2-ffi; do
+  for feature in "${transport_features[@]}"; do
+    echo ">>> cargo check -q -p $package --no-default-features --features $feature"
+    cargo check -q -p "$package" --no-default-features --features "$feature"
+  done
+  for feature in tcp udp rtp rudp srt mqtt coap amqp http1 quic http3; do
+    echo ">>> cargo check -q -p $package --no-default-features --features $feature,websocket"
+    cargo check -q -p "$package" --no-default-features --features "$feature,websocket"
+  done
 
-case "$(uname -s)" in
-  Linux|Android)
-    checks+=(
-      "cargo check -q -p json-rpc-2 --no-default-features --features udplite"
-      "cargo check -q -p json-rpc-2 --no-default-features --features dccp"
-      "cargo check -q -p json-rpc-2 --no-default-features --features sctp"
-      "cargo check -q -p json-rpc-2 --no-default-features --features 'udplite,websocket'"
-      "cargo check -q -p json-rpc-2 --no-default-features --features 'dccp,websocket'"
-      "cargo check -q -p json-rpc-2 --no-default-features --features 'sctp,websocket'"
-      "cargo check -q -p json-rpc-2-ffi --no-default-features --features udplite"
-      "cargo check -q -p json-rpc-2-ffi --no-default-features --features dccp"
-      "cargo check -q -p json-rpc-2-ffi --no-default-features --features sctp"
-      "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'udplite,websocket'"
-      "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'dccp,websocket'"
-      "cargo check -q -p json-rpc-2-ffi --no-default-features --features 'sctp,websocket'"
-    )
-    ;;
-esac
-
-for cmd in "${checks[@]}"; do
-  echo ">>> $cmd"
-  eval "$cmd"
+  case "$(uname -s)" in
+    Linux|Android)
+      for feature in udplite dccp sctp; do
+        echo ">>> cargo check -q -p $package --no-default-features --features $feature"
+        cargo check -q -p "$package" --no-default-features --features "$feature"
+        echo ">>> cargo check -q -p $package --no-default-features --features $feature,websocket"
+        cargo check -q -p "$package" --no-default-features --features "$feature,websocket"
+      done
+      ;;
+  esac
 done

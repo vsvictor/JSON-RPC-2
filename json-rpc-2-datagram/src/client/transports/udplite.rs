@@ -19,15 +19,15 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use json_rpc_2_core::{closed, transport_error};
-use json_rpc_2_core::{
-    ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
-    RpcClientTransport, TransportError,
-};
 use json_rpc_2_core::{
     ReliableUdpPacket, ReliableUdpPacketKind, UdpLiteConfig, UdpReliabilityConfig,
     decode_udp_packet, encode_udp_packet,
 };
+use json_rpc_2_transport::{
+    ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
+    RpcClientTransport, TransportError,
+};
+use json_rpc_2_transport::{closed, transport_error};
 
 #[derive(Clone, Debug)]
 enum PendingEvent {
@@ -78,7 +78,13 @@ impl UdpLiteClientTransport {
         udp_lite.validate().map_err(TransportError::new)?;
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let state = Some(
-            Self::open(address, config.clone(), udp_lite.clone(), Arc::clone(&pending)).await?,
+            Self::open(
+                address,
+                config.clone(),
+                udp_lite.clone(),
+                Arc::clone(&pending),
+            )
+            .await?,
         );
         Ok(Self {
             address,

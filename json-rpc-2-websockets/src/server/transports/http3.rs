@@ -6,15 +6,16 @@ use super::{
     CancellationToken, WebSocketMessage, WebSocketProtocol, WebSocketTransport,
     WebSocketTransportFuture,
 };
-use json_rpc_2_core::{
-    H3_NO_ERROR, MAX_MESSAGE_BYTES, TransportRuntime, log_control, log_json_rpc,
-    log_transport_error, multiplex::StreamMultiplexor,
-};
 use axum::http::{HeaderValue, Method, Response, StatusCode, header};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::{Buf, Bytes};
 use futures_util::{SinkExt, StreamExt};
 use h3::{ext::Protocol, server::RequestResolver};
+use json_rpc_2_core::MAX_MESSAGE_BYTES;
+use json_rpc_2_transport::multiplex::StreamMultiplexor;
+use json_rpc_2_transport::{
+    H3_NO_ERROR, TransportRuntime, log_control, log_json_rpc, log_transport_error,
+};
 use quinn::Endpoint;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio_tungstenite::{

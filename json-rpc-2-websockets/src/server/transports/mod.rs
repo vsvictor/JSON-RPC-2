@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 pub use json_rpc_2_core::{WebSocketFuture, WebSocketMessage, WebSocketProtocol};
 
-use json_rpc_2_core::{CancellationToken, JsonRpcProtocol, RunningTransport, TransportFuture};
+use json_rpc_2_transport::{CancellationToken, JsonRpcProtocol, RunningTransport, TransportFuture};
 
 #[cfg(all(feature = "websocket", feature = "amqp"))]
 pub mod amqp;
@@ -31,14 +31,14 @@ pub mod sctp;
 pub mod srt;
 #[cfg(all(feature = "websocket", feature = "tcp"))]
 pub mod tcp;
+#[cfg(all(feature = "websocket", feature = "udp"))]
+pub mod udp;
 #[cfg(all(
     feature = "websocket",
     feature = "udplite",
     any(target_os = "linux", target_os = "android")
 ))]
 pub mod udplite;
-#[cfg(all(feature = "websocket", feature = "udp"))]
-pub mod udp;
 
 /// JSON-RPC session running over a WebSocket connection.
 pub struct JsonRpcWebSocket {
@@ -63,7 +63,7 @@ struct WebSocketJsonRpcAdapter {
 
 #[cfg(any(feature = "dccp", feature = "sctp"))]
 impl JsonRpcProtocol for WebSocketJsonRpcAdapter {
-    fn handle_message<'a>(&'a self, message: &'a [u8]) -> json_rpc_2_core::ProtocolFuture<'a> {
+    fn handle_message<'a>(&'a self, message: &'a [u8]) -> json_rpc_2_transport::ProtocolFuture<'a> {
         Box::pin(async move {
             let inbound = json_rpc_2_core::decode_websocket_message(message).ok()??;
             let outbound = self.protocol.handle_message(inbound).await?;

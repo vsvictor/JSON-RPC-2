@@ -5,51 +5,47 @@ use std::{
     time::Duration,
 };
 
+use json_rpc_2_client::{RpcClient, RpcClientTransport, TransportError};
+use json_rpc_2_core::SrtConfig;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use json_rpc_2_datagram::client::transports::dccp::DccpClientTransport;
 #[cfg(feature = "rtp")]
 use json_rpc_2_datagram::client::transports::rtp::RtpClientTransport;
 #[cfg(feature = "rudp")]
 use json_rpc_2_datagram::client::transports::rudp::RudpClientTransport;
-#[cfg(feature = "mqtt")]
-use json_rpc_2_iot::client::transports::mqtt::MqttClientTransport;
-#[cfg(feature = "coap")]
-use json_rpc_2_iot::client::transports::coap::CoapClientTransport;
-#[cfg(feature = "amqp")]
-use json_rpc_2_iot::client::transports::amqp::AmqpClientTransport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use json_rpc_2_datagram::client::transports::sctp::SctpClientTransport;
 #[cfg(feature = "srt")]
 use json_rpc_2_datagram::client::transports::srt::SrtClientTransport;
+use json_rpc_2_datagram::client::transports::udp::UdpClientTransport;
 #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
 use json_rpc_2_datagram::client::transports::udplite::UdpLiteClientTransport;
+#[cfg(feature = "amqp")]
+use json_rpc_2_iot::client::transports::amqp::AmqpClientTransport;
+#[cfg(feature = "coap")]
+use json_rpc_2_iot::client::transports::coap::CoapClientTransport;
+#[cfg(feature = "mqtt")]
+use json_rpc_2_iot::client::transports::mqtt::MqttClientTransport;
+use json_rpc_2_quic::client::transports::{http3::Http3ClientTransport, quic::QuicClientTransport};
+use json_rpc_2_runtime::{
+    H3_ALPN, MultiTransportServer, QUIC_ALPN, RunningServer, TransportKind, WS_QUIC_ALPN,
+};
+use json_rpc_2_server::{JsonRpcProtocol, RpcServer};
+use json_rpc_2_tcp::client::transports::{http1::Http1ClientTransport, tcp::TcpClientTransport};
+#[cfg(all(feature = "websocket", feature = "amqp"))]
+use json_rpc_2_websockets::client::transports::amqp::AmqpWebSocketClientTransport;
+#[cfg(all(feature = "websocket", feature = "coap"))]
+use json_rpc_2_websockets::client::transports::coap::CoapWebSocketClientTransport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use json_rpc_2_websockets::client::transports::dccp::DccpWebSocketClientTransport;
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use json_rpc_2_websockets::client::transports::sctp::SctpWebSocketClientTransport;
-use json_rpc_2_client::{RpcClient, RpcClientTransport, TransportError};
-use json_rpc_2_datagram::client::transports::udp::UdpClientTransport;
-use json_rpc_2_quic::client::transports::{http3::Http3ClientTransport, quic::QuicClientTransport};
-use json_rpc_2_tcp::client::transports::{http1::Http1ClientTransport, tcp::TcpClientTransport};
-use json_rpc_2_websockets::client::transports::{
-    http1::Http1WebSocketClientTransport, http3::Http3WebSocketClientTransport,
-    quic::QuicWebSocketClientTransport, tcp::TcpWebSocketClientTransport,
-    udp::UdpWebSocketClientTransport,
-};
-use json_rpc_2_server::{
-    H3_ALPN, JsonRpcProtocol, MultiTransportServer, QUIC_ALPN, RpcServer, SrtConfig, TransportKind,
-    WS_QUIC_ALPN,
-};
+#[cfg(all(feature = "websocket", feature = "mqtt"))]
+use json_rpc_2_websockets::client::transports::mqtt::MqttWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "rtp"))]
 use json_rpc_2_websockets::client::transports::rtp::RtpWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "rudp"))]
 use json_rpc_2_websockets::client::transports::rudp::RudpWebSocketClientTransport;
-#[cfg(all(feature = "websocket", feature = "mqtt"))]
-use json_rpc_2_websockets::client::transports::mqtt::MqttWebSocketClientTransport;
-#[cfg(all(feature = "websocket", feature = "coap"))]
-use json_rpc_2_websockets::client::transports::coap::CoapWebSocketClientTransport;
-#[cfg(all(feature = "websocket", feature = "amqp"))]
-use json_rpc_2_websockets::client::transports::amqp::AmqpWebSocketClientTransport;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use json_rpc_2_websockets::client::transports::sctp::SctpWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "srt"))]
 use json_rpc_2_websockets::client::transports::srt::SrtWebSocketClientTransport;
 #[cfg(all(
@@ -58,6 +54,11 @@ use json_rpc_2_websockets::client::transports::srt::SrtWebSocketClientTransport;
     any(target_os = "linux", target_os = "android")
 ))]
 use json_rpc_2_websockets::client::transports::udplite::UdpLiteWebSocketClientTransport;
+use json_rpc_2_websockets::client::transports::{
+    http1::Http1WebSocketClientTransport, http3::Http3WebSocketClientTransport,
+    quic::QuicWebSocketClientTransport, tcp::TcpWebSocketClientTransport,
+    udp::UdpWebSocketClientTransport,
+};
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::{Value, json};
@@ -208,11 +209,7 @@ async fn connect(
 
 async fn start_all(
     protocol: Arc<RpcServer>,
-) -> (
-    json_rpc_2_server::RunningServer,
-    CertificateDer<'static>,
-    Arc<RpcServer>,
-) {
+) -> (RunningServer, CertificateDer<'static>, Arc<RpcServer>) {
     let (certificate, key) = identity();
     let builder = MultiTransportServer::builder(protocol.clone() as Arc<dyn JsonRpcProtocol>)
         .set_bind([LOCALHOST])
@@ -231,18 +228,10 @@ async fn start_all(
     let builder = builder.set_rtp_port(0);
     #[cfg(feature = "rudp")]
     let builder = builder.set_rudp_port(0).set_ws_rudp_port(0);
-    #[cfg(feature = "mqtt")]
-    let builder = builder.set_mqtt_port(0);
-    #[cfg(all(feature = "websocket", feature = "mqtt"))]
-    let builder = builder.set_ws_mqtt_port(0);
     #[cfg(feature = "coap")]
     let builder = builder.set_coap_port(0);
     #[cfg(all(feature = "websocket", feature = "coap"))]
     let builder = builder.set_ws_coap_port(0);
-    #[cfg(feature = "amqp")]
-    let builder = builder.set_amqp_port(0);
-    #[cfg(all(feature = "websocket", feature = "amqp"))]
-    let builder = builder.set_ws_amqp_port(0);
     #[cfg(feature = "srt")]
     let builder = builder
         .set_srt_config(SrtConfig {
@@ -357,7 +346,26 @@ async fn black_box_reconnect_under_load_recovers_every_transport() {
 
 #[tokio::test]
 async fn black_box_graceful_shutdown_finishes_inflight_requests() {
-    let (running, certificate, _protocol) = start_all(make_server()).await;
+    let (running, certificate, protocol) = start_all(make_server()).await;
+    let accepted = Arc::new(tokio::sync::Barrier::new(running.listeners().count() + 1));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let handlers_accepted = Arc::clone(&accepted);
+    let handlers_release = Arc::clone(&release);
+    protocol
+        .register("shutdown_echo", move |params| {
+            let accepted = Arc::clone(&handlers_accepted);
+            let release = Arc::clone(&handlers_release);
+            async move {
+                let released = release.notified();
+                tokio::pin!(released);
+                released.as_mut().enable();
+                accepted.wait().await;
+                released.await;
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                Ok(params["value"].clone())
+            }
+        })
+        .unwrap();
     let clients = running
         .listeners()
         .map(|(kind, address)| {
@@ -377,15 +385,20 @@ async fn black_box_graceful_shutdown_finishes_inflight_requests() {
             let kind = *kind;
             tokio::spawn(async move {
                 let response: Value = client
-                    .request("delay_echo", json!({"value": kind.id(), "delay_ms": 80}))
+                    .request("shutdown_echo", json!({"value": kind.id()}))
                     .await
-                    .unwrap();
+                    .unwrap_or_else(|error| {
+                        panic!("{} graceful response failed: {error}", kind.id())
+                    });
                 assert_eq!(response, json!(kind.id()));
             })
         })
         .collect::<Vec<_>>();
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::timeout(Duration::from_secs(10), accepted.wait())
+        .await
+        .expect("not all transports entered the request handler");
+    release.notify_waiters();
     running.close().await.unwrap();
 
     for request in requests {

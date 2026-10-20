@@ -113,10 +113,12 @@ and close semantics without claiming RFC 6455 over raw datagram sockets.
 ## WebSocket family crate
 
 The dedicated `json-rpc-2-websockets` crate that groups the public
-WebSocket-related transport surface of the workspace. It re-exports the shared
-WebSocket abstractions plus all concrete WebSocket carriers, while
-`json-rpc-2-tcp`, `json-rpc-2-datagram`, and `json-rpc-2-quic` stay focused on
-their non-WebSocket transport families.
+WebSocket-related transport surface of the workspace. It owns the WebSocket
+session adapters and concrete carriers, and re-exports the shared abstractions
+from `json-rpc-2-core` and transport contracts from `json-rpc-2-transport`.
+It depends on `json-rpc-2-tcp`,
+`json-rpc-2-datagram`, `json-rpc-2-quic`, and `json-rpc-2-iot` for the underlying
+non-WebSocket carriers, without depending on the client or server runtime crates.
 
 ## Head-of-line blocking
 
@@ -221,9 +223,10 @@ workspace uses that model so the RTP transport stays a single-port deployment.
 
 ## SRT
 
-Secure Reliable Transport. In this workspace it refers to an encrypted,
-message-oriented UDP-family transport that combines application-level retry and
-dedup semantics with shared-passphrase payload encryption.
+Secure Reliable Transport. The transport uses Haivision libsrt for standard
+caller/listener handshake, message-oriented reliable delivery, congestion
+control, and passphrase-based encryption. JSON-RPC framing over the carrier is
+project-defined; the old private `JSRT` packet format is not this transport.
 
 ## UDP-Lite
 
@@ -254,7 +257,8 @@ dedicated text/binary/close framing but carries it inside RUDP packets.
 
 A sibling transport to WebSocket/UDP, WebSocket/RTP, and WebSocket/RUDP that
 keeps the same dedicated text/binary/close framing but carries it inside the
-encrypted SRT-style packet transport.
+standard SRT message transport. The WebSocket-style envelope is still
+project-defined, not RFC 6455 over SRT.
 
 ## WebSocket over UDP-Lite
 
@@ -275,10 +279,10 @@ dedicated text/binary/close framing but uses a connected SCTP carrier.
 
 ## MQTT
 
-Message Queuing Telemetry Transport. In this workspace it is modeled as a
-TCP-family JSON-RPC carrier that reuses the real MQTT fixed-header and
-remaining-length encoding, publishing JSON-RPC payloads as `PUBLISH` packets on
-dedicated request/response topics over one persistent TCP connection.
+Message Queuing Telemetry Transport. The adapter is a standard MQTT 3.1.1
+broker client with connection/subscription lifecycle and request/reply topics.
+Both the JSON-RPC client and service connect outward to an external broker;
+the RPC service is not itself an MQTT broker.
 
 ## CoAP
 
@@ -289,10 +293,10 @@ for JSON-RPC payloads.
 
 ## AMQP
 
-Advanced Message Queuing Protocol. In this workspace it is modeled as a
-TCP-family JSON-RPC carrier using a simplified single-channel framing with the
-real AMQP frame-end byte (`0xCE`), carrying JSON-RPC payloads inside AMQP
-content frames over one persistent TCP connection.
+Advanced Message Queuing Protocol. The adapter uses AMQP 0-9-1 connection,
+channel, publish/consume, reply queue, and correlation semantics through an
+external broker such as RabbitMQ. AMQP 1.0 is a different protocol and is not
+the selected binding.
 
 ## WebSocket over MQTT
 

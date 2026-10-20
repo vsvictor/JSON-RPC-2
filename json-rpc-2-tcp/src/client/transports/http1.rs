@@ -9,12 +9,13 @@ use hyper::client::conn::http1::{SendRequest, handshake};
 use hyper_util::rt::TokioIo;
 use tokio::{sync::Mutex, task::JoinHandle};
 
-use json_rpc_2_core::{closed, transport_error};
-use json_rpc_2_core::{
+use json_rpc_2_core::MAX_MESSAGE_BYTES;
+use json_rpc_2_transport::TcpTuningConfig;
+use json_rpc_2_transport::{
     CONTROL_PATH, ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
-    MAX_MESSAGE_BYTES, RpcClientTransport, TransportError,
+    RpcClientTransport, TransportError,
 };
-use json_rpc_2_core::TcpTuningConfig;
+use json_rpc_2_transport::{closed, transport_error};
 
 /// HTTP/1.1 client transport. HTTP 204 is reported as an empty response.
 pub struct Http1ClientTransport {
@@ -47,7 +48,7 @@ impl Http1ClientTransport {
         address: SocketAddr,
         tuning: &TcpTuningConfig,
     ) -> Result<(SendRequest<Full<Bytes>>, JoinHandle<hyper::Result<()>>), TransportError> {
-        let stream = json_rpc_2_core::connect_tcp_stream(address, tuning).await?;
+        let stream = json_rpc_2_transport::connect_tcp_stream(address, tuning).await?;
         let (sender, connection) = handshake(TokioIo::new(stream))
             .await
             .map_err(transport_error)?;

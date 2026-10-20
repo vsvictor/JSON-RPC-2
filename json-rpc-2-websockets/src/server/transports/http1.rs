@@ -18,10 +18,9 @@ use super::{
     CancellationToken, WebSocketMessage, WebSocketProtocol, WebSocketTransport,
     WebSocketTransportFuture,
 };
-use json_rpc_2_core::{
-    MAX_MESSAGE_BYTES, TransportRuntime, log_control, log_json_rpc, log_transport_error,
-    multiplex::{StreamMultiplexor, StreamMultiplexorHandle},
-};
+use json_rpc_2_core::MAX_MESSAGE_BYTES;
+use json_rpc_2_transport::multiplex::{StreamMultiplexor, StreamMultiplexorHandle};
+use json_rpc_2_transport::{TransportRuntime, log_control, log_json_rpc, log_transport_error};
 
 /// WebSocket transport established using the HTTP/1.1 Upgrade mechanism.
 pub struct Http1WebSocketTransport {

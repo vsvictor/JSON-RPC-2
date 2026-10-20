@@ -3,7 +3,8 @@
 use libfuzzer_sys::fuzz_target;
 use serde_json::json;
 
-use json_rpc_2_server::{CONTROL_PATH, JsonRpcProtocol, RpcServer};
+use json_rpc_2_server::{JsonRpcProtocol, RpcServer};
+use json_rpc_2_transport::CONTROL_PATH;
 
 fn server() -> RpcServer {
     let server = RpcServer::new();

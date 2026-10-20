@@ -10,7 +10,7 @@ use tokio::{
 use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
 
 use super::{WebSocketCarrier, WebSocketClientTransport};
-use json_rpc_2_core::{ClientCloseFuture, TransportError, transport_error};
+use json_rpc_2_transport::{ClientCloseFuture, TransportError, transport_error};
 
 const DUPLEX_BUFFER_BYTES: usize = 64 * 1024;
 

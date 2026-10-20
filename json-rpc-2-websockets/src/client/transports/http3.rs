@@ -19,11 +19,11 @@ use tokio_tungstenite::{
 };
 
 use super::{WebSocketCarrier, WebSocketClientTransport};
-use json_rpc_2_core::{ClientCloseFuture, TransportError, transport_error};
 use json_rpc_2_quic::client::transports::{
     http3::{H3Driver, H3Sender, close_h3, connect_h3},
     uri_host,
 };
+use json_rpc_2_transport::{ClientCloseFuture, TransportError, transport_error};
 
 const DUPLEX_BUFFER_BYTES: usize = 64 * 1024;
 

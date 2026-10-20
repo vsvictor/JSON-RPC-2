@@ -1,0 +1,79 @@
+name: Rust workspace
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  workspace:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native SRT dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y libsrt-openssl-dev srt-tools pkg-config libclang-dev
+      - name: Native SRT dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install srt pkgconf
+      - uses: Swatinem/rust-cache@v2
+      - name: Architecture policy tests
+        run: python3 -m unittest discover -s tools -p 'test_check_architecture.py'
+      - name: Production crate boundaries
+        run: python3 tools/check-architecture.py
+      - name: Core without default features
+        run: cargo check --locked -p json-rpc-2-core --no-default-features
+      - name: Workspace and public API compile coverage
+        run: cargo check --locked --workspace --all-features --all-targets
+      - name: Minimal facade API compile coverage
+        run: |
+          cargo check --locked -p json-rpc-2 --no-default-features --all-targets
+          cargo check --locked -p json-rpc-2 --no-default-features --features tcp --all-targets
+      - name: Workspace tests
+        run: cargo test --locked --workspace --all-features
+      - name: Independent encrypted SRT interoperability
+        if: runner.os == 'Linux'
+        env:
+          SRT_LIVE_TRANSMIT: /usr/bin/srt-live-transmit
+        run: >-
+          cargo test --locked -p json-rpc-2-datagram --no-default-features --features srt
+          --test srt_native srt_live_transmit_receives_encrypted_standard_srt_messages
+          -- --exact
+      - name: Feature matrix including OS-specific adapters
+        run: bash tools/check-features.sh
+
+  brokers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      JSON_RPC_TEST_MQTT_URL: mqtt://rpc-test:rpc-test@127.0.0.1:18883
+      JSON_RPC_TEST_AMQP_URL: amqp://rpc-test:rpc-test@127.0.0.1:56723/%2f
+      MQTT_BROKER_URL: mqtt://rpc-test:rpc-test@127.0.0.1:18883
+      AMQP_BROKER_URL: amqp://rpc-test:rpc-test@127.0.0.1:56723/%2f
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libsrt-openssl-dev pkg-config libclang-dev
+      - name: Start authenticated independent brokers
+        run: docker compose -f json-rpc-2-iot/tests/brokers/compose.yaml up -d --wait
+      - name: Broker readiness and runtime lifecycle
+        run: cargo test --locked -p json-rpc-2-runtime --all-features --test brokers -- --ignored
+      - name: MQTT and AMQP protocol interoperability
+        run: cargo test --locked -p json-rpc-2-iot --all-features --test broker_rpc --test broker_auth -- --include-ignored
+      - name: Common contract over actual brokers
+        run: cargo test --locked -p json-rpc-2 --all-features --test transport_contract -- --ignored
+      - name: Stop temporary brokers
+        if: always()
+        run: docker compose -f json-rpc-2-iot/tests/brokers/compose.yaml down -v

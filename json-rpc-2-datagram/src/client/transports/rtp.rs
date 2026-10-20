@@ -18,15 +18,15 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use json_rpc_2_core::{closed, transport_error};
-use json_rpc_2_core::{
-    ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
-    RpcClientTransport, TransportError,
-};
 use json_rpc_2_core::{
     RtcpControlPacket, RtcpControlPacketKind, RtpPacket, RtpPacketKind, UdpReliabilityConfig,
     decode_rtcp_control_packet, decode_rtp_packet, encode_rtcp_control_packet, encode_rtp_packet,
 };
+use json_rpc_2_transport::{
+    ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
+    RpcClientTransport, TransportError,
+};
+use json_rpc_2_transport::{closed, transport_error};
 
 #[derive(Clone, Debug)]
 enum PendingEvent {

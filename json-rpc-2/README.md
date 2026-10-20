@@ -2,14 +2,17 @@
 
 Compatibility facade over the split workspace crates:
 
-- `json-rpc-2-core`: JSON-RPC 2.0 wire types and shared protocol constants
-- `json-rpc-2-client`: transport-agnostic client plus transport adapters
+- `json-rpc-2-core`: JSON-RPC 2.0 wire types, shared protocol constants,
+  and transport wire codecs without a network runtime
+- `json-rpc-2-transport`: client/server transport contracts, runtime helpers,
+  metrics, multiplexing, and socket tuning
+- `json-rpc-2-client`: transport-agnostic client session runtime
 - `json-rpc-2-config`: typed environment / CLI config loader for the example runtime
 - `json-rpc-2-datagram`: non-WebSocket datagram/message-oriented transports
 - `json-rpc-2-iot`: non-WebSocket IoT transports (MQTT, CoAP, AMQP)
 - `json-rpc-2-quic`: non-WebSocket QUIC/HTTP3 transports
-- `json-rpc-2-server`: transport-agnostic server, typestate dispatcher builder,
-  multi-transport runtime, and transport adapters
+- `json-rpc-2-server`: transport-agnostic dispatcher and typestate builder
+- `json-rpc-2-runtime`: multi-transport server orchestration and health endpoints
 - `json-rpc-2-tcp`: non-WebSocket TCP/HTTP1 transports
 - `json-rpc-2-websockets`: all WebSocket-family transports and shared WebSocket
   adapter surface
@@ -23,9 +26,31 @@ Additional project documentation:
 - [Implementation coverage of todos](IMPLEMENTATION-TODOS.md)
 - [Glossary](GLOSSARY.md)
 - [Transport semantics](TRANSPORTS.md)
+- [Standards conformance and interoperability](CONFORMANCE.md)
+- [Retry and deduplication guarantees](RETRY-SEMANTICS.md)
+
+**Compatibility scope:** MQTT 3.1.1 and AMQP 0-9-1 use external brokers;
+the RPC server is a subscriber/consumer, not an embedded broker. SRT uses
+the native libsrt stack. JSON-RPC routing/framing remains an application
+binding, and datagram/broker WebSocket adapters use a private message envelope,
+not RFC 6455 over UDP or MQTT-over-WebSocket. See the conformance matrix before
+connecting an external peer.
 
 ## Architecture highlights
 
+- **Transport ownership**: concrete client and server adapters live in the
+  TCP, datagram, QUIC, IoT, and WebSocket family crates. These depend on
+  `json-rpc-2-core` and `json-rpc-2-transport`, not on the client or server runtime crates. WebSocket
+  carriers additionally depend on the underlying transport families.
+  `json-rpc-2-runtime` selects family implementations through optional
+  dependencies for its multi-transport runtime.
+- **Explicit limits**: `ClientLimits` and `ServerLimits` distinguish the
+  client queue/in-flight budget from server connection/request limits.
+  Legacy `TransportLimits` aliases remain available in the corresponding APIs.
+- **Architecture checks**: `python3 tools/check-architecture.py` rejects
+  forbidden production dependencies, including networking dependencies in core.
+  CI checks Linux/macOS, feature combinations, wire profiles, and supported
+  public facade paths.
 - **Immutable protocol core**: `RpcServer` now dispatches through an immutable
   method registry optimized for read-heavy runtime traffic; registrations remain
   copy-on-write and are intended for startup-time configuration.
@@ -49,6 +74,24 @@ Additional project documentation:
   `TCP_NODELAY`, explicit congestion-control selection (`system` or `bbr`),
   and TCP Fast Open on supported operating systems.
 
+### Direct-crate migration
+
+The facade keeps `MultiTransportServer`, `RunningServer`,
+`server::multi`, and transport-family paths available. Consumers importing
+implementation crates directly need these changes:
+
+| Previous direct owner | Current owner |
+|---|---|
+| `json-rpc-2-core` transport contracts, runtime helpers, capability model, control constants, TCP tuning | `json-rpc-2-transport` |
+| `json-rpc-2-server::MultiTransportServer`, `RunningServer`, `TransportKind`, health/orchestration API | `json-rpc-2-runtime` |
+| `json-rpc-2-server` WebSocket adapter reexports | `json-rpc-2-websockets` |
+
+`json-rpc-2-server` now builds the dispatcher without concrete transport
+dependencies. Legacy client/server transport feature names are compatibility
+no-ops; enable transport features on the facade or runtime/family crates instead.
+`TransportLimits` aliases are retained for compatibility, but new code should
+use explicit `ClientLimits` / `ServerLimits`.
+
 ## Transports
 
 Client and server adapters cover:
@@ -57,13 +100,13 @@ Client and server adapters cover:
 - reliable UDP
 - RTP/RTCP over UDP
 - RUDP
-- SRT-style encrypted reliable UDP
+- SRT (native libsrt)
 - UDP-Lite (Linux/Android only)
 - DCCP
 - SCTP
-- MQTT (over TCP)
+- MQTT 3.1.1 (external broker)
 - CoAP (over UDP)
-- AMQP (over TCP)
+- AMQP 0-9-1 (external broker)
 - raw QUIC
 - HTTP/1.1
 - HTTP/3
@@ -71,7 +114,7 @@ Client and server adapters cover:
 - WebSocket over UDP
 - WebSocket over RTP/RTCP
 - WebSocket over RUDP
-- WebSocket over SRT-style UDP
+- WebSocket-style messages over SRT
 - WebSocket over UDP-Lite (Linux/Android only)
 - WebSocket over DCCP
 - WebSocket over SCTP
@@ -119,7 +162,11 @@ traffic:
 
 - TCP, reliable UDP, and raw QUIC use reserved non-JSON control payloads.
 - RTP/RTCP uses RTCP APP control packets for ACK/ping/pong on the same UDP socket.
-- RUDP, SRT, and UDP-Lite use dedicated datagram control packets for ACK/ping/pong; SRT additionally encrypts payloads with a shared passphrase, while UDP-Lite can reduce checksum coverage to keep partially corrupted payloads visible to the application.
+- RUDP and UDP-Lite use dedicated datagram control packets for ACK/ping/pong;
+  UDP-Lite can reduce checksum coverage to keep partially corrupted payloads
+  visible to the application.
+- SRT delegates handshake, encryption, congestion control, and retransmission
+  to libsrt; its JSON-RPC binding carries separate application liveness messages.
 - DCCP uses the same reserved non-JSON control payloads as raw TCP/QUIC.
 - MQTT and AMQP reuse their own protocol control frames (MQTT `PINGREQ`/`PINGRESP`, AMQP heartbeat frames) for liveness.
 - CoAP uses empty confirmable messages as pings, acknowledged the same way as any other CoAP request.
@@ -197,17 +244,78 @@ reliable UDP adapter:
 - One JSON-RPC message still maps to one datagram; fragmentation/reassembly is
   intentionally out of scope for the current contract.
 
-## SRT-style transport
+## SRT transport
 
-The workspace also ships an SRT-style UDP transport optimized for reliable
-delivery over unstable links:
+SRT uses the native Haivision libsrt library, not a private encrypted UDP codec:
 
-- the carrier keeps message boundaries and retry/dedup behavior from the
-  UDP-family model;
-- payloads are encrypted with a shared-passphrase `SrtConfig` before they are
-  put on the wire;
-- `srt` and `ws-srt` require explicit SRT configuration in addition to the
-  usual UDP reliability policy.
+- caller/listener sessions perform the standard SRT handshake;
+- libsrt owns ARQ, congestion control, and passphrase-based encryption;
+- `srt` and `ws-srt` use `SrtConfig`; the reliable-UDP application cache is not
+  an SRT delivery guarantee;
+- build hosts need encrypted libsrt >= 1.5, pkg-config, and libclang for
+  bindings (`brew install srt pkgconf` plus Xcode command-line tools on macOS,
+  or `apt install libsrt-openssl-dev pkg-config libclang-dev` on Debian/Ubuntu);
+- passphrases must contain 10–79 bytes; this adapter enforces AES-256 encryption
+  and rejects a missing or mismatched passphrase rather than falling back
+  to cleartext.
+
+The previous `JSRT` wire format is not accepted as a standard SRT connection.
+JSON-RPC message framing over SRT remains project-defined: an arbitrary SRT
+video sender is not automatically a JSON-RPC peer.
+
+## MQTT and AMQP brokers
+
+MQTT and AMQP endpoints now refer to an **existing broker**, not a TCP listener
+owned by `RpcServer`. Configure the same request topic/queue for the RPC client
+and service. Replies are routed to per-client destinations with correlation
+metadata, including when multiple clients reuse the same JSON-RPC ID.
+
+Use `MqttConfig` / `AmqpConfig` for broker authentication, routing, TLS, and
+operation deadlines, and supply them to `set_mqtt_config` / `set_amqp_config`
+on the multi-transport runtime. The WebSocket-style variants use separate
+application framing over the same standard broker transports.
+
+```rust,no_run
+use std::sync::Arc;
+use json_rpc_2::{AmqpConfig, MqttConfig, MultiTransportServer, RpcServer};
+
+# async fn example() -> std::io::Result<()> {
+let mqtt = MqttConfig {
+    broker_url: "mqtt://127.0.0.1:1883".into(),
+    request_topic: "example/rpc/requests".into(),
+    ..Default::default()
+};
+let amqp = AmqpConfig {
+    broker_url: "amqp://guest:guest@127.0.0.1:5672/%2f".into(),
+    request_queue: "example.rpc.requests".into(),
+    ..Default::default()
+};
+let running = MultiTransportServer::builder(Arc::new(RpcServer::new()))
+    .set_mqtt_config(mqtt)
+    .set_amqp_config(amqp)
+    .start()
+    .await?;
+running.close().await?;
+# Ok(())
+# }
+```
+
+Client transports expose `connect_with_config`; pass the matching
+`request_topic` / `request_queue`. Use `set_ws_mqtt_config` /
+`set_ws_amqp_config` and separate routes for WebSocket-style services.
+
+These APIs intentionally change the old private-profile topology. Port `0`
+does not create a local MQTT or AMQP broker. Broker acknowledgements and
+reliability do not imply exactly-once execution of application side effects.
+
+CLI configuration accepts `--mqtt-url`, `--mqtt-topic`, `--mqtt-ws-topic`,
+`--amqp-url`, `--amqp-queue`, and `--amqp-ws-queue`; credentials belong in the
+broker URL. `mqtts://` and `amqps://` enable verified TLS; `--mqtt-ca` accepts
+an additional PEM CA bundle for MQTT. Operation and response deadlines have
+separate `--mqtt-*-timeout-ms` / `--amqp-*-timeout-ms` options. The equivalent
+environment variables and deprecated port aliases are listed by `--help`.
+TCP_NODELAY/BBR/Fast Open settings apply only to adapter-owned TCP/HTTP1
+sockets, not to broker-library sockets.
 
 ## UDP-Lite transport
 
@@ -225,7 +333,7 @@ datagrams on Linux/Android:
 
 - **TCP / HTTP/1.1 / WebSocket over TCP or HTTP/1.1** serialize request/response
   handling on one logical session; completion order follows transport order.
-- **Reliable UDP / RTP/RTCP / RUDP / SRT / UDP-Lite** are datagram-based and may complete **out of
+- **Reliable UDP / RTP/RTCP / RUDP / UDP-Lite** are datagram-based and may complete **out of
   order**; replies are correlated by transport message id and JSON-RPC `id`.
 - **DCCP / WebSocket over DCCP** keep datagram boundaries and congestion
   control, but the current implementation keeps one in-flight exchange per
@@ -242,10 +350,15 @@ datagrams on Linux/Android:
   framing, but carries it inside RTP data packets with RTCP ACK/ping/pong
   control traffic; completion may also be **out of order** and is still
   correlated by JSON-RPC `id`.
-- **WebSocket over RUDP / SRT / UDP-Lite** keep the same dedicated WebSocket
+- **WebSocket over RUDP / UDP-Lite** keep the same dedicated WebSocket
   text/binary/close framing while switching the underlying datagram carrier to
-  RUDP, encrypted SRT-style packets, or UDP-Lite; completion may also be
+  RUDP or UDP-Lite; completion may also be
   **out of order** and is still correlated by JSON-RPC `id`.
+- **SRT / WebSocket over SRT** preserve native SRT message ordering within a
+  connection, but execute independent RPC handlers concurrently and correlate
+  responses that may complete out of order.
+- **MQTT / AMQP** route replies to a per-client destination and correlate
+  exchanges independently of broker connection arrival order.
 - **QUIC / HTTP/3 / WebSocket over QUIC or HTTP/3** allow independent streams,
   so concurrent RPC calls may complete **out of order** even when issued in
   order.
@@ -268,10 +381,12 @@ optional external health surface with:
 ## Multi-transport server
 
 `MultiTransportServer` exposes one `JsonRpcProtocol` implementation over every
-enabled transport on every bind address. The preferred entry point is
+enabled transport. Socket transports listen on each bind address; broker
+transports create one outbound subscription/consumer per configured kind,
+regardless of the number of bind addresses. The preferred entry point is
 `MultiTransportServer::builder(protocol)`, which uses typestate to require at
-least one bind address and at least one enabled transport before `build()` or
-`start()` are available. Configure it with `set_bind`, one port setter per
+least one enabled transport and either a socket bind or broker configuration
+before `build()` or `start()` are available. Configure it with `set_bind`, one port setter per
 transport (`set_tcp_port`, `set_udp_port`, `set_rtp_port`, `set_rudp_port`,
 `set_srt_port`, `set_dccp_port`, `set_sctp_port`, `set_quic_port`,
 `set_http1_port`, `set_http3_port`, `set_ws_tcp_port`, `set_ws_udp_port`,
@@ -283,10 +398,22 @@ transports, `set_tcp_tuning` for TCP socket policy, `set_udp_reliability` for
 UDP-family retry/dedup policy, `set_udplite_config` for UDP-Lite checksum
 coverage, and `set_srt_config` for SRT passphrase policy. `start()` validates
 the final configuration and returns a `RunningServer` with graceful shutdown.
+Broker setup must succeed before startup returns. `listeners()` reports local
+socket listeners; `broker_transports()` reports the outbound broker consumers.
 UDP-Lite, DCCP, and SCTP transports currently require Linux or Android kernel
 support.
 
 ## Validation and fuzzing
+
+- External broker contracts are explicit ignored integration tests, not
+  successful no-op tests when no broker exists:
+
+  ```sh
+  export JSON_RPC_TEST_MQTT_URL=mqtt://127.0.0.1:1883
+  export JSON_RPC_TEST_AMQP_URL=amqp://guest:guest@127.0.0.1:5672/%2f
+  cargo test -p json-rpc-2-runtime --all-features --test brokers -- --ignored
+  cargo test -p json-rpc-2 --all-features --test transport_contract -- --ignored
+  ```
 
 - `tools/check-features.sh` runs the supported feature-flag matrix for the
   facade and FFI crates.

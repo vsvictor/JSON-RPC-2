@@ -81,7 +81,9 @@ pub fn encode_mqtt_packet(packet: &MqttPacket) -> Result<Vec<u8>, String> {
             MQTT_PACKET_TYPE_PUBLISH << 4,
             encode_publish_body(
                 MQTT_TOPIC_REQUEST,
-                packet.packet_id.ok_or_else(|| "MQTT request requires packet_id".to_owned())?,
+                packet
+                    .packet_id
+                    .ok_or_else(|| "MQTT request requires packet_id".to_owned())?,
                 &packet.payload,
             )?,
         ),

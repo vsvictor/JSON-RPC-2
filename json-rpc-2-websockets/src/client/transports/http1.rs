@@ -1,11 +1,13 @@
 //! WebSocket established with the HTTP/1.1 Upgrade mechanism.
 
-use json_rpc_2_core::TcpTuningConfig;
+use json_rpc_2_transport::TcpTuningConfig;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, client_async, connect_async_with_config};
 
 use super::{WebSocketCarrier, WebSocketClientTransport};
-use json_rpc_2_core::{ClientCloseFuture, TransportError, connect_tcp_stream, transport_error};
+use json_rpc_2_transport::{
+    ClientCloseFuture, TransportError, connect_tcp_stream, transport_error,
+};
 
 /// HTTP/1.1 Upgrade carrier. The TCP connection is closed together with the
 /// WebSocket, so nothing remains to release afterwards.

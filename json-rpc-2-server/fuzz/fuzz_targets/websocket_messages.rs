@@ -5,9 +5,9 @@ use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
 use serde_json::json;
 
-use json_rpc_2_server::{
-    JsonRpcProtocol, RpcServer,
-    transports::websocket::{JsonRpcWebSocket, WebSocketMessage, WebSocketProtocol},
+use json_rpc_2_server::{JsonRpcProtocol, RpcServer};
+use json_rpc_2_websockets::server::transports::{
+    JsonRpcWebSocket, WebSocketMessage, WebSocketProtocol,
 };
 
 #[derive(Arbitrary, Debug)]

@@ -1,12 +1,12 @@
 use std::net::SocketAddr;
 
-use json_rpc_2_core::{RpcClientTransport, TransportError};
 use json_rpc_2_datagram::client::transports::srt::SrtClientTransport;
+use json_rpc_2_transport::{RpcClientTransport, TransportError};
 
 use super::DatagramWebSocketClientTransport;
 use json_rpc_2_core::{SrtConfig, UdpReliabilityConfig};
 
-/// Dedicated WebSocket-style transport over encrypted reliable SRT-style datagrams.
+/// WebSocket application frames over a standard encrypted libsrt caller connection.
 pub struct SrtWebSocketClientTransport {
     inner: DatagramWebSocketClientTransport<SrtClientTransport>,
 }
@@ -18,7 +18,10 @@ impl SrtWebSocketClientTransport {
     ) -> Result<Self, TransportError> {
         Self::connect_with_config(
             address,
-            UdpReliabilityConfig::default(),
+            UdpReliabilityConfig {
+                retransmit_interval: std::time::Duration::from_secs(1),
+                ..Default::default()
+            },
             SrtConfig {
                 passphrase: passphrase.into(),
             },
@@ -42,7 +45,10 @@ impl SrtWebSocketClientTransport {
 }
 
 impl RpcClientTransport for SrtWebSocketClientTransport {
-    fn send<'a>(&'a self, message: bytes::Bytes) -> json_rpc_2_core::ClientTransportFuture<'a> {
+    fn send<'a>(
+        &'a self,
+        message: bytes::Bytes,
+    ) -> json_rpc_2_transport::ClientTransportFuture<'a> {
         self.inner.send(message)
     }
 
@@ -50,7 +56,7 @@ impl RpcClientTransport for SrtWebSocketClientTransport {
         &'a self,
         message: bytes::Bytes,
         expects_response: bool,
-    ) -> json_rpc_2_core::ClientTransportFuture<'a> {
+    ) -> json_rpc_2_transport::ClientTransportFuture<'a> {
         self.inner.send_with_expectation(message, expects_response)
     }
 
@@ -59,7 +65,7 @@ impl RpcClientTransport for SrtWebSocketClientTransport {
         message: bytes::Bytes,
         expects_response: bool,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> json_rpc_2_core::ClientTransportFuture<'a> {
+    ) -> json_rpc_2_transport::ClientTransportFuture<'a> {
         self.inner
             .send_cancelable(message, expects_response, cancel)
     }
@@ -72,15 +78,15 @@ impl RpcClientTransport for SrtWebSocketClientTransport {
         self.inner.peer()
     }
 
-    fn transport_ping<'a>(&'a self) -> json_rpc_2_core::ClientPingFuture<'a> {
+    fn transport_ping<'a>(&'a self) -> json_rpc_2_transport::ClientPingFuture<'a> {
         self.inner.transport_ping()
     }
 
-    fn reconnect<'a>(&'a self) -> json_rpc_2_core::ClientRecoverFuture<'a> {
+    fn reconnect<'a>(&'a self) -> json_rpc_2_transport::ClientRecoverFuture<'a> {
         self.inner.reconnect()
     }
 
-    fn close<'a>(&'a self) -> json_rpc_2_core::ClientCloseFuture<'a> {
+    fn close<'a>(&'a self) -> json_rpc_2_transport::ClientCloseFuture<'a> {
         self.inner.close()
     }
 }

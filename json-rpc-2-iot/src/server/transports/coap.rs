@@ -10,12 +10,12 @@ use std::{
 
 use tokio::{net::UdpSocket, sync::Mutex, task::JoinSet};
 
-use json_rpc_2_core::{
+use json_rpc_2_core::{CoapMessage, CoapMessageType, decode_coap_message, encode_coap_message};
+use json_rpc_2_transport::JsonRpcProtocol;
+use json_rpc_2_transport::{
     CancellationToken, Transport, TransportFuture, TransportRuntime, log_control, log_json_rpc,
     log_transport_error,
 };
-use json_rpc_2_core::JsonRpcProtocol;
-use json_rpc_2_core::{CoapMessage, CoapMessageType, decode_coap_message, encode_coap_message};
 
 /// CoAP-inspired transport over UDP.
 pub struct CoapTransport {
@@ -98,7 +98,16 @@ pub async fn serve(
                 socket.send_to(&pong, peer).await?;
             }
             (CoapMessageType::Confirmable, _) => {
-                match cache_request_state(&sessions, &runtime, peer, message.message_id, None, false).await {
+                match cache_request_state(
+                    &sessions,
+                    &runtime,
+                    peer,
+                    message.message_id,
+                    None,
+                    false,
+                )
+                .await
+                {
                     RequestAction::Process => {
                         let socket = Arc::clone(&socket);
                         let protocol = Arc::clone(&protocol);
@@ -107,9 +116,19 @@ pub async fn serve(
                         tasks.spawn(async move {
                             let started = Instant::now();
                             let response = protocol.handle_message(&message.payload).await;
-                            log_json_rpc("CoAP", peer, &message.payload, response.as_deref(), started.elapsed());
+                            log_json_rpc(
+                                "CoAP",
+                                peer,
+                                &message.payload,
+                                response.as_deref(),
+                                started.elapsed(),
+                            );
                             let outbound = match response {
-                                Some(response) => CoapMessage::response(message.message_id, message.token.clone(), response.to_vec()),
+                                Some(response) => CoapMessage::response(
+                                    message.message_id,
+                                    message.token.clone(),
+                                    response.to_vec(),
+                                ),
                                 None => CoapMessage::ack(message.message_id, message.token.clone()),
                             };
                             match encode_coap_message(&outbound) {
@@ -117,7 +136,15 @@ pub async fn serve(
                                     if let Err(error) = socket.send_to(&encoded, peer).await {
                                         log_transport_error("CoAP", peer, "response", &error);
                                     } else {
-                                        let _ = cache_request_state(&sessions, &runtime, peer, message.message_id, Some(encoded), true).await;
+                                        let _ = cache_request_state(
+                                            &sessions,
+                                            &runtime,
+                                            peer,
+                                            message.message_id,
+                                            Some(encoded),
+                                            true,
+                                        )
+                                        .await;
                                     }
                                 }
                                 Err(error) => log_transport_error("CoAP", peer, "response", &error),
@@ -159,11 +186,19 @@ async fn cache_request_state(
     }
     if complete {
         let response = response.unwrap_or_default();
-        session.entries.insert(message_id, CachedRequest::Complete { seen_at: now, response });
+        session.entries.insert(
+            message_id,
+            CachedRequest::Complete {
+                seen_at: now,
+                response,
+            },
+        );
         session.order.push_back(message_id);
         RequestAction::Drop
     } else {
-        session.entries.insert(message_id, CachedRequest::InFlight { seen_at: now });
+        session
+            .entries
+            .insert(message_id, CachedRequest::InFlight { seen_at: now });
         session.order.push_back(message_id);
         RequestAction::Process
     }
@@ -172,7 +207,8 @@ async fn cache_request_state(
 fn prune_session(session: &mut PeerSession, runtime: &TransportRuntime, now: Instant) {
     while let Some(message_id) = session.order.front().copied() {
         let remove = match session.entries.get(&message_id) {
-            Some(CachedRequest::InFlight { seen_at }) | Some(CachedRequest::Complete { seen_at, .. }) => {
+            Some(CachedRequest::InFlight { seen_at })
+            | Some(CachedRequest::Complete { seen_at, .. }) => {
                 now.duration_since(*seen_at) >= runtime.udp_reliability.dedup_cache_ttl
             }
             None => true,

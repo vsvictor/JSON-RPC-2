@@ -9,9 +9,9 @@ use std::{
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use json_rpc_2::client::transports::dccp::DccpClientTransport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
-use json_rpc_2::client::transports::udplite::UdpLiteClientTransport;
-#[cfg(any(target_os = "linux", target_os = "android"))]
 use json_rpc_2::client::transports::sctp::SctpClientTransport;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use json_rpc_2::client::transports::udplite::UdpLiteClientTransport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use json_rpc_2::client::transports::websocket::dccp::DccpWebSocketClientTransport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -25,24 +25,24 @@ use json_rpc_2::{
         ClientLivenessConfig, RpcClient, RpcClientConfig, RpcClientTransport,
         TransportLimits as ClientTransportLimits,
         transports::{
+            amqp::AmqpClientTransport,
+            coap::CoapClientTransport,
             http1::Http1ClientTransport,
             http3::Http3ClientTransport,
+            mqtt::MqttClientTransport,
             quic::QuicClientTransport,
             rtp::RtpClientTransport,
             rudp::RudpClientTransport,
             srt::SrtClientTransport,
             tcp::TcpClientTransport,
             udp::UdpClientTransport,
-            mqtt::MqttClientTransport,
-            coap::CoapClientTransport,
-            amqp::AmqpClientTransport,
             websocket::{
+                amqp::AmqpWebSocketClientTransport, coap::CoapWebSocketClientTransport,
                 http1::Http1WebSocketClientTransport, http3::Http3WebSocketClientTransport,
-                quic::QuicWebSocketClientTransport, rtp::RtpWebSocketClientTransport,
-                rudp::RudpWebSocketClientTransport, srt::SrtWebSocketClientTransport,
-                tcp::TcpWebSocketClientTransport, udp::UdpWebSocketClientTransport,
-                mqtt::MqttWebSocketClientTransport, coap::CoapWebSocketClientTransport,
-                amqp::AmqpWebSocketClientTransport,
+                mqtt::MqttWebSocketClientTransport, quic::QuicWebSocketClientTransport,
+                rtp::RtpWebSocketClientTransport, rudp::RudpWebSocketClientTransport,
+                srt::SrtWebSocketClientTransport, tcp::TcpWebSocketClientTransport,
+                udp::UdpWebSocketClientTransport,
             },
         },
     },
@@ -57,6 +57,27 @@ use serde_json::{Value, json};
 type AppResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn client_call_timeout(kind: Kind, options: &RuntimeOptions) -> Duration {
+    if kind.is_broker() {
+        let (operation, response) = match kind {
+            Kind::Mqtt | Kind::WebSocketMqtt => (
+                options.mqtt_operation_timeout,
+                options.mqtt_response_timeout,
+            ),
+            Kind::Amqp | Kind::WebSocketAmqp => (
+                options.amqp_operation_timeout,
+                options.amqp_response_timeout,
+            ),
+            _ => unreachable!("only broker kinds use broker timeouts"),
+        };
+        operation
+            .saturating_mul(2)
+            .saturating_add(response.saturating_mul(2))
+    } else {
+        CONNECT_TIMEOUT
+    }
+}
 
 struct Tls {
     certificates: Vec<CertificateDer<'static>>,
@@ -198,7 +219,7 @@ fn configured_server(
     options: &RuntimeOptions,
     tls: &Tls,
     rpc: Arc<dyn JsonRpcProtocol>,
-) -> MultiTransportServer {
+) -> AppResult<MultiTransportServer> {
     let mut server = MultiTransportServer::new(rpc);
     server
         .set_bind(options.bind.iter().copied())
@@ -209,7 +230,22 @@ fn configured_server(
     if let Some(srt) = &options.srt {
         server.set_srt_config(srt.clone());
     }
+    if options.transports.contains(&Kind::Mqtt) {
+        server.set_mqtt_config(options.mqtt_config(false)?);
+    }
+    if options.transports.contains(&Kind::WebSocketMqtt) {
+        server.set_ws_mqtt_config(options.mqtt_config(true)?);
+    }
+    if options.transports.contains(&Kind::Amqp) {
+        server.set_amqp_config(options.amqp_config(false));
+    }
+    if options.transports.contains(&Kind::WebSocketAmqp) {
+        server.set_ws_amqp_config(options.amqp_config(true));
+    }
     for kind in options.transports.iter().copied() {
+        if kind.is_broker() {
+            continue;
+        }
         let port = options.port(kind);
         match kind {
             Kind::Tcp => {
@@ -231,15 +267,11 @@ fn configured_server(
             Kind::UdpLite => {
                 server.set_udplite_port(port);
             }
-            Kind::Mqtt => {
-                server.set_mqtt_port(port);
-            }
+            Kind::Mqtt => {}
             Kind::Coap => {
                 server.set_coap_port(port);
             }
-            Kind::Amqp => {
-                server.set_amqp_port(port);
-            }
+            Kind::Amqp => {}
             #[cfg(any(target_os = "linux", target_os = "android"))]
             Kind::Dccp => {
                 server.set_dccp_port(port);
@@ -276,15 +308,11 @@ fn configured_server(
             Kind::WebSocketUdpLite => {
                 server.set_ws_udplite_port(port);
             }
-            Kind::WebSocketMqtt => {
-                server.set_ws_mqtt_port(port);
-            }
+            Kind::WebSocketMqtt => {}
             Kind::WebSocketCoap => {
                 server.set_ws_coap_port(port);
             }
-            Kind::WebSocketAmqp => {
-                server.set_ws_amqp_port(port);
-            }
+            Kind::WebSocketAmqp => {}
             #[cfg(any(target_os = "linux", target_os = "android"))]
             Kind::WebSocketDccp => {
                 server.set_ws_dccp_port(port);
@@ -307,7 +335,7 @@ fn configured_server(
     if let Some(key) = &tls.key {
         server.set_tls(tls.certificates.clone(), key.clone_key());
     }
-    server
+    Ok(server)
 }
 
 async fn start_server(server: MultiTransportServer) -> AppResult<RunningServer> {
@@ -316,15 +344,25 @@ async fn start_server(server: MultiTransportServer) -> AppResult<RunningServer> 
     for (kind, address) in running.listeners() {
         println!("  {:<19} listening on {address}", kind.name());
     }
+    for kind in running.broker_transports() {
+        println!(
+            "  {:<19} external broker service connected (no local listener)",
+            kind.name()
+        );
+    }
     Ok(running)
 }
 
 async fn close_all(running: RunningServer) -> AppResult<()> {
     println!("\n== Closing ==");
     let listeners: Vec<_> = running.listeners().collect();
+    let brokers: Vec<_> = running.broker_transports().collect();
     running.close().await?;
     for (kind, address) in listeners {
         println!("  {} {address}: closed", kind.name());
+    }
+    for kind in brokers {
+        println!("  {} external broker service: closed", kind.name());
     }
     Ok(())
 }
@@ -372,8 +410,16 @@ async fn call(
 ) -> AppResult<()> {
     let local = unspecified(to);
     let server_name = server_name.map_or_else(|| to.ip().to_string(), str::to_owned);
-    let params = json!({"transport": kind.id(), "ip": to.ip()});
-    let label = format!("{} {to}", kind.name());
+    let params = if kind.is_broker() {
+        json!({"transport": kind.id(), "endpoint": "external broker"})
+    } else {
+        json!({"transport": kind.id(), "ip": to.ip()})
+    };
+    let label = if kind.is_broker() {
+        format!("{} external broker service", kind.name())
+    } else {
+        format!("{} {to}", kind.name())
+    };
     match kind {
         Kind::Tcp => {
             demonstrate(
@@ -426,7 +472,7 @@ async fn call(
         }
         Kind::Mqtt => {
             let transport =
-                MqttClientTransport::connect_with_tuning(to, options.tcp_tuning.clone()).await?;
+                MqttClientTransport::connect_with_config(options.mqtt_config(false)?).await?;
             demonstrate(&label, transport, params, options).await
         }
         Kind::Coap => {
@@ -437,7 +483,7 @@ async fn call(
         }
         Kind::Amqp => {
             let transport =
-                AmqpClientTransport::connect_with_tuning(to, options.tcp_tuning.clone()).await?;
+                AmqpClientTransport::connect_with_config(options.amqp_config(false)).await?;
             demonstrate(&label, transport, params, options).await
         }
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -524,17 +570,23 @@ async fn call(
             demonstrate(&label, transport, params, options).await
         }
         Kind::WebSocketMqtt => {
-            let transport = MqttWebSocketClientTransport::connect(to).await?;
-            demonstrate(&label, transport, params, options).await
-        }
-        Kind::WebSocketCoap => {
             let transport =
-                CoapWebSocketClientTransport::connect_with_config(to, options.udp_reliability.clone())
+                MqttWebSocketClientTransport::connect_with_config(options.mqtt_config(true)?)
                     .await?;
             demonstrate(&label, transport, params, options).await
         }
+        Kind::WebSocketCoap => {
+            let transport = CoapWebSocketClientTransport::connect_with_config(
+                to,
+                options.udp_reliability.clone(),
+            )
+            .await?;
+            demonstrate(&label, transport, params, options).await
+        }
         Kind::WebSocketAmqp => {
-            let transport = AmqpWebSocketClientTransport::connect(to).await?;
+            let transport =
+                AmqpWebSocketClientTransport::connect_with_config(options.amqp_config(true))
+                    .await?;
             demonstrate(&label, transport, params, options).await
         }
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -644,9 +696,18 @@ async fn demo(options: RuntimeOptions) -> AppResult<()> {
     if ips.is_empty() {
         return Err(format!("{SERVER_HOST} has no usable address").into());
     }
-    let mut server = configured_server(&options, &tls, rpc_server()?);
+    let mut server = configured_server(&options, &tls, rpc_server()?)?;
     server.set_bind(ips.iter().copied());
     let listening = start_server(server).await?;
+    for kind in listening.broker_transports() {
+        let to = SocketAddr::from(([127, 0, 0, 1], 0));
+        tokio::time::timeout(
+            client_call_timeout(kind, &options),
+            call(kind, &tls, to, None, &options),
+        )
+        .await
+        .map_err(|_| format!("{} external broker service timed out", kind.name()))??;
+    }
     for &ip in &ips {
         println!(
             "\n== {SERVER_HOST} ({ip}), {}: client per transport ==",
@@ -677,8 +738,19 @@ async fn demo(options: RuntimeOptions) -> AppResult<()> {
 }
 
 async fn server(options: RuntimeOptions) -> AppResult<()> {
-    let tls = Tls::for_server(&options.cert, options.key.as_deref())?;
-    let listening = start_server(configured_server(&options, &tls, rpc_server()?)).await?;
+    let uses_tls = options
+        .transports
+        .iter()
+        .any(|kind| kind.security().is_tls());
+    let tls = if uses_tls {
+        Tls::for_server(&options.cert, options.key.as_deref())?
+    } else {
+        Tls {
+            certificates: Vec::new(),
+            key: None,
+        }
+    };
+    let listening = start_server(configured_server(&options, &tls, rpc_server()?)?).await?;
     println!("\nServing, press Ctrl+C to stop.");
     tokio::signal::ctrl_c().await?;
     close_all(listening).await
@@ -719,7 +791,38 @@ async fn client(options: RuntimeOptions) -> AppResult<()> {
         }
     };
     let mut failed = 0;
+    for &kind in options.transports.iter().filter(|kind| kind.is_broker()) {
+        let to = SocketAddr::from(([127, 0, 0, 1], 0));
+        let result = tokio::time::timeout(
+            client_call_timeout(kind, &options),
+            call(kind, &tls, to, None, &options),
+        )
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                failed += 1;
+                println!("  {} external broker service: failed: {error}", kind.name());
+            }
+            Err(_) => {
+                failed += 1;
+                println!(
+                    "  {} external broker service: timed out (broker unavailable, authentication failed, or configured operation/response limit reached)",
+                    kind.name()
+                );
+            }
+        }
+    }
     for host in &options.hosts {
+        let transports: Vec<_> = options
+            .transports
+            .iter()
+            .copied()
+            .filter(|kind| !kind.is_broker())
+            .collect();
+        if transports.is_empty() {
+            break;
+        }
         let server_name = options.server_name.as_deref().unwrap_or(host);
         for mut to in resolve(host).await? {
             println!(
@@ -727,7 +830,7 @@ async fn client(options: RuntimeOptions) -> AppResult<()> {
                 to.ip(),
                 family(to.ip())
             );
-            for &kind in &options.transports {
+            for &kind in &transports {
                 to.set_port(options.port(kind));
                 let call = call(kind, &tls, to, Some(server_name), &options);
                 let result = match tokio::time::timeout(CONNECT_TIMEOUT, call).await {

@@ -18,12 +18,14 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use json_rpc_2_core::{closed, transport_error};
 use json_rpc_2_core::{
+    CoapMessage, CoapMessageType, UdpReliabilityConfig, decode_coap_message, encode_coap_message,
+};
+use json_rpc_2_transport::{
     ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
     RpcClientTransport, TransportError,
 };
-use json_rpc_2_core::{CoapMessage, CoapMessageType, UdpReliabilityConfig, decode_coap_message, encode_coap_message};
+use json_rpc_2_transport::{closed, transport_error};
 
 #[derive(Clone, Debug)]
 enum PendingEvent {
@@ -285,9 +287,13 @@ async fn run_receiver(
             Err(_) => continue,
         };
         let event = match (message.ty, message.code, message.payload.is_empty()) {
-            (CoapMessageType::Acknowledgement, 0, true) if message.token.is_empty() => PendingEvent::Pong,
+            (CoapMessageType::Acknowledgement, 0, true) if message.token.is_empty() => {
+                PendingEvent::Pong
+            }
             (CoapMessageType::Acknowledgement, 0, true) => PendingEvent::Ack,
-            (CoapMessageType::Acknowledgement, _, false) => PendingEvent::Response(Bytes::from(message.payload)),
+            (CoapMessageType::Acknowledgement, _, false) => {
+                PendingEvent::Response(Bytes::from(message.payload))
+            }
             (CoapMessageType::Confirmable, 0, true) => {
                 let pong = match encode_coap_message(&CoapMessage::pong(message.message_id)) {
                     Ok(bytes) => bytes,
@@ -306,19 +312,29 @@ async fn run_receiver(
 
 fn validate_config(config: &UdpReliabilityConfig) -> Result<(), TransportError> {
     if config.retransmit_interval.is_zero() {
-        return Err(TransportError::new("CoAP retransmit_interval must be greater than zero"));
+        return Err(TransportError::new(
+            "CoAP retransmit_interval must be greater than zero",
+        ));
     }
     if config.max_packet_size > 65_507 {
-        return Err(TransportError::new("CoAP max_packet_size must not exceed 65507 bytes"));
+        return Err(TransportError::new(
+            "CoAP max_packet_size must not exceed 65507 bytes",
+        ));
     }
     if config.max_packet_size < 64 {
-        return Err(TransportError::new("CoAP max_packet_size must be at least 64 bytes"));
+        return Err(TransportError::new(
+            "CoAP max_packet_size must be at least 64 bytes",
+        ));
     }
     if config.dedup_cache_capacity == 0 {
-        return Err(TransportError::new("CoAP dedup_cache_capacity must be at least 1"));
+        return Err(TransportError::new(
+            "CoAP dedup_cache_capacity must be at least 1",
+        ));
     }
     if config.dedup_cache_ttl.is_zero() {
-        return Err(TransportError::new("CoAP dedup_cache_ttl must be greater than zero"));
+        return Err(TransportError::new(
+            "CoAP dedup_cache_ttl must be greater than zero",
+        ));
     }
     Ok(())
 }

@@ -14,15 +14,15 @@ use tokio_tungstenite::{
     tungstenite::{Error as WsError, Message},
 };
 
-use json_rpc_2_core::{closed, transport_error};
-use json_rpc_2_core::{
-    ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
-    RpcClientTransport, TransportError, expects_response,
-};
 use json_rpc_2_core::{
     WebSocketMessage, decode_websocket_message, encode_websocket_close_frame,
     encode_websocket_message,
 };
+use json_rpc_2_transport::{
+    ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
+    RpcClientTransport, TransportError, expects_response,
+};
+use json_rpc_2_transport::{closed, transport_error};
 
 const PING_PAYLOAD: &[u8] = b"json-rpc-2";
 
@@ -50,14 +50,14 @@ pub mod sctp;
 pub mod srt;
 #[cfg(all(feature = "websocket", feature = "tcp"))]
 pub mod tcp;
+#[cfg(all(feature = "websocket", feature = "udp"))]
+pub mod udp;
 #[cfg(all(
     feature = "websocket",
     feature = "udplite",
     any(target_os = "linux", target_os = "android")
 ))]
 pub mod udplite;
-#[cfg(all(feature = "websocket", feature = "udp"))]
-pub mod udp;
 
 /// Connection that carries a WebSocket: HTTP/1.1 Upgrade, HTTP/3 extended
 /// CONNECT, or another mechanism.
@@ -195,7 +195,7 @@ where
 {
     fn send<'a>(&'a self, message: Bytes) -> ClientTransportFuture<'a> {
         Box::pin(async move {
-            let expects_response = json_rpc_2_core::expects_response(&message);
+            let expects_response = json_rpc_2_transport::expects_response(&message);
             self.send_with_expectation(message, expects_response).await
         })
     }

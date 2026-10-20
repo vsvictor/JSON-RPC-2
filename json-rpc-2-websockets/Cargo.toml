@@ -31,6 +31,7 @@ h3 = { version = "0.0.8", optional = true }
 h3-quinn = { version = "0.0.10", optional = true }
 http = { version = "1", optional = true }
 json-rpc-2-core = { path = "../json-rpc-2-core" }
+json-rpc-2-transport = { path = "../json-rpc-2-transport" }
 json-rpc-2-datagram = { path = "../json-rpc-2-datagram", default-features = false }
 json-rpc-2-iot = { path = "../json-rpc-2-iot", default-features = false }
 json-rpc-2-quic = { path = "../json-rpc-2-quic", default-features = false }

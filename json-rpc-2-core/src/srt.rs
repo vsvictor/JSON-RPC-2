@@ -1,3 +1,11 @@
+//! Native SRT configuration and historical JSRT codec compatibility utilities.
+//!
+//! Only [`SrtConfig`] configures the current SRT transport. [`SrtCrypto`],
+//! [`SrtPacket`] and [`SrtPacketKind`] describe the obsolete private JSRT
+//! format, not SRT. They remain solely for decoding historical data and legacy
+//! codec tests; they are unsupported for live transport use. Current adapters
+//! use libsrt's handshake, message delivery and passphrase encryption instead.
+
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},
@@ -10,28 +18,24 @@ const SRT_VERSION: u8 = 1;
 const SRT_HEADER_LEN: usize = 22;
 const SRT_MAX_PAYLOAD: usize = 65_507 - SRT_HEADER_LEN;
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+/// Encryption configuration for native libsrt caller/listener connections.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct SrtConfig {
+    /// Shared passphrase, containing 10 through 79 UTF-8 bytes.
+    /// Empty disables encryption in libsrt itself but is not supported by this adapter.
     pub passphrase: String,
-}
-
-impl Default for SrtConfig {
-    fn default() -> Self {
-        Self {
-            passphrase: String::new(),
-        }
-    }
 }
 
 impl SrtConfig {
     pub fn validate(&self) -> Result<(), String> {
-        if self.passphrase.is_empty() {
-            return Err("SRT passphrase must not be empty".to_owned());
+        if !(10..=79).contains(&self.passphrase.len()) {
+            return Err("libsrt passphrase must contain 10..=79 bytes".to_owned());
         }
         Ok(())
     }
 }
 
+/// **Legacy JSRT only.** Not a standard SRT packet type; unsupported by current adapters.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum SrtPacketKind {
@@ -55,6 +59,7 @@ impl SrtPacketKind {
     }
 }
 
+/// **Legacy JSRT only.** Private packet format, not accepted by native SRT adapters.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SrtPacket {
     pub sequence_number: u32,
@@ -110,6 +115,11 @@ impl SrtPacket {
     }
 }
 
+/// **Legacy JSRT only; unsupported for live transport use.**
+///
+/// This SHA-256/AES-GCM codec is not libsrt's key management or encryption.
+/// It is retained under its historical name for legacy codec compatibility;
+/// current SRT adapters never instantiate it.
 #[derive(Clone)]
 pub struct SrtCrypto {
     cipher: Aes256Gcm,
@@ -127,7 +137,7 @@ impl SrtCrypto {
     pub fn encode_packet(&self, packet: &SrtPacket) -> Result<Vec<u8>, String> {
         if packet.payload.len() > SRT_MAX_PAYLOAD {
             return Err(format!(
-                "SRT payload exceeds transport limit ({} > {})",
+                "legacy JSRT payload exceeds codec limit ({} > {})",
                 packet.payload.len(),
                 SRT_MAX_PAYLOAD
             ));
@@ -158,16 +168,19 @@ impl SrtCrypto {
 
     pub fn decode_packet(&self, packet: &[u8]) -> Result<SrtPacket, String> {
         if packet.len() < SRT_HEADER_LEN {
-            return Err("SRT packet too short".to_owned());
+            return Err("legacy JSRT packet too short".to_owned());
         }
         if packet[..4] != SRT_MAGIC {
-            return Err("invalid SRT transport magic".to_owned());
+            return Err("invalid legacy JSRT codec magic".to_owned());
         }
         if packet[4] != SRT_VERSION {
-            return Err(format!("unsupported SRT transport version {}", packet[4]));
+            return Err(format!(
+                "unsupported legacy JSRT codec version {}",
+                packet[4]
+            ));
         }
         let kind = SrtPacketKind::from_byte(packet[5])
-            .ok_or_else(|| format!("unknown SRT packet kind {}", packet[5]))?;
+            .ok_or_else(|| format!("unknown legacy JSRT packet kind {}", packet[5]))?;
         let sequence_number =
             u32::from_be_bytes(packet[6..10].try_into().expect("slice len checked"));
         let packet_id = u64::from_be_bytes(packet[10..18].try_into().expect("slice len checked"));
@@ -176,7 +189,7 @@ impl SrtCrypto {
         let remaining = packet.len() - SRT_HEADER_LEN;
         if payload_len != remaining {
             return Err(format!(
-                "SRT payload length mismatch (header {payload_len}, actual {remaining})"
+                "legacy JSRT payload length mismatch (header {payload_len}, actual {remaining})"
             ));
         }
         let nonce = packet_nonce(sequence_number, packet_id);
@@ -211,7 +224,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn srt_roundtrip_encrypts_and_decrypts() {
+    fn legacy_jsrt_roundtrip_encrypts_and_decrypts() {
         let crypto = SrtCrypto::new(&SrtConfig {
             passphrase: "secret-passphrase".to_owned(),
         })
@@ -219,5 +232,43 @@ mod tests {
         let packet = SrtPacket::request(7, 11, b"hello".to_vec());
         let encoded = crypto.encode_packet(&packet).unwrap();
         assert_eq!(crypto.decode_packet(&encoded).unwrap(), packet);
+        assert_eq!(&encoded[..4], b"JSRT");
+    }
+
+    #[test]
+    fn native_srt_passphrase_validation_matches_libsrt_byte_limits() {
+        for length in [0, 1, 9, 80, 81] {
+            assert!(
+                SrtConfig {
+                    passphrase: "x".repeat(length)
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        for length in [10, 11, 78, 79] {
+            assert!(
+                SrtConfig {
+                    passphrase: "x".repeat(length)
+                }
+                .validate()
+                .is_ok()
+            );
+        }
+        assert!(SrtConfig::default().validate().is_err());
+        assert!(
+            SrtConfig {
+                passphrase: "\u{00e9}".repeat(5)
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            SrtConfig {
+                passphrase: "\u{00e9}".repeat(40)
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

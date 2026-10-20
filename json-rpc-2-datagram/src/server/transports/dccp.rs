@@ -2,11 +2,12 @@
 
 use std::{io, net::SocketAddr, sync::Arc, time::Instant};
 
-use json_rpc_2_core::{
+use json_rpc_2_transport::JsonRpcProtocol;
+use json_rpc_2_transport::multiplex::StreamMultiplexor;
+use json_rpc_2_transport::{
     CONTROL_PING, CONTROL_PONG, CancellationToken, Transport, TransportFuture, TransportRuntime,
-    log_control, log_json_rpc, log_transport_error, multiplex::StreamMultiplexor,
+    log_control, log_json_rpc, log_transport_error,
 };
-use json_rpc_2_core::JsonRpcProtocol;
 
 /// One JSON-RPC message per DCCP datagram over a persistent DCCP session.
 pub struct DccpTransport {

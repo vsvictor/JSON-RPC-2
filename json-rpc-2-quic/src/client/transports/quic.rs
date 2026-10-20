@@ -7,11 +7,12 @@ use quinn::{Connection, Endpoint, VarInt};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use json_rpc_2_core::{closed, transport_error};
-use json_rpc_2_core::{
+use json_rpc_2_core::MAX_MESSAGE_BYTES;
+use json_rpc_2_transport::{
     CONTROL_PING, CONTROL_PONG, ClientCloseFuture, ClientPingFuture, ClientRecoverFuture,
-    ClientTransportFuture, MAX_MESSAGE_BYTES, RpcClientTransport, TransportError,
+    ClientTransportFuture, RpcClientTransport, TransportError,
 };
+use json_rpc_2_transport::{closed, transport_error};
 
 const QUIC_NO_ERROR: u32 = 0;
 const QUIC_REQUEST_CANCELLED: u32 = 0x10c;

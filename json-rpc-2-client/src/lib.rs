@@ -2,12 +2,11 @@
 
 use bytes::Bytes;
 pub use json_rpc_2_core::*;
+pub use json_rpc_2_transport::*;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    future::Future,
-    pin::Pin,
     sync::{
         Arc, RwLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
@@ -19,7 +18,6 @@ use tokio::{
     task::JoinHandle,
     time::{Duration, MissedTickBehavior},
 };
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 const DEFAULT_MAX_MISSED_PONGS: u32 = 3;
@@ -107,12 +105,12 @@ impl Default for ReconnectPolicy {
 
 /// Client-side transport/session limits.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransportLimits {
+pub struct ClientLimits {
     pub outbound_queue_capacity: usize,
     pub max_in_flight_requests: usize,
 }
 
-impl Default for TransportLimits {
+impl Default for ClientLimits {
     fn default() -> Self {
         Self {
             outbound_queue_capacity: DEFAULT_OUTBOUND_QUEUE_CAPACITY,
@@ -121,13 +119,16 @@ impl Default for TransportLimits {
     }
 }
 
+/// Compatibility alias for the client-side limits type.
+pub type TransportLimits = ClientLimits;
+
 /// Immutable client policy/config snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RpcClientConfig {
     pub request_timeout: Duration,
     pub liveness: ClientLivenessConfig,
     pub reconnect: ReconnectPolicy,
-    pub limits: TransportLimits,
+    pub limits: ClientLimits,
 }
 
 impl Default for RpcClientConfig {
@@ -136,7 +137,7 @@ impl Default for RpcClientConfig {
             request_timeout: Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS),
             liveness: ClientLivenessConfig::default(),
             reconnect: ReconnectPolicy::default(),
-            limits: TransportLimits::default(),
+            limits: ClientLimits::default(),
         }
     }
 }
@@ -383,11 +384,8 @@ where
         Ok(())
     }
 
-    /// Configure outbound queue and in-flight request limits.
-    pub async fn set_transport_limits(
-        &self,
-        limits: TransportLimits,
-    ) -> Result<(), RpcClientError> {
+    /// Configure the client's outbound queue and in-flight request limits.
+    pub async fn set_limits(&self, limits: ClientLimits) -> Result<(), RpcClientError> {
         validate_transport_limits(&limits)?;
         self.state
             .config
@@ -395,6 +393,11 @@ where
             .expect("client config lock poisoned")
             .limits = limits.clone();
         self.state.session.set_limits(limits).await
+    }
+
+    /// Compatibility alias for [`RpcClient::set_limits`].
+    pub async fn set_transport_limits(&self, limits: ClientLimits) -> Result<(), RpcClientError> {
+        self.set_limits(limits).await
     }
 
     /// Configure periodic transport-level pings in milliseconds.
@@ -829,7 +832,7 @@ fn validate_liveness_config(config: &ClientLivenessConfig) -> Result<(), RpcClie
     Ok(())
 }
 
-fn validate_transport_limits(limits: &TransportLimits) -> Result<(), RpcClientError> {
+fn validate_transport_limits(limits: &ClientLimits) -> Result<(), RpcClientError> {
     if limits.outbound_queue_capacity == 0 {
         return Err(RpcClientError::InvalidConfiguration(
             "outbound_queue_capacity must be at least 1".to_owned(),
@@ -924,7 +927,7 @@ struct RpcSessionHandle {
 }
 
 impl RpcSessionHandle {
-    fn spawn<T>(transport: Arc<T>, limits: TransportLimits, metrics: Arc<ClientMetrics>) -> Self
+    fn spawn<T>(transport: Arc<T>, limits: ClientLimits, metrics: Arc<ClientMetrics>) -> Self
     where
         T: RpcClientTransport,
     {
@@ -987,7 +990,7 @@ impl RpcSessionHandle {
         })
     }
 
-    async fn set_limits(&self, limits: TransportLimits) -> Result<(), RpcClientError> {
+    async fn set_limits(&self, limits: ClientLimits) -> Result<(), RpcClientError> {
         if limits.outbound_queue_capacity != self.outbound_queue_capacity {
             return Err(RpcClientError::InvalidConfiguration(
                 "outbound_queue_capacity cannot be changed after the client session starts"

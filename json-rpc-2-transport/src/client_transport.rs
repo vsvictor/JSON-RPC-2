@@ -18,9 +18,11 @@ pub type ClientTransportFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Option<Bytes>, TransportError>> + Send + 'a>>;
 
 /// Future returned by a graceful transport close.
-pub type ClientCloseFuture<'a> = Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + 'a>>;
+pub type ClientCloseFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + 'a>>;
 /// Future returned by a transport-level liveness check.
-pub type ClientPingFuture<'a> = Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + 'a>>;
+pub type ClientPingFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + 'a>>;
 /// Future returned while recovering a broken transport connection.
 pub type ClientRecoverFuture<'a> =
     Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + 'a>>;

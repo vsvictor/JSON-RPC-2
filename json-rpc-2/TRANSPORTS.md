@@ -3,6 +3,11 @@
 This document describes transport behavior separately from JSON-RPC 2.0
 semantics.
 
+Protocol names do not imply full standards compliance. See
+[the conformance matrix](CONFORMANCE.md) for supported wire subsets and
+external interoperability evidence, and [retry semantics](RETRY-SEMANTICS.md)
+for delivery and deduplication limits.
+
 ## Framing
 
 | Transport | Framing |
@@ -15,9 +20,9 @@ semantics.
 | UDP-Lite | one JSON-RPC message per reliable UDP-Lite datagram |
 | DCCP | one JSON-RPC message per connected DCCP datagram session |
 | SCTP | one JSON-RPC message per connected SCTP packet session |
-| MQTT | one JSON-RPC message per MQTT `PUBLISH` packet on a persistent TCP connection, using dedicated request/response topics |
-| CoAP | one JSON-RPC message per CoAP request/response pair over UDP, using a custom method code |
-| AMQP | one JSON-RPC message per AMQP content frame on a persistent TCP connection, using a simplified single-channel framing |
+| MQTT-like | one JSON-RPC message per private PUBLISH-like packet on a persistent TCP connection; not a standard broker connection |
+| CoAP subset | one JSON-RPC message per POST (0.02) / Content (2.05) pair over UDP, without general option support |
+| AMQP-like | one JSON-RPC message per private body-frame envelope on a persistent TCP connection; no AMQP connection/channel lifecycle |
 | QUIC | one JSON-RPC exchange per bidirectional QUIC stream |
 | HTTP/1.1 | `POST /` with JSON body |
 | HTTP/3 | `POST /` with JSON body on an independent request stream |
@@ -40,10 +45,10 @@ semantics.
 
 - TCP / reliable UDP / RUDP / SRT / UDP-Lite / DCCP / SCTP / raw QUIC use reserved non-JSON control payloads.
 - RTP/RTCP uses RTCP APP packets for ACK, ping, and pong control traffic.
-- MQTT uses its native `PINGREQ`/`PINGRESP` packets; AMQP uses its native heartbeat frame.
-- CoAP uses an empty confirmable message as a ping, acknowledged with an empty ACK.
+- The MQTT-like profile uses `PINGREQ`/`PINGRESP` packet layouts; the AMQP-like profile uses the heartbeat frame layout.
+- The CoAP subset uses an empty confirmable message as a ping, acknowledged locally with an empty ACK. Standard CoAP ping expects an empty Reset instead.
 - HTTP/1.1 / HTTP/3 use `GET /.well-known/json-rpc-2/ping`.
-- WebSocket transports use native Ping/Pong control frames.
+- Stream WebSocket transports use native Ping/Pong control frames; message-oriented WebSocket-style envelopes use the underlying carrier's liveness mechanism.
 
 Keepalive traffic never enters the JSON-RPC method dispatcher.
 
@@ -80,8 +85,10 @@ Keepalive traffic never enters the JSON-RPC method dispatcher.
   data across packets.
 - Client requests are retried according to `UdpReliabilityConfig` until the
   transport receives an ACK, a response, or the retry budget is exhausted.
-- The server deduplicates request packet ids per peer and replays the cached
-  response for duplicates, so client retransmits do not execute handlers twice.
+- The server deduplicates request packet ids per peer while the corresponding
+  entry remains in the live response cache. Eviction, expiry, restart, or a
+  changed peer identity can permit repeated handler execution; this is not an
+  exactly-once guarantee.
 - UDP ping/pong packets are transport-level control traffic, not JSON-RPC
   messages.
 - Because the transport is datagram-based, completion order is not tied to send
@@ -115,15 +122,13 @@ Keepalive traffic never enters the JSON-RPC method dispatcher.
 
 ## SRT semantics
 
-- SRT is **message-oriented**: one JSON-RPC request or response maps to one
-  encrypted SRT-style packet, still bounded by `UdpReliabilityConfig::max_packet_size`.
-- The transport keeps application-level ARQ and dedup semantics comparable to
-  the other UDP-family transports, but encrypts packet payloads with a shared
-  `SrtConfig` passphrase before transmission.
-- `srt` and `ws-srt` therefore require both UDP reliability settings and an
-  explicit passphrase configuration.
-- Because SRT is datagram-based, concurrent replies may complete out of send
-  order.
+- SRT uses the native libsrt caller/listener protocol over UDP.
+- libsrt owns handshake, ARQ, congestion control, message delivery, and
+  passphrase-based encryption; the reliable-UDP application cache is not used
+  as an SRT delivery guarantee.
+- `srt` and `ws-srt` require `SrtConfig` and the native libsrt build dependency.
+- JSON-RPC framing and application ping/pong over SRT are project-defined.
+  A standard SRT connection is not automatically a JSON-RPC application peer.
 
 ## UDP-Lite semantics
 
@@ -171,13 +176,10 @@ Keepalive traffic never enters the JSON-RPC method dispatcher.
 
 ## WebSocket over SRT semantics
 
-- WebSocket/SRT keeps the same dedicated text/binary/close frame envelope as
-  WebSocket/UDP and WebSocket/RUDP, but uses the encrypted SRT-style packet
-  carrier underneath.
-- Transport-level liveness still uses carrier ACK/ping/pong packets rather
-  than application WebSocket frames.
-- Completion may happen out of send order and is correlated by JSON-RPC `id`
-  plus the transport packet id.
+- WebSocket/SRT keeps the dedicated text/binary/close frame envelope, but uses
+  standard libsrt message delivery underneath.
+- SRT reliability is provided by libsrt, not by wrapping reliable-UDP packets.
+- The envelope is a project-specific binding, not RFC 6455 over SRT.
 
 ## WebSocket over UDP-Lite semantics
 
@@ -233,12 +235,13 @@ Keepalive traffic never enters the JSON-RPC method dispatcher.
 
 ## MQTT semantics
 
-- MQTT carries JSON-RPC payloads inside MQTT `PUBLISH` packets on a single
-  persistent TCP connection, reusing the real MQTT fixed-header and
-  remaining-length encoding with dedicated request/response topics.
-- Because the carrier is a single serialized TCP connection, request/response
-  ordering is serialized the same way as plain TCP.
-- Transport-level liveness uses native MQTT `PINGREQ`/`PINGRESP` packets.
+- Both sides are MQTT 3.1.1 clients of an external broker. The RPC service
+  subscribes to the request route; it does not bind a private MQTT listener.
+- Connection, subscription, publish acknowledgement, and keepalive are handled
+  by a maintained MQTT stack rather than a PUBLISH-only codec.
+- Reply routing and correlation are part of the project-defined JSON-RPC
+  binding. Configure matching routes on the client and service.
+- QoS acknowledgements do not guarantee exactly-once application side effects.
 
 ## CoAP semantics
 
@@ -252,12 +255,13 @@ Keepalive traffic never enters the JSON-RPC method dispatcher.
 
 ## AMQP semantics
 
-- AMQP carries JSON-RPC payloads inside AMQP content frames on a single
-  persistent TCP connection, using a simplified single-channel framing with
-  the real AMQP frame-end byte (`0xCE`).
-- Because the carrier is a single serialized TCP connection, request/response
-  ordering is serialized the same way as plain TCP.
-- Transport-level liveness uses a native AMQP heartbeat frame.
+- Both sides use AMQP 0-9-1 connections to an external broker, such as RabbitMQ.
+- Connection/channel negotiation, queue declaration, publish/consume,
+  acknowledgements, and heartbeats use a maintained AMQP library.
+- Request/reply queues and correlation properties implement the JSON-RPC
+  application binding; AMQP 1.0 is not the selected protocol.
+- Acknowledgements and redelivery cannot guarantee exactly-once application
+  side effects across crashes.
 
 ## WebSocket over MQTT / CoAP / AMQP semantics
 
@@ -278,6 +282,9 @@ Keepalive traffic never enters the JSON-RPC method dispatcher.
   multiplexed calls do not linger until their natural timeout.
 - Serialized carriers cannot cancel a single in-flight exchange independently;
   they still perform session-level cleanup immediately.
+- Raw TCP drops an interrupted active connection and opens a fresh connection
+  for the next call. The interrupted request is never automatically replayed,
+  and cancellation while queued does not disturb another active exchange.
 
 ## Shutdown behavior
 
@@ -293,11 +300,14 @@ adapters.
 ## Multiplexing and ordering
 
 - Serialized carriers: TCP, DCCP, HTTP/1.1 keep-alive session,
-  WebSocket/TCP, WebSocket/DCCP, WebSocket/HTTP/1.1, MQTT, AMQP,
-  WebSocket/MQTT, WebSocket/AMQP.
+  WebSocket/TCP, WebSocket/DCCP, WebSocket/HTTP/1.1.
 - Multiplexed carriers: UDP, RTP/RTCP, RUDP, SRT, UDP-Lite, SCTP, CoAP, WebSocket/UDP,
   WebSocket/RTP, WebSocket/RUDP, WebSocket/SRT, WebSocket/UDP-Lite, WebSocket/SCTP,
   WebSocket/CoAP, QUIC, HTTP/3, WebSocket/QUIC, WebSocket/HTTP/3.
+- Broker delivery is correlated by per-client reply destination and exchange
+  metadata, not by TCP response arrival order. SRT preserves message ordering
+  within a native connection, but dispatches independent RPC handlers
+  concurrently and correlates out-of-order responses.
 
 For multiplexed carriers, concurrent calls may complete out of order. The
 client correlates replies strictly by JSON-RPC `id`.

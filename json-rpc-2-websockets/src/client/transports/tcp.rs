@@ -1,12 +1,12 @@
 //! Dedicated WebSocket-over-TCP client transport.
 
 use http::Uri;
-use json_rpc_2_core::TcpTuningConfig;
+use json_rpc_2_transport::TcpTuningConfig;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
 
 use super::{WebSocketCarrier, WebSocketClientTransport};
-use json_rpc_2_core::{ClientCloseFuture, TransportError};
+use json_rpc_2_transport::{ClientCloseFuture, TransportError};
 
 /// Plain TCP carrier dedicated to one WebSocket session.
 pub struct TcpWebSocketCarrier;
@@ -53,7 +53,7 @@ async fn connect_session(
     let address = address
         .parse()
         .map_err(|error| TransportError::new(format!("invalid TCP socket address: {error}")))?;
-    let stream = json_rpc_2_core::connect_tcp_stream(address, tuning).await?;
+    let stream = json_rpc_2_transport::connect_tcp_stream(address, tuning).await?;
     Ok(WebSocketStream::from_raw_socket(stream, Role::Client, None).await)
 }
 

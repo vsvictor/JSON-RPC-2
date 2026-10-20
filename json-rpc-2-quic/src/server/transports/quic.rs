@@ -3,11 +3,13 @@
 
 use std::{io, sync::Arc, time::Instant};
 
-use json_rpc_2_core::{
+use json_rpc_2_core::MAX_MESSAGE_BYTES;
+use json_rpc_2_transport::JsonRpcProtocol;
+use json_rpc_2_transport::multiplex::StreamMultiplexor;
+use json_rpc_2_transport::{
     CONTROL_PING, CONTROL_PONG, CancellationToken, QUIC_NO_ERROR, Transport, TransportFuture,
-    TransportRuntime, log_control, log_json_rpc, log_transport_error, multiplex::StreamMultiplexor,
+    TransportRuntime, log_control, log_json_rpc, log_transport_error,
 };
-use json_rpc_2_core::{JsonRpcProtocol, MAX_MESSAGE_BYTES};
 use quinn::{Connection, Endpoint};
 
 /// Raw QUIC transport using one JSON-RPC message per bidirectional stream.

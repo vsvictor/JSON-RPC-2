@@ -10,11 +10,12 @@ use std::{
 
 use tokio::{net::UdpSocket, sync::Mutex, task::JoinSet};
 
-use super::{
-    CancellationToken, WebSocketProtocol, WebSocketTransport, WebSocketTransportFuture,
+use super::{CancellationToken, WebSocketProtocol, WebSocketTransport, WebSocketTransportFuture};
+use json_rpc_2_core::{
+    CoapMessage, CoapMessageType, decode_coap_message, decode_websocket_message,
+    encode_coap_message, encode_websocket_message, websocket_message_bytes,
 };
-use json_rpc_2_core::{TransportRuntime, log_control, log_json_rpc, log_transport_error};
-use json_rpc_2_core::{CoapMessage, CoapMessageType, decode_coap_message, decode_websocket_message, encode_coap_message, encode_websocket_message, websocket_message_bytes};
+use json_rpc_2_transport::{TransportRuntime, log_control, log_json_rpc, log_transport_error};
 
 pub struct CoapWebSocketTransport {
     socket: UdpSocket,
@@ -95,7 +96,16 @@ pub async fn serve(
                 socket.send_to(&pong, peer).await?;
             }
             (CoapMessageType::Confirmable, _) => {
-                match cache_request_state(&sessions, &runtime, peer, message.message_id, None, false).await {
+                match cache_request_state(
+                    &sessions,
+                    &runtime,
+                    peer,
+                    message.message_id,
+                    None,
+                    false,
+                )
+                .await
+                {
                     RequestAction::Process => {
                         let Some(inbound) = decode_websocket_message(&message.payload)
                             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
@@ -110,13 +120,31 @@ pub async fn serve(
                             let request_bytes = websocket_message_bytes(&inbound).to_vec();
                             let started = Instant::now();
                             let response = protocol.handle_message(inbound).await;
-                            let response_bytes = response.as_ref().map(websocket_message_bytes).map(|bytes| bytes.to_vec());
-                            log_json_rpc("WebSocket/CoAP", peer, &request_bytes, response_bytes.as_deref(), started.elapsed());
+                            let response_bytes = response
+                                .as_ref()
+                                .map(websocket_message_bytes)
+                                .map(|bytes| bytes.to_vec());
+                            log_json_rpc(
+                                "WebSocket/CoAP",
+                                peer,
+                                &request_bytes,
+                                response_bytes.as_deref(),
+                                started.elapsed(),
+                            );
                             let outbound = match response {
                                 Some(response) => match encode_websocket_message(&response) {
-                                    Ok(payload) => CoapMessage::response(message.message_id, message.token.clone(), payload),
+                                    Ok(payload) => CoapMessage::response(
+                                        message.message_id,
+                                        message.token.clone(),
+                                        payload,
+                                    ),
                                     Err(error) => {
-                                        log_transport_error("WebSocket/CoAP", peer, "response", &error);
+                                        log_transport_error(
+                                            "WebSocket/CoAP",
+                                            peer,
+                                            "response",
+                                            &error,
+                                        );
                                         return;
                                     }
                                 },
@@ -125,16 +153,33 @@ pub async fn serve(
                             match encode_coap_message(&outbound) {
                                 Ok(encoded) => {
                                     if let Err(error) = socket.send_to(&encoded, peer).await {
-                                        log_transport_error("WebSocket/CoAP", peer, "response", &error);
+                                        log_transport_error(
+                                            "WebSocket/CoAP",
+                                            peer,
+                                            "response",
+                                            &error,
+                                        );
                                     } else {
-                                        let _ = cache_request_state(&sessions, &runtime, peer, message.message_id, Some(encoded), true).await;
+                                        let _ = cache_request_state(
+                                            &sessions,
+                                            &runtime,
+                                            peer,
+                                            message.message_id,
+                                            Some(encoded),
+                                            true,
+                                        )
+                                        .await;
                                     }
                                 }
-                                Err(error) => log_transport_error("WebSocket/CoAP", peer, "response", &error),
+                                Err(error) => {
+                                    log_transport_error("WebSocket/CoAP", peer, "response", &error)
+                                }
                             }
                         });
                     }
-                    RequestAction::Replay(response) => { let _ = socket.send_to(&response, peer).await; }
+                    RequestAction::Replay(response) => {
+                        let _ = socket.send_to(&response, peer).await;
+                    }
                     RequestAction::Drop => {}
                 }
             }
@@ -159,15 +204,25 @@ async fn cache_request_state(
     prune_session(session, runtime, now);
     match session.entries.get(&message_id) {
         Some(CachedRequest::InFlight { .. }) if !complete => return RequestAction::Drop,
-        Some(CachedRequest::Complete { response, .. }) if !complete => return RequestAction::Replay(response.clone()),
+        Some(CachedRequest::Complete { response, .. }) if !complete => {
+            return RequestAction::Replay(response.clone());
+        }
         _ => {}
     }
     if complete {
-        session.entries.insert(message_id, CachedRequest::Complete { seen_at: now, response: response.unwrap_or_default() });
+        session.entries.insert(
+            message_id,
+            CachedRequest::Complete {
+                seen_at: now,
+                response: response.unwrap_or_default(),
+            },
+        );
         session.order.push_back(message_id);
         RequestAction::Drop
     } else {
-        session.entries.insert(message_id, CachedRequest::InFlight { seen_at: now });
+        session
+            .entries
+            .insert(message_id, CachedRequest::InFlight { seen_at: now });
         session.order.push_back(message_id);
         RequestAction::Process
     }
@@ -176,7 +231,10 @@ async fn cache_request_state(
 fn prune_session(session: &mut PeerSession, runtime: &TransportRuntime, now: Instant) {
     while let Some(message_id) = session.order.front().copied() {
         let remove = match session.entries.get(&message_id) {
-            Some(CachedRequest::InFlight { seen_at }) | Some(CachedRequest::Complete { seen_at, .. }) => now.duration_since(*seen_at) >= runtime.udp_reliability.dedup_cache_ttl,
+            Some(CachedRequest::InFlight { seen_at })
+            | Some(CachedRequest::Complete { seen_at, .. }) => {
+                now.duration_since(*seen_at) >= runtime.udp_reliability.dedup_cache_ttl
+            }
             None => true,
         };
         if session.entries.len() > runtime.udp_reliability.dedup_cache_capacity || remove {

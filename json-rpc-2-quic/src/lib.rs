@@ -1,16 +1,19 @@
 pub use json_rpc_2_core::*;
+pub use json_rpc_2_transport::*;
 
 pub mod client;
 pub mod server;
 
 pub mod transports {
-    pub use json_rpc_2_core::{
+    pub use json_rpc_2_transport::{
+        CONTROL_PATH, CONTROL_PING, CONTROL_PONG, H3_NO_ERROR, QUIC_NO_ERROR,
+    };
+    pub use json_rpc_2_transport::{
         CancellationToken, RunningTransport, RuntimeMetrics, RuntimeMetricsSnapshot, Transport,
         TransportFuture, TransportRuntime, log_control, log_json_rpc, log_transport_error,
         multiplex,
     };
-    pub use json_rpc_2_core::{CONTROL_PATH, CONTROL_PING, CONTROL_PONG, H3_NO_ERROR, QUIC_NO_ERROR};
-    pub use json_rpc_2_core::{closed, transport_error};
+    pub use json_rpc_2_transport::{closed, transport_error};
 
     #[cfg(feature = "http3")]
     pub mod http3 {
