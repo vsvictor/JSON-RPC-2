@@ -1324,10 +1324,9 @@ name = "json-rpc-2-iot"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "json-rpc-2-client",
  "json-rpc-2-core",
- "json-rpc-2-server",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
