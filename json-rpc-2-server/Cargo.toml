@@ -6,21 +6,21 @@ description = "JSON-RPC 2.0 server and transport adapters"
 
 [features]
 default = ["tcp", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "websocket", "mqtt", "coap", "amqp"]
-tcp = ["dep:futures-util"]
-udp = []
-rtp = []
-rudp = []
-srt = []
-udplite = []
-dccp = ["dep:futures-util"]
-sctp = ["dep:futures-util"]
-mqtt = ["dep:futures-util"]
-coap = []
-amqp = ["dep:futures-util"]
-quic = ["dep:quinn"]
-http1 = ["dep:axum"]
-http3 = ["dep:axum", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn"]
-websocket = ["rtp", "rudp", "srt", "udplite", "mqtt", "coap", "amqp", "dep:axum", "dep:base64", "dep:futures-util", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn", "dep:tokio-tungstenite"]
+tcp = ["dep:futures-util", "dep:json-rpc-2-tcp", "json-rpc-2-tcp/tcp", "json-rpc-2-websockets?/tcp"]
+udp = ["dep:json-rpc-2-datagram", "json-rpc-2-datagram/udp", "json-rpc-2-websockets?/udp"]
+rtp = ["dep:json-rpc-2-datagram", "json-rpc-2-datagram/rtp", "json-rpc-2-websockets?/rtp"]
+rudp = ["dep:json-rpc-2-datagram", "json-rpc-2-datagram/rudp", "json-rpc-2-websockets?/rudp"]
+srt = ["dep:json-rpc-2-datagram", "json-rpc-2-datagram/srt", "json-rpc-2-websockets?/srt"]
+udplite = ["dep:json-rpc-2-datagram", "json-rpc-2-datagram/udplite", "json-rpc-2-websockets?/udplite"]
+dccp = ["dep:futures-util", "dep:json-rpc-2-datagram", "json-rpc-2-datagram/dccp", "json-rpc-2-websockets?/dccp"]
+sctp = ["dep:futures-util", "dep:json-rpc-2-datagram", "json-rpc-2-datagram/sctp", "json-rpc-2-websockets?/sctp"]
+mqtt = ["dep:futures-util", "dep:json-rpc-2-iot", "json-rpc-2-iot/mqtt", "json-rpc-2-websockets?/mqtt"]
+coap = ["dep:json-rpc-2-iot", "json-rpc-2-iot/coap", "json-rpc-2-websockets?/coap"]
+amqp = ["dep:futures-util", "dep:json-rpc-2-iot", "json-rpc-2-iot/amqp", "json-rpc-2-websockets?/amqp"]
+quic = ["dep:quinn", "dep:json-rpc-2-quic", "json-rpc-2-quic/quic", "json-rpc-2-websockets?/quic"]
+http1 = ["dep:axum", "dep:json-rpc-2-tcp", "json-rpc-2-tcp/http1", "json-rpc-2-websockets?/http1"]
+http3 = ["dep:axum", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn", "dep:json-rpc-2-quic", "json-rpc-2-quic/http3", "json-rpc-2-websockets?/http3"]
+websocket = ["rtp", "rudp", "srt", "udplite", "mqtt", "coap", "amqp", "dep:axum", "dep:base64", "dep:futures-util", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn", "dep:tokio-tungstenite", "dep:json-rpc-2-websockets", "json-rpc-2-websockets/websocket"]
 
 [dependencies]
 arc-swap = "1"
@@ -32,6 +32,11 @@ h3 = { version = "0.0.8", optional = true }
 h3-quinn = { version = "0.0.10", optional = true }
 http = { version = "1", optional = true }
 json-rpc-2-core = { path = "../json-rpc-2-core" }
+json-rpc-2-datagram = { path = "../json-rpc-2-datagram", default-features = false, optional = true }
+json-rpc-2-iot = { path = "../json-rpc-2-iot", default-features = false, optional = true }
+json-rpc-2-quic = { path = "../json-rpc-2-quic", default-features = false, optional = true }
+json-rpc-2-tcp = { path = "../json-rpc-2-tcp", default-features = false, optional = true }
+json-rpc-2-websockets = { path = "../json-rpc-2-websockets", default-features = false, optional = true }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1", features = ["derive"] }

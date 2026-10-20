@@ -54,36 +54,6 @@ type HandlerFuture = Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send
 type Handler = Arc<dyn Fn(Value) -> HandlerFuture + Send + Sync>;
 type MethodMap = HashMap<String, Handler>;
 
-/// Runtime limits for the server dispatcher and transport fan-out.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransportLimits {
-    pub max_connections: usize,
-    pub max_concurrent_requests: usize,
-}
-
-/// Graceful shutdown behavior shared by transport adapters.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ServerShutdownPolicy {
-    pub close_timeout: std::time::Duration,
-}
-
-impl Default for ServerShutdownPolicy {
-    fn default() -> Self {
-        Self {
-            close_timeout: std::time::Duration::from_secs(5),
-        }
-    }
-}
-
-impl Default for TransportLimits {
-    fn default() -> Self {
-        Self {
-            max_connections: 4096,
-            max_concurrent_requests: 1024,
-        }
-    }
-}
-
 #[derive(Default)]
 struct ServerMetrics {
     active_requests: AtomicUsize,

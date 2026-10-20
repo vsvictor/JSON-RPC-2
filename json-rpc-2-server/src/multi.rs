@@ -66,78 +66,78 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 
 #[cfg(all(feature = "dccp", any(target_os = "linux", target_os = "android")))]
-use super::transports::dccp::DccpTransport;
+use json_rpc_2_datagram::server::transports::dccp::DccpTransport;
 #[cfg(feature = "http1")]
-use super::transports::http1::Http1Transport;
+use json_rpc_2_tcp::server::transports::http1::Http1Transport;
 #[cfg(feature = "http3")]
-use super::transports::http3::Http3Transport;
+use json_rpc_2_quic::server::transports::http3::Http3Transport;
 #[cfg(feature = "quic")]
-use super::transports::quic::QuicTransport;
+use json_rpc_2_quic::server::transports::quic::QuicTransport;
 #[cfg(feature = "amqp")]
-use super::transports::amqp::AmqpTransport;
+use json_rpc_2_iot::server::transports::amqp::AmqpTransport;
 #[cfg(feature = "coap")]
-use super::transports::coap::CoapTransport;
+use json_rpc_2_iot::server::transports::coap::CoapTransport;
 #[cfg(feature = "mqtt")]
-use super::transports::mqtt::MqttTransport;
+use json_rpc_2_iot::server::transports::mqtt::MqttTransport;
 #[cfg(feature = "rtp")]
-use super::transports::rtp::RtpTransport;
+use json_rpc_2_datagram::server::transports::rtp::RtpTransport;
 #[cfg(feature = "rudp")]
-use super::transports::rudp::RudpTransport;
+use json_rpc_2_datagram::server::transports::rudp::RudpTransport;
 #[cfg(all(feature = "sctp", any(target_os = "linux", target_os = "android")))]
-use super::transports::sctp::SctpTransport;
+use json_rpc_2_datagram::server::transports::sctp::SctpTransport;
 #[cfg(feature = "srt")]
-use super::transports::srt::SrtTransport;
+use json_rpc_2_datagram::server::transports::srt::SrtTransport;
 #[cfg(feature = "tcp")]
-use super::transports::tcp::TcpTransport;
+use json_rpc_2_tcp::server::transports::tcp::TcpTransport;
 #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
-use super::transports::udplite::UdpLiteTransport;
+use json_rpc_2_datagram::server::transports::udplite::UdpLiteTransport;
 #[cfg(feature = "udp")]
-use super::transports::udp::UdpTransport;
+use json_rpc_2_datagram::server::transports::udp::UdpTransport;
 #[cfg(all(
     feature = "websocket",
     feature = "dccp",
     any(target_os = "linux", target_os = "android")
 ))]
-use super::transports::websocket::dccp::DccpWebSocketTransport;
+use json_rpc_2_websockets::server::transports::dccp::DccpWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "http1"))]
-use super::transports::websocket::http1::Http1WebSocketTransport;
+use json_rpc_2_websockets::server::transports::http1::Http1WebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "http3"))]
-use super::transports::websocket::http3::Http3WebSocketTransport;
+use json_rpc_2_websockets::server::transports::http3::Http3WebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "quic"))]
-use super::transports::websocket::quic::QuicWebSocketTransport;
+use json_rpc_2_websockets::server::transports::quic::QuicWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "rtp"))]
-use super::transports::websocket::rtp::RtpWebSocketTransport;
+use json_rpc_2_websockets::server::transports::rtp::RtpWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "amqp"))]
-use super::transports::websocket::amqp::AmqpWebSocketTransport;
+use json_rpc_2_websockets::server::transports::amqp::AmqpWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "coap"))]
-use super::transports::websocket::coap::CoapWebSocketTransport;
+use json_rpc_2_websockets::server::transports::coap::CoapWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "mqtt"))]
-use super::transports::websocket::mqtt::MqttWebSocketTransport;
+use json_rpc_2_websockets::server::transports::mqtt::MqttWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "rudp"))]
-use super::transports::websocket::rudp::RudpWebSocketTransport;
+use json_rpc_2_websockets::server::transports::rudp::RudpWebSocketTransport;
 #[cfg(all(
     feature = "websocket",
     feature = "sctp",
     any(target_os = "linux", target_os = "android")
 ))]
-use super::transports::websocket::sctp::SctpWebSocketTransport;
+use json_rpc_2_websockets::server::transports::sctp::SctpWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "srt"))]
-use super::transports::websocket::srt::SrtWebSocketTransport;
+use json_rpc_2_websockets::server::transports::srt::SrtWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "tcp"))]
-use super::transports::websocket::tcp::TcpWebSocketTransport;
+use json_rpc_2_websockets::server::transports::tcp::TcpWebSocketTransport;
 #[cfg(all(
     feature = "websocket",
     feature = "udplite",
     any(target_os = "linux", target_os = "android")
 ))]
-use super::transports::websocket::udplite::UdpLiteWebSocketTransport;
+use json_rpc_2_websockets::server::transports::udplite::UdpLiteWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "udp"))]
-use super::transports::websocket::udp::UdpWebSocketTransport;
+use json_rpc_2_websockets::server::transports::udp::UdpWebSocketTransport;
 #[cfg(feature = "websocket")]
-use super::transports::websocket::{JsonRpcWebSocket, WebSocketProtocol, WebSocketTransport};
+use json_rpc_2_websockets::server::transports::{JsonRpcWebSocket, WebSocketProtocol, WebSocketTransport};
 use super::{
-    JsonRpcProtocol, RpcServer, ServerShutdownPolicy, TransportLimits,
-    transports::{RunningTransport, RuntimeMetricsSnapshot, Transport, TransportRuntime},
+    JsonRpcProtocol, RpcServer, RunningTransport, RuntimeMetricsSnapshot, ServerShutdownPolicy,
+    Transport, TransportLimits, TransportRuntime,
 };
 use crate::{
     TransportCapabilities, TransportCapabilitySet, TransportMultiplexing, TransportSecurity,
@@ -1626,7 +1626,7 @@ fn bind_socket(
         all(feature = "websocket", feature = "http1")
     ))]
     if kind == socket2::Type::STREAM {
-        super::transports::apply_tcp_listener_tuning(&socket, _tcp_tuning)?;
+        super::apply_tcp_listener_tuning(&socket, _tcp_tuning)?;
     }
     socket.bind(&address.into())?;
     Ok(socket)
