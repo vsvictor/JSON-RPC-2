@@ -31,12 +31,12 @@ echo "==> Building target libsrt dependencies"
 bash "$KMP_DIR/tools/build-mobile-srt.sh"
 
 SRT_REVISION=899348d8318eb9a3c5a5b6ec43c4a1114288773a
-SRT_SOURCE_DIR="$WORKSPACE_DIR/target/native/srt/$SRT_REVISION/source"
+SRT_ROOT="$WORKSPACE_DIR/target/native/srt/$SRT_REVISION"
 
 echo "==> Building Android .so for arm64-v8a, armeabi-v7a, x86, x86_64"
 rm -rf "$BINDINGS_DIR/android-libs"
 for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-    srt_prefix="$SRT_SOURCE_DIR/scripts/build-android/$abi"
+    srt_prefix="$SRT_ROOT/android/$abi"
     pkg_config_dir="$srt_prefix/lib/pkgconfig"
     env -u PKG_CONFIG_ALL_STATIC -u SRT_STATIC \
         PKG_CONFIG_ALLOW_CROSS=1 \
@@ -46,7 +46,7 @@ for abi in arm64-v8a armeabi-v7a x86 x86_64; do
         cargo ndk -t "$abi" -o "$BINDINGS_DIR/android-libs" \
             build -p json-rpc-2-ffi --release
 
-    native_dir="$SRT_SOURCE_DIR/scripts/build-android/prebuilt/$abi"
+    native_dir="$srt_prefix/lib"
     for library in libsrt.so libmbedtls.so libmbedx509.so libmbedcrypto.so; do
         if [[ ! -f "$native_dir/$library" ]]; then
             echo "Missing Android SRT dependency: $native_dir/$library" >&2
@@ -58,13 +58,26 @@ done
 
 echo "==> Building iOS static libs (device + simulator)"
 for target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
-    srt_prefix="$WORKSPACE_DIR/target/native/srt/$SRT_REVISION/ios/$target"
+    srt_prefix="$SRT_ROOT/ios/$target"
     pkg_config_dir="$srt_prefix/lib/pkgconfig"
     PKG_CONFIG_ALLOW_CROSS=1 \
     PKG_CONFIG_ALL_STATIC=1 \
     PKG_CONFIG_PATH="$pkg_config_dir" \
     PKG_CONFIG_LIBDIR="$pkg_config_dir" \
         cargo build -p json-rpc-2-ffi --release --target "$target"
+done
+
+echo "==> Combining iOS static dependencies"
+for target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+    srt_prefix="$SRT_ROOT/ios/$target"
+    output_dir="$BINDINGS_DIR/ios/$target"
+    mkdir -p "$output_dir"
+    xcrun libtool -static -o "$output_dir/libjson_rpc_2_ffi.a" \
+        "target/$target/release/libjson_rpc_2_ffi.a" \
+        "$srt_prefix/lib/libsrt.a" \
+        "$srt_prefix/lib/libmbedtls.a" \
+        "$srt_prefix/lib/libmbedx509.a" \
+        "$srt_prefix/lib/libmbedcrypto.a"
 done
 
 echo "==> Generating Kotlin bindings"
@@ -89,14 +102,14 @@ cp "$BINDINGS_DIR/swift/json_rpc_2_ffiFFI.h" "$WORK_DIR/sim-headers/"
 cp "$BINDINGS_DIR/swift/json_rpc_2_ffiFFI.modulemap" "$WORK_DIR/device-headers/module.modulemap"
 cp "$BINDINGS_DIR/swift/json_rpc_2_ffiFFI.modulemap" "$WORK_DIR/sim-headers/module.modulemap"
 lipo -create \
-    target/aarch64-apple-ios-sim/release/libjson_rpc_2_ffi.a \
-    target/x86_64-apple-ios/release/libjson_rpc_2_ffi.a \
+    "$BINDINGS_DIR/ios/aarch64-apple-ios-sim/libjson_rpc_2_ffi.a" \
+    "$BINDINGS_DIR/ios/x86_64-apple-ios/libjson_rpc_2_ffi.a" \
     -output "$WORK_DIR/libjson_rpc_2_ffi_sim.a"
 
 rm -rf "$XCFRAMEWORK_DIR/JsonRpc2FFI.xcframework"
 mkdir -p "$XCFRAMEWORK_DIR"
 xcodebuild -create-xcframework \
-    -library target/aarch64-apple-ios/release/libjson_rpc_2_ffi.a -headers "$WORK_DIR/device-headers" \
+    -library "$BINDINGS_DIR/ios/aarch64-apple-ios/libjson_rpc_2_ffi.a" -headers "$WORK_DIR/device-headers" \
     -library "$WORK_DIR/libjson_rpc_2_ffi_sim.a" -headers "$WORK_DIR/sim-headers" \
     -output "$XCFRAMEWORK_DIR/JsonRpc2FFI.xcframework"
 
@@ -106,7 +119,9 @@ cp "$BINDINGS_DIR/kotlin/uniffi/json_rpc_2_ffi/json_rpc_2_ffi.kt" "$KOTLIN_PACKA
 
 for abi in arm64-v8a armeabi-v7a x86 x86_64; do
     mkdir -p "$JNI_LIBS_DIR/$abi"
-    cp "$BINDINGS_DIR/android-libs/$abi/libjson_rpc_2_ffi.so" "$JNI_LIBS_DIR/$abi/"
+    for library in libjson_rpc_2_ffi.so libsrt.so libmbedtls.so libmbedx509.so libmbedcrypto.so; do
+        cp "$BINDINGS_DIR/android-libs/$abi/$library" "$JNI_LIBS_DIR/$abi/"
+    done
 done
 
 cp "$BINDINGS_DIR/swift/json_rpc_2_ffi.swift" "$SWIFT_SOURCES_DIR/"
