@@ -157,7 +157,7 @@ fn invalid_data(error: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
 
-pub(crate) fn decode_remaining_length(bytes: &[u8]) -> Result<(usize, usize), String> {
+pub fn decode_remaining_length(bytes: &[u8]) -> Result<(usize, usize), String> {
     let mut multiplier = 1usize;
     let mut value = 0usize;
     for (index, byte) in bytes.iter().copied().enumerate() {

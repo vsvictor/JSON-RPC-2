@@ -1404,10 +1404,21 @@ dependencies = [
 name = "json-rpc-2-websockets"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "base64 0.22.1",
  "bytes",
- "json-rpc-2-client",
+ "futures-util",
+ "h3",
+ "h3-quinn",
+ "http",
  "json-rpc-2-core",
- "json-rpc-2-server",
+ "json-rpc-2-datagram",
+ "json-rpc-2-iot",
+ "json-rpc-2-quic",
+ "json-rpc-2-tcp",
+ "quinn",
+ "tokio",
+ "tokio-tungstenite",
  "tokio-util",
 ]
 

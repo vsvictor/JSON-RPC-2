@@ -19,12 +19,12 @@ use json_rpc_2_core::{
     MAX_MESSAGE_BYTES, RpcClientTransport, TransportError,
 };
 
-pub(crate) type H3Sender = SendRequest<h3_quinn::OpenStreams, Bytes>;
-pub(crate) type H3Driver = JoinHandle<ConnectionError>;
+pub type H3Sender = SendRequest<h3_quinn::OpenStreams, Bytes>;
+pub type H3Driver = JoinHandle<ConnectionError>;
 type H3RequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 
 /// Establish an HTTP/3 connection and drive it in a background task.
-pub(crate) async fn connect_h3(
+pub async fn connect_h3(
     endpoint: &Endpoint,
     address: SocketAddr,
     server_name: &str,
@@ -45,7 +45,7 @@ pub(crate) async fn connect_h3(
 }
 
 /// Close an HTTP/3 connection once all of its request streams are finished.
-pub(crate) async fn close_h3(
+pub async fn close_h3(
     endpoint: &Endpoint,
     sender: H3Sender,
     driver: H3Driver,

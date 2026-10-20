@@ -1,17 +1,17 @@
 use std::net::SocketAddr;
 
-use json_rpc_2_client::{
-    RpcClientTransport, TransportError,
-    transports::{rtp::RtpClientTransport, websocket::DatagramWebSocketClientTransport},
-};
+use json_rpc_2_core::{RpcClientTransport, TransportError};
+use json_rpc_2_datagram::client::transports::rudp::RudpClientTransport;
+
+use super::DatagramWebSocketClientTransport;
 use json_rpc_2_core::UdpReliabilityConfig;
 
-/// Dedicated WebSocket-style transport over RTP data packets with RTCP control.
-pub struct RtpWebSocketClientTransport {
-    inner: DatagramWebSocketClientTransport<RtpClientTransport>,
+/// Dedicated WebSocket-style transport over reliable RUDP datagrams.
+pub struct RudpWebSocketClientTransport {
+    inner: DatagramWebSocketClientTransport<RudpClientTransport>,
 }
 
-impl RtpWebSocketClientTransport {
+impl RudpWebSocketClientTransport {
     pub async fn connect(address: SocketAddr) -> Result<Self, TransportError> {
         Self::connect_with_config(address, UdpReliabilityConfig::default()).await
     }
@@ -22,16 +22,16 @@ impl RtpWebSocketClientTransport {
     ) -> Result<Self, TransportError> {
         Ok(Self {
             inner: DatagramWebSocketClientTransport::new(
-                RtpClientTransport::connect_with_config(address, config).await?,
-                "ws-rtp",
-                "WebSocket/RTP peer closed the session",
+                RudpClientTransport::connect_with_config(address, config).await?,
+                "ws-rudp",
+                "WebSocket/RUDP peer closed the session",
             ),
         })
     }
 }
 
-impl RpcClientTransport for RtpWebSocketClientTransport {
-    fn send<'a>(&'a self, message: bytes::Bytes) -> json_rpc_2_client::ClientTransportFuture<'a> {
+impl RpcClientTransport for RudpWebSocketClientTransport {
+    fn send<'a>(&'a self, message: bytes::Bytes) -> json_rpc_2_core::ClientTransportFuture<'a> {
         self.inner.send(message)
     }
 
@@ -39,7 +39,7 @@ impl RpcClientTransport for RtpWebSocketClientTransport {
         &'a self,
         message: bytes::Bytes,
         expects_response: bool,
-    ) -> json_rpc_2_client::ClientTransportFuture<'a> {
+    ) -> json_rpc_2_core::ClientTransportFuture<'a> {
         self.inner.send_with_expectation(message, expects_response)
     }
 
@@ -48,7 +48,7 @@ impl RpcClientTransport for RtpWebSocketClientTransport {
         message: bytes::Bytes,
         expects_response: bool,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> json_rpc_2_client::ClientTransportFuture<'a> {
+    ) -> json_rpc_2_core::ClientTransportFuture<'a> {
         self.inner
             .send_cancelable(message, expects_response, cancel)
     }
@@ -61,15 +61,15 @@ impl RpcClientTransport for RtpWebSocketClientTransport {
         self.inner.peer()
     }
 
-    fn transport_ping<'a>(&'a self) -> json_rpc_2_client::ClientPingFuture<'a> {
+    fn transport_ping<'a>(&'a self) -> json_rpc_2_core::ClientPingFuture<'a> {
         self.inner.transport_ping()
     }
 
-    fn reconnect<'a>(&'a self) -> json_rpc_2_client::ClientRecoverFuture<'a> {
+    fn reconnect<'a>(&'a self) -> json_rpc_2_core::ClientRecoverFuture<'a> {
         self.inner.reconnect()
     }
 
-    fn close<'a>(&'a self) -> json_rpc_2_client::ClientCloseFuture<'a> {
+    fn close<'a>(&'a self) -> json_rpc_2_core::ClientCloseFuture<'a> {
         self.inner.close()
     }
 }
