@@ -2,6 +2,9 @@
 
 mod client_transport;
 mod server_transport;
+mod udplite;
+
+pub use udplite::apply_udp_lite_coverage;
 
 pub use client_transport::{
     ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,

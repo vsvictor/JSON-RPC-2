@@ -345,12 +345,14 @@ fn apply_tcp_fast_open_connect(socket: &Socket, tuning: &crate::TcpTuningConfig)
         if result == -1 {
             return Err(io::Error::last_os_error());
         }
-        return Ok(());
+        Ok(())
     }
-    let _ = socket;
-    #[allow(unreachable_code)]
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "client-side TCP Fast Open is only supported on linux/android in this crate",
-    ))
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let _ = socket;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "client-side TCP Fast Open is only supported on linux/android in this crate",
+        ))
+    }
 }

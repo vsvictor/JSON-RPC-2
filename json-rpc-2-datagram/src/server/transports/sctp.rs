@@ -158,10 +158,9 @@ mod platform {
                 )
             })?;
             let fd = unsafe { OwnedFd::from_raw_fd(socket.into_raw_fd()) };
-            Ok(Self {
-                fd: AsyncFd::new(fd)?,
-                local_addr,
-            })
+            // SAFETY: OwnedFd keeps the same descriptor open until AsyncFd is dropped.
+            let fd = unsafe { AsyncFd::register(fd) }?;
+            Ok(Self { fd, local_addr })
         }
 
         pub(super) fn local_addr(&self) -> SocketAddr {
@@ -186,10 +185,9 @@ mod platform {
 
     impl SctpStream {
         fn new((fd, peer): (OwnedFd, SocketAddr)) -> io::Result<Self> {
-            Ok(Self {
-                fd: AsyncFd::new(fd)?,
-                peer,
-            })
+            // SAFETY: OwnedFd keeps the same descriptor open until AsyncFd is dropped.
+            let fd = unsafe { AsyncFd::register(fd) }?;
+            Ok(Self { fd, peer })
         }
 
         pub(super) fn peer_addr(&self) -> SocketAddr {

@@ -20,7 +20,7 @@ json-rpc-2-core = { path = "../json-rpc-2-core" }
 json-rpc-2-transport = { path = "../json-rpc-2-transport" }
 socket2 = "0.6"
 libsrt-sys = { package = "tstrans-srt-sys", version = "0.8", default-features = false, optional = true }
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.3", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
 
 [build-dependencies]

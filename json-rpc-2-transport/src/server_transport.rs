@@ -21,7 +21,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 pub use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, warn};
 
 use crate::{TcpCongestionControl, TcpTuningConfig};
 use json_rpc_2_core::UdpReliabilityConfig;
@@ -242,14 +242,14 @@ pub fn log_json_rpc(
         notification = response.is_none(),
         "handled json-rpc message"
     );
-    if trace_enabled() {
-        trace!(transport, peer, request = %String::from_utf8_lossy(request), "json-rpc request payload");
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        debug!(transport, peer, direction = "received", request = %String::from_utf8_lossy(request), "json-rpc request payload");
         match response {
             Some(response) => {
-                trace!(transport, peer, response = %String::from_utf8_lossy(response), "json-rpc response payload");
+                debug!(transport, peer, direction = "outgoing", response = %String::from_utf8_lossy(response), "json-rpc response payload");
             }
             None => {
-                trace!(transport, peer, "json-rpc notification without response");
+                debug!(transport, peer, "json-rpc notification without response");
             }
         }
     }
@@ -272,10 +272,6 @@ pub fn log_transport_error(
     error: &dyn std::fmt::Display,
 ) {
     warn!(transport, peer = %peer, stage, error = %error, "transport session failed");
-}
-
-fn trace_enabled() -> bool {
-    tracing::enabled!(tracing::Level::TRACE)
 }
 
 fn extract_request_meta(request: &[u8]) -> (Option<String>, Option<String>) {

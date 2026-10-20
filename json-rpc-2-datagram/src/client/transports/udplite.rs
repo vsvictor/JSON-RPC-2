@@ -27,7 +27,7 @@ use json_rpc_2_transport::{
     ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
     RpcClientTransport, TransportError,
 };
-use json_rpc_2_transport::{closed, transport_error};
+use json_rpc_2_transport::{apply_udp_lite_coverage, closed, transport_error};
 
 #[derive(Clone, Debug)]
 enum PendingEvent {
@@ -338,54 +338,6 @@ fn open_socket(address: SocketAddr, udp_lite: &UdpLiteConfig) -> Result<UdpSocke
     socket.connect(&address.into()).map_err(transport_error)?;
     socket.set_nonblocking(true).map_err(transport_error)?;
     UdpSocket::from_std(socket.into()).map_err(transport_error)
-}
-
-fn apply_udp_lite_coverage(socket: &Socket, udp_lite: &UdpLiteConfig) -> std::io::Result<()> {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        use std::os::fd::AsRawFd;
-
-        set_udp_lite_option(
-            socket.as_raw_fd(),
-            libc::UDPLITE_SEND_CSCOV,
-            udp_lite.send_checksum_coverage,
-        )?;
-        set_udp_lite_option(
-            socket.as_raw_fd(),
-            libc::UDPLITE_RECV_CSCOV,
-            udp_lite.recv_checksum_coverage,
-        )
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    {
-        let _ = (socket, udp_lite);
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "UDP-Lite is only supported on linux/android in this crate",
-        ))
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn set_udp_lite_option(
-    fd: std::os::fd::RawFd,
-    name: libc::c_int,
-    coverage: u16,
-) -> std::io::Result<()> {
-    let value: libc::c_int = coverage.into();
-    let result = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_UDPLITE,
-            name,
-            (&value as *const libc::c_int).cast(),
-            std::mem::size_of_val(&value) as libc::socklen_t,
-        )
-    };
-    if result == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 async fn run_receiver(

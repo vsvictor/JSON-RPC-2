@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start every local transport supported by this OS.
+# Start every local transport supported by this OS and kernel.
 # External MQTT/AMQP broker transports are opt-in with --brokers.
 source "$(dirname "$0")/common.sh"
 
@@ -7,7 +7,7 @@ usage() {
     cat <<'EOF'
 Usage: tools/server-all.sh [--brokers] [--dry-run] [SERVER OPTIONS...]
 
-Starts all local transports supported by the current OS. Each port comes from
+Starts all local transports supported by the current OS and kernel. Each port comes from
 the corresponding JSON_RPC_*_PORT setting in the project-root .env file.
 SERVER OPTIONS are forwarded to the server command, for example:
 --bind 127.0.0.1
@@ -17,6 +17,10 @@ Those require live external brokers and explicit JSON_RPC_MQTT_URL and
 JSON_RPC_AMQP_URL settings in the environment or .env.
 
 Pass --dry-run to print the command without building or starting the server.
+On Linux/Android, Python 3 probes UDP-Lite, DCCP, and SCTP socket support for
+the configured bind address families. Unsupported transports and their
+WebSocket variants are skipped with a diagnostic, including in --dry-run.
+Other socket errors (such as permission errors) abort the launch.
 EOF
 }
 
@@ -100,12 +104,34 @@ fi
 
 case "$(uname -s)" in
     Linux|Android)
-        add_transport udplite --udplite-port JSON_RPC_UDPLITE_PORT
-        add_transport dccp --dccp-port JSON_RPC_DCCP_PORT
-        add_transport sctp --sctp-port JSON_RPC_SCTP_PORT
-        add_transport ws-udplite --ws-udplite-port JSON_RPC_WS_UDPLITE_PORT
-        add_transport ws-dccp --ws-dccp-port JSON_RPC_WS_DCCP_PORT
-        add_transport ws-sctp --ws-sctp-port JSON_RPC_WS_SCTP_PORT
+        if ! command -v python3 >/dev/null; then
+            echo "Python 3 is required to probe kernel transport support." >&2
+            exit 1
+        fi
+        bind="$(setting JSON_RPC_BIND)"
+        for ((i = 0; i < ${#server_options[@]}; i++)); do
+            if [[ "${server_options[i]}" == --bind ]]; then
+                if ((i + 1 >= ${#server_options[@]})); then
+                    echo "--bind needs a value" >&2
+                    exit 2
+                fi
+                bind="${server_options[i + 1]}"
+                i=$((i + 1))
+            fi
+        done
+        supported="$(python3 "$ROOT/tools/probe-transports.py" "$bind")"
+        for transport in udplite dccp sctp; do
+            if [[ ",$supported," == *",$transport,"* ]]; then
+                setting_prefix="${transport^^}"
+                add_transport "$transport" "--$transport-port" "JSON_RPC_${setting_prefix}_PORT"
+            fi
+        done
+        for transport in udplite dccp sctp; do
+            if [[ ",$supported," == *",$transport,"* ]]; then
+                setting_prefix="${transport^^}"
+                add_transport "ws-$transport" "--ws-$transport-port" "JSON_RPC_WS_${setting_prefix}_PORT"
+            fi
+        done
         ;;
 esac
 

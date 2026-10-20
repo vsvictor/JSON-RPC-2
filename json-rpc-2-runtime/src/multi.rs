@@ -1980,8 +1980,6 @@ fn bind_udp(address: SocketAddr) -> io::Result<std::net::UdpSocket> {
 
 #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
 fn bind_udplite(address: SocketAddr, config: &UdpLiteConfig) -> io::Result<std::net::UdpSocket> {
-    use std::os::fd::AsRawFd;
-
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(address),
         socket2::Type::DGRAM,
@@ -1990,34 +1988,10 @@ fn bind_udplite(address: SocketAddr, config: &UdpLiteConfig) -> io::Result<std::
     if address.is_ipv6() {
         socket.set_only_v6(true)?;
     }
-    apply_udplite_coverage(socket.as_raw_fd(), config)?;
+    json_rpc_2_transport::apply_udp_lite_coverage(&socket, config)?;
     socket.bind(&address.into())?;
     socket.set_nonblocking(true)?;
     Ok(socket.into())
-}
-
-#[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
-fn apply_udplite_coverage(fd: std::os::fd::RawFd, config: &UdpLiteConfig) -> io::Result<()> {
-    set_udplite_option(fd, libc::UDPLITE_SEND_CSCOV, config.send_checksum_coverage)?;
-    set_udplite_option(fd, libc::UDPLITE_RECV_CSCOV, config.recv_checksum_coverage)
-}
-
-#[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
-fn set_udplite_option(fd: std::os::fd::RawFd, name: libc::c_int, coverage: u16) -> io::Result<()> {
-    let value: libc::c_int = coverage.into();
-    let result = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_UDPLITE,
-            name,
-            (&value as *const libc::c_int).cast(),
-            std::mem::size_of_val(&value) as libc::socklen_t,
-        )
-    };
-    if result == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 mod builder {

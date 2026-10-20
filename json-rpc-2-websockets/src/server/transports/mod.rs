@@ -62,6 +62,32 @@ struct WebSocketJsonRpcAdapter {
 }
 
 #[cfg(any(feature = "dccp", feature = "sctp"))]
+#[cfg(any(feature = "mqtt", feature = "amqp"))]
+async fn handle_broker_message(
+    protocol: &dyn WebSocketProtocol,
+    message: WebSocketMessage,
+    transport: &str,
+) -> Option<WebSocketMessage> {
+    let request = match &message {
+        WebSocketMessage::Text(text) => Bytes::copy_from_slice(text.as_bytes()),
+        WebSocketMessage::Binary(bytes) => bytes.clone(),
+    };
+    let started = std::time::Instant::now();
+    let response = protocol.handle_message(message).await;
+    let response_bytes = response.as_ref().map(|message| match message {
+        WebSocketMessage::Text(text) => text.as_bytes(),
+        WebSocketMessage::Binary(bytes) => bytes.as_ref(),
+    });
+    json_rpc_2_transport::log_json_rpc(
+        transport,
+        "external",
+        &request,
+        response_bytes,
+        started.elapsed(),
+    );
+    response
+}
+
 impl JsonRpcProtocol for WebSocketJsonRpcAdapter {
     fn handle_message<'a>(&'a self, message: &'a [u8]) -> json_rpc_2_transport::ProtocolFuture<'a> {
         Box::pin(async move {

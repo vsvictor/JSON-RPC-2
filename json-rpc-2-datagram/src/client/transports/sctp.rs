@@ -145,7 +145,8 @@ mod platform {
                 Err(error) => return Err(error),
             }
             let fd = unsafe { OwnedFd::from_raw_fd(socket.into_raw_fd()) };
-            let fd = AsyncFd::new(fd)?;
+            // SAFETY: OwnedFd keeps the same descriptor open until AsyncFd is dropped.
+            let fd = unsafe { AsyncFd::register(fd) }?;
             wait_connected(&fd).await?;
             Ok(Self { fd })
         }

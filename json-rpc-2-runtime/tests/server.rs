@@ -514,6 +514,10 @@ async fn connect(
         TransportKind::Srt => boxed(SrtClientTransport::connect(to, "test-passphrase")),
         #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
         TransportKind::UdpLite => boxed(UdpLiteClientTransport::connect(to)),
+        #[cfg(all(feature = "dccp", any(target_os = "linux", target_os = "android")))]
+        TransportKind::Dccp => boxed(DccpClientTransport::connect(to)),
+        #[cfg(all(feature = "sctp", any(target_os = "linux", target_os = "android")))]
+        TransportKind::Sctp => boxed(SctpClientTransport::connect(to)),
         TransportKind::Quic => {
             let endpoint = client_endpoint(to.ip(), certificate, QUIC_ALPN);
             boxed(async move { QuicClientTransport::connect(endpoint, to, &server_name).await })
@@ -547,6 +551,18 @@ async fn connect(
             any(target_os = "linux", target_os = "android")
         ))]
         TransportKind::WebSocketUdpLite => boxed(UdpLiteWebSocketClientTransport::connect(to)),
+        #[cfg(all(
+            feature = "websocket",
+            feature = "dccp",
+            any(target_os = "linux", target_os = "android")
+        ))]
+        TransportKind::WebSocketDccp => boxed(DccpWebSocketClientTransport::connect(to)),
+        #[cfg(all(
+            feature = "websocket",
+            feature = "sctp",
+            any(target_os = "linux", target_os = "android")
+        ))]
+        TransportKind::WebSocketSctp => boxed(SctpWebSocketClientTransport::connect(to)),
         TransportKind::WebSocketQuic => {
             let endpoint = client_endpoint(to.ip(), certificate, WS_QUIC_ALPN);
             boxed(
@@ -605,6 +621,22 @@ async fn serves_every_transport_on_every_bind_address() {
         .set_ws_srt_port(0);
     #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
     let builder = builder.set_udplite_port(0).set_ws_udplite_port(0);
+    #[cfg(all(feature = "dccp", any(target_os = "linux", target_os = "android")))]
+    let builder = builder.set_dccp_port(0);
+    #[cfg(all(feature = "sctp", any(target_os = "linux", target_os = "android")))]
+    let builder = builder.set_sctp_port(0);
+    #[cfg(all(
+        feature = "websocket",
+        feature = "dccp",
+        any(target_os = "linux", target_os = "android")
+    ))]
+    let builder = builder.set_ws_dccp_port(0);
+    #[cfg(all(
+        feature = "websocket",
+        feature = "sctp",
+        any(target_os = "linux", target_os = "android")
+    ))]
+    let builder = builder.set_ws_sctp_port(0);
     let server = builder.set_tls(vec![certificate.clone()], key).build();
     let running: RunningServer = server.start().await.unwrap();
     assert_eq!(

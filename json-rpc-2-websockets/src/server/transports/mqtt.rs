@@ -40,7 +40,12 @@ impl JsonRpcProtocol for Adapter {
     fn handle_message<'a>(&'a self, message: &'a [u8]) -> ProtocolFuture<'a> {
         Box::pin(async move {
             let message = json_rpc_2_core::decode_websocket_message(message).ok()??;
-            let response = self.0.handle_message(message).await?;
+            let response = super::handle_broker_message(
+                self.0.as_ref(),
+                message,
+                "WebSocket/MQTT",
+            )
+            .await?;
             json_rpc_2_core::encode_websocket_message(&response)
                 .ok()
                 .map(Bytes::from)

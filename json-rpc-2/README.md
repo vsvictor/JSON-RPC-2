@@ -61,6 +61,12 @@ connecting an external peer.
 - **Structured telemetry**: library crates emit `tracing` events instead of
   `println!`/`eprintln!`, with correlation metadata for transport, peer,
   method, request id, latency, and remote error code when present.
+  Run `RUST_LOG=debug tools/server-all.sh --bind 0.0.0.0` to include full
+  JSON-RPC request/response payloads, notifications, and control events.
+  Payload events identify received requests and outgoing responses; outgoing
+  responses are logged before transport delivery, not as delivery confirmations.
+  These logs can contain sensitive application data; use `RUST_LOG=info`
+  to suppress debug payload logging.
 - **Config objects**: client/server policies are grouped into dedicated config
   types rather than growing unbounded lists of ad-hoc setters.
 - **Typed transport capabilities**: transport kinds expose structured

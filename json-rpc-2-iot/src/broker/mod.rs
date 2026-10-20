@@ -7,7 +7,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{RwLock, mpsc, oneshot};
 
@@ -414,10 +414,26 @@ pub(crate) async fn serve(
             let config = config.clone();
             workers.spawn(async move {
                 let result = bounded(config.response_timeout(), async {
+                    let transport = match &config {
+                        #[cfg(feature = "mqtt")]
+                        Config::Mqtt(_) => "MQTT",
+                        #[cfg(feature = "amqp")]
+                        Config::Amqp(_) => "AMQP",
+                    };
+                    let started = Instant::now();
                     let response = if message.control {
+                        json_rpc_2_transport::log_control(transport, "external", "ping", "pong");
                         Some(Bytes::from_static(b"pong"))
                     } else {
-                        protocol.handle_message(&message.payload).await
+                        let response = protocol.handle_message(&message.payload).await;
+                        json_rpc_2_transport::log_json_rpc(
+                            transport,
+                            "external",
+                            &message.payload,
+                            response.as_deref(),
+                            started.elapsed(),
+                        );
+                        response
                     };
                     if let (Some(response), Some(reply_to)) = (response, message.reply_to) {
                         if response.len() > config.max_payload() {
