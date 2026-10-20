@@ -27,17 +27,45 @@ KOTLIN_PACKAGE_DIR="$KMP_DIR/jsonrpc-client/src/main/kotlin/uniffi/json_rpc_2_ff
 echo "==> Building host binary (for uniffi-bindgen)"
 cargo build -p json-rpc-2-ffi
 
+echo "==> Building target libsrt dependencies"
+bash "$KMP_DIR/tools/build-mobile-srt.sh"
+
+SRT_REVISION=899348d8318eb9a3c5a5b6ec43c4a1114288773a
+SRT_SOURCE_DIR="$WORKSPACE_DIR/target/native/srt/$SRT_REVISION/source"
+
 echo "==> Building Android .so for arm64-v8a, armeabi-v7a, x86, x86_64"
 rm -rf "$BINDINGS_DIR/android-libs"
-cargo ndk \
-    -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 \
-    -o "$BINDINGS_DIR/android-libs" \
-    build -p json-rpc-2-ffi --release
+for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+    srt_prefix="$SRT_SOURCE_DIR/scripts/build-android/$abi"
+    pkg_config_dir="$srt_prefix/lib/pkgconfig"
+    env -u PKG_CONFIG_ALL_STATIC -u SRT_STATIC \
+        PKG_CONFIG_ALLOW_CROSS=1 \
+        PKG_CONFIG_PATH="$pkg_config_dir" \
+        PKG_CONFIG_LIBDIR="$pkg_config_dir" \
+        SRT_DYNAMIC=1 \
+        cargo ndk -t "$abi" -o "$BINDINGS_DIR/android-libs" \
+            build -p json-rpc-2-ffi --release
+
+    native_dir="$SRT_SOURCE_DIR/scripts/build-android/prebuilt/$abi"
+    for library in libsrt.so libmbedtls.so libmbedx509.so libmbedcrypto.so; do
+        if [[ ! -f "$native_dir/$library" ]]; then
+            echo "Missing Android SRT dependency: $native_dir/$library" >&2
+            exit 1
+        fi
+        cp "$native_dir/$library" "$BINDINGS_DIR/android-libs/$abi/"
+    done
+done
 
 echo "==> Building iOS static libs (device + simulator)"
-cargo build -p json-rpc-2-ffi --release --target aarch64-apple-ios
-cargo build -p json-rpc-2-ffi --release --target aarch64-apple-ios-sim
-cargo build -p json-rpc-2-ffi --release --target x86_64-apple-ios
+for target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+    srt_prefix="$WORKSPACE_DIR/target/native/srt/$SRT_REVISION/ios/$target"
+    pkg_config_dir="$srt_prefix/lib/pkgconfig"
+    PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_ALL_STATIC=1 \
+    PKG_CONFIG_PATH="$pkg_config_dir" \
+    PKG_CONFIG_LIBDIR="$pkg_config_dir" \
+        cargo build -p json-rpc-2-ffi --release --target "$target"
+done
 
 echo "==> Generating Kotlin bindings"
 rm -rf "$BINDINGS_DIR/kotlin"
