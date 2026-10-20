@@ -1,0 +1,57 @@
+[package]
+name = "json-rpc-2-server-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+bytes = "1"
+httparse = "1"
+libfuzzer-sys = "0.4"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+json-rpc-2-server = { path = ".." }
+
+[[bin]]
+name = "wire_message"
+path = "fuzz_targets/wire_message.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "structured_batch"
+path = "fuzz_targets/structured_batch.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tcp_framing"
+path = "fuzz_targets/tcp_framing.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "http1_framing"
+path = "fuzz_targets/http1_framing.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "websocket_messages"
+path = "fuzz_targets/websocket_messages.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "quic_control"
+path = "fuzz_targets/quic_control.rs"
+test = false
+doc = false
+
+[workspace]
+members = ["."]

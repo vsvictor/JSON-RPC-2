@@ -1,0 +1,7 @@
+[bindings.kotlin]
+# minSdk in the consuming Android app (24) is below API 33, where
+# java.lang.ref.Cleaner was introduced. Force the pure-JNA cleaner so the
+# generated bindings don't reference java.lang.ref.Cleaner at all (avoids
+# an Android Lint NewApi error even though the real UniFFI code only uses
+# it behind a runtime Class.forName check).
+disable_java_cleaner = true

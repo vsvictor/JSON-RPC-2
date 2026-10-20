@@ -1,0 +1,60 @@
+[package]
+name = "json-rpc-2-ffi"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# `cdylib` is loaded as a native `.so`/`.dylib` by the Kotlin (JNA) and Swift
+# bindings; `lib` lets the `uniffi-bindgen` binary below depend on this crate
+# to read its exported UniFFI metadata.
+[lib]
+name = "json_rpc_2_ffi"
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["uniffi-bindgen"]
+
+[features]
+# Keeps the `uniffi` CLI (and its extra dependencies) out of the mobile
+# `cdylib`/`staticlib` build; only pulled in when generating bindings.
+default = ["tcp", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "mqtt", "coap", "amqp", "websocket"]
+tcp = ["json-rpc-2/tcp"]
+udp = ["json-rpc-2/udp"]
+rtp = ["json-rpc-2/rtp"]
+rudp = ["json-rpc-2/rudp"]
+srt = ["json-rpc-2/srt"]
+udplite = ["json-rpc-2/udplite"]
+dccp = ["json-rpc-2/dccp"]
+sctp = ["json-rpc-2/sctp"]
+quic = ["json-rpc-2/quic"]
+http1 = ["json-rpc-2/http1"]
+http3 = ["json-rpc-2/http3"]
+mqtt = ["json-rpc-2/mqtt"]
+coap = ["json-rpc-2/coap"]
+amqp = ["json-rpc-2/amqp"]
+websocket = ["json-rpc-2/websocket"]
+uniffi-bindgen = ["uniffi/cli"]
+
+[dependencies]
+bytes = "1"
+# The original Rust crate is reused as-is: every transport it ships
+# (tcp, udp, rtp, dccp, sctp, http1, quic, http3, ws-tcp, ws-udp, ws-rtp, ws-dccp, ws-sctp, ws-quic, ws-http1, ws-http3) is wrapped
+# here, no protocol or transport logic is duplicated.
+json-rpc-2 = { path = "../json-rpc-2", default-features = false }
+
+uniffi = "0.32"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde_json = "1"
+thiserror = "2"
+
+# Only needed to build the `quinn::Endpoint` (TLS + ALPN) that the quic,
+# http3, ws-quic, and ws-http3 transports require from their caller; same
+# versions as json-rpc-2 itself uses internally.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(uniffi_bindgen)"] }

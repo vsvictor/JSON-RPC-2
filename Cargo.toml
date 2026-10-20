@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "json-rpc-2",
+    "json-rpc-2-cli",
+    "json-rpc-2-client",
+    "json-rpc-2-config",
+    "json-rpc-2-core",
+    "json-rpc-2-datagram",
+    "json-rpc-2-ffi",
+    "json-rpc-2-iot",
+    "json-rpc-2-quic",
+    "json-rpc-2-server",
+    "json-rpc-2-tcp",
+    "json-rpc-2-websockets",
+]
+default-members = [
+    "json-rpc-2",
+    "json-rpc-2-cli",
+    "json-rpc-2-client",
+    "json-rpc-2-config",
+    "json-rpc-2-core",
+    "json-rpc-2-datagram",
+    "json-rpc-2-iot",
+    "json-rpc-2-quic",
+    "json-rpc-2-server",
+    "json-rpc-2-tcp",
+    "json-rpc-2-websockets",
+]
+resolver = "3"
+
+[patch.crates-io]
+h3 = { git = "https://github.com/hyperium/h3", package = "h3" }
+h3-quinn = { git = "https://github.com/hyperium/h3", package = "h3-quinn" }

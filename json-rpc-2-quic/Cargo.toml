@@ -1,0 +1,27 @@
+[package]
+name = "json-rpc-2-quic"
+version = "0.1.0"
+edition = "2024"
+description = "QUIC-based JSON-RPC 2.0 transport implementations"
+
+[features]
+default = ["quic", "http3"]
+quic = ["json-rpc-2-client/quic", "json-rpc-2-server/quic"]
+http3 = ["json-rpc-2-client/http3", "json-rpc-2-server/http3"]
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+bytes = "1"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+http = "1"
+json-rpc-2-client = { path = "../json-rpc-2-client", default-features = false }
+json-rpc-2-core = { path = "../json-rpc-2-core" }
+json-rpc-2-server = { path = "../json-rpc-2-server", default-features = false }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+socket2 = "0.6"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "stream"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
+futures-util = { version = "0.3", features = ["sink"] }

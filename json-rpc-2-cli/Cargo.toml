@@ -1,0 +1,19 @@
+[package]
+name = "json-rpc-2-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI and demo binary for the JSON-RPC 2.0 workspace"
+
+[[bin]]
+name = "JSON_RPC_2"
+path = "src/main.rs"
+
+[dependencies]
+json-rpc-2 = { path = "../json-rpc-2" }
+json-rpc-2-config = { path = "../json-rpc-2-config" }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

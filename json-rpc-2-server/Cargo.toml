@@ -1,0 +1,60 @@
+[package]
+name = "json-rpc-2-server"
+version = "0.1.0"
+edition = "2024"
+description = "JSON-RPC 2.0 server and transport adapters"
+
+[features]
+default = ["tcp", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "websocket", "mqtt", "coap", "amqp"]
+tcp = ["dep:futures-util"]
+udp = []
+rtp = []
+rudp = []
+srt = []
+udplite = []
+dccp = ["dep:futures-util"]
+sctp = ["dep:futures-util"]
+mqtt = ["dep:futures-util"]
+coap = []
+amqp = ["dep:futures-util"]
+quic = ["dep:quinn"]
+http1 = ["dep:axum"]
+http3 = ["dep:axum", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn"]
+websocket = ["rtp", "rudp", "srt", "udplite", "mqtt", "coap", "amqp", "dep:axum", "dep:base64", "dep:futures-util", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn", "dep:tokio-tungstenite"]
+
+[dependencies]
+arc-swap = "1"
+axum = { version = "0.8", features = ["ws"], optional = true }
+base64 = { version = "0.22", optional = true }
+bytes = "1"
+futures-util = { version = "0.3", features = ["sink"], optional = true }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+http = { version = "1", optional = true }
+json-rpc-2-core = { path = "../json-rpc-2-core" }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socket2 = "0.6"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "stream"], optional = true }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
+tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+json-rpc-2-client = { path = "../json-rpc-2-client" }
+json-rpc-2-websockets = { path = "../json-rpc-2-websockets", default-features = false, features = ["websocket", "rtp", "rudp", "srt", "udplite"] }
+proptest = "1"
+rcgen = "0.13"
+tokio-test = "0.4"
+jsonrpsee = { version = "0.24", features = ["http-client"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[[bench]]
+name = "rpc_dispatch"
+harness = false

@@ -1,0 +1,9 @@
+[package]
+name = "json-rpc-2-config"
+version = "0.1.0"
+edition = "2024"
+description = "Typed configuration loading and CLI parsing for JSON-RPC 2.0 examples"
+
+[dependencies]
+dotenvy = "0.15.7"
+json-rpc-2 = { path = "../json-rpc-2" }

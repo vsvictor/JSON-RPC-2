@@ -1,0 +1,5 @@
+/target
+/json-rpc-2-ffi/bindings
+# Certificates and private keys: keep the directory, never the files.
+/certs/*
+!/certs/.gitkeep

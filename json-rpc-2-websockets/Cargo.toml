@@ -1,0 +1,30 @@
+[package]
+name = "json-rpc-2-websockets"
+version = "0.1.0"
+edition = "2024"
+description = "WebSocket-family JSON-RPC 2.0 transport implementations"
+
+[features]
+default = ["websocket", "tcp", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "mqtt", "coap", "amqp"]
+websocket = ["json-rpc-2-client/websocket", "json-rpc-2-server/websocket"]
+tcp = ["json-rpc-2-client/tcp", "json-rpc-2-server/tcp"]
+udp = ["json-rpc-2-client/udp", "json-rpc-2-server/udp"]
+rtp = ["json-rpc-2-client/rtp", "json-rpc-2-server/rtp"]
+rudp = ["json-rpc-2-client/rudp", "json-rpc-2-server/rudp"]
+srt = ["json-rpc-2-client/srt", "json-rpc-2-server/srt"]
+udplite = ["json-rpc-2-client/udplite", "json-rpc-2-server/udplite"]
+dccp = ["json-rpc-2-client/dccp", "json-rpc-2-server/dccp"]
+sctp = ["json-rpc-2-client/sctp", "json-rpc-2-server/sctp"]
+quic = ["json-rpc-2-client/quic", "json-rpc-2-server/quic"]
+http1 = ["json-rpc-2-client/http1", "json-rpc-2-server/http1"]
+http3 = ["json-rpc-2-client/http3", "json-rpc-2-server/http3"]
+mqtt = ["json-rpc-2-client/mqtt", "json-rpc-2-server/mqtt"]
+coap = ["json-rpc-2-client/coap", "json-rpc-2-server/coap"]
+amqp = ["json-rpc-2-client/amqp", "json-rpc-2-server/amqp"]
+
+[dependencies]
+bytes = "1"
+json-rpc-2-client = { path = "../json-rpc-2-client", default-features = false }
+json-rpc-2-core = { path = "../json-rpc-2-core" }
+json-rpc-2-server = { path = "../json-rpc-2-server", default-features = false }
+tokio-util = { version = "0.7", features = ["rt"] }

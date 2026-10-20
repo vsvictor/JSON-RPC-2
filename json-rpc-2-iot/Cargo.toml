@@ -1,0 +1,18 @@
+[package]
+name = "json-rpc-2-iot"
+version = "0.1.0"
+edition = "2024"
+description = "IoT-oriented JSON-RPC 2.0 transport implementations (MQTT, CoAP, AMQP)"
+
+[features]
+default = ["mqtt", "coap", "amqp"]
+mqtt = ["json-rpc-2-client/mqtt", "json-rpc-2-server/mqtt"]
+coap = ["json-rpc-2-client/coap", "json-rpc-2-server/coap"]
+amqp = ["json-rpc-2-client/amqp", "json-rpc-2-server/amqp"]
+
+[dependencies]
+bytes = "1"
+json-rpc-2-client = { path = "../json-rpc-2-client", default-features = false }
+json-rpc-2-core = { path = "../json-rpc-2-core" }
+json-rpc-2-server = { path = "../json-rpc-2-server", default-features = false }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }

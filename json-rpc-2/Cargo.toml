@@ -1,0 +1,34 @@
+[package]
+name = "json-rpc-2"
+version = "0.1.0"
+edition = "2024"
+description = "Compatibility facade for split JSON-RPC 2.0 core/client/server crates"
+readme = "README.md"
+
+[features]
+default = ["tcp", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "websocket", "mqtt", "coap", "amqp"]
+tcp = ["json-rpc-2-tcp/tcp", "json-rpc-2-websockets/tcp"]
+udp = ["json-rpc-2-datagram/udp", "json-rpc-2-websockets/udp"]
+rtp = ["json-rpc-2-datagram/rtp", "json-rpc-2-websockets/rtp"]
+rudp = ["json-rpc-2-datagram/rudp", "json-rpc-2-websockets/rudp"]
+srt = ["json-rpc-2-datagram/srt", "json-rpc-2-websockets/srt"]
+udplite = ["json-rpc-2-datagram/udplite", "json-rpc-2-websockets/udplite"]
+dccp = ["json-rpc-2-datagram/dccp", "json-rpc-2-websockets/dccp"]
+sctp = ["json-rpc-2-datagram/sctp", "json-rpc-2-websockets/sctp"]
+quic = ["json-rpc-2-quic/quic", "json-rpc-2-websockets/quic"]
+http1 = ["json-rpc-2-tcp/http1", "json-rpc-2-websockets/http1"]
+http3 = ["json-rpc-2-quic/http3", "json-rpc-2-websockets/http3"]
+websocket = ["json-rpc-2-websockets/websocket"]
+mqtt = ["json-rpc-2-iot/mqtt", "json-rpc-2-websockets/mqtt"]
+coap = ["json-rpc-2-iot/coap", "json-rpc-2-websockets/coap"]
+amqp = ["json-rpc-2-iot/amqp", "json-rpc-2-websockets/amqp"]
+
+[dependencies]
+json-rpc-2-client = { path = "../json-rpc-2-client", default-features = false }
+json-rpc-2-core = { path = "../json-rpc-2-core" }
+json-rpc-2-datagram = { path = "../json-rpc-2-datagram", default-features = false }
+json-rpc-2-iot = { path = "../json-rpc-2-iot", default-features = false }
+json-rpc-2-quic = { path = "../json-rpc-2-quic", default-features = false }
+json-rpc-2-server = { path = "../json-rpc-2-server", default-features = false }
+json-rpc-2-tcp = { path = "../json-rpc-2-tcp", default-features = false }
+json-rpc-2-websockets = { path = "../json-rpc-2-websockets", default-features = false }

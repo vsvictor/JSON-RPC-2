@@ -1,0 +1,307 @@
+# Transport semantics
+
+This document describes transport behavior separately from JSON-RPC 2.0
+semantics.
+
+## Framing
+
+| Transport | Framing |
+|---|---|
+| TCP | one compact JSON document per newline-delimited line |
+| UDP | one JSON-RPC message per reliable transport datagram |
+| RTP/RTCP | one JSON-RPC message per RTP packet, with RTCP APP control packets multiplexed on the same UDP socket |
+| RUDP | one JSON-RPC message per reliable RUDP packet |
+| SRT | one JSON-RPC message per encrypted reliable SRT-style packet |
+| UDP-Lite | one JSON-RPC message per reliable UDP-Lite datagram |
+| DCCP | one JSON-RPC message per connected DCCP datagram session |
+| SCTP | one JSON-RPC message per connected SCTP packet session |
+| MQTT | one JSON-RPC message per MQTT `PUBLISH` packet on a persistent TCP connection, using dedicated request/response topics |
+| CoAP | one JSON-RPC message per CoAP request/response pair over UDP, using a custom method code |
+| AMQP | one JSON-RPC message per AMQP content frame on a persistent TCP connection, using a simplified single-channel framing |
+| QUIC | one JSON-RPC exchange per bidirectional QUIC stream |
+| HTTP/1.1 | `POST /` with JSON body |
+| HTTP/3 | `POST /` with JSON body on an independent request stream |
+| WebSocket/TCP | one JSON document per WebSocket data frame |
+| WebSocket/UDP | one WebSocket-style text or binary message per reliable transport datagram |
+| WebSocket/RTP | one WebSocket-style text or binary message per RTP packet, with RTCP APP control packets multiplexed on the same UDP socket |
+| WebSocket/RUDP | one WebSocket-style text or binary message per reliable RUDP packet |
+| WebSocket/SRT | one WebSocket-style text or binary message per encrypted reliable SRT-style packet |
+| WebSocket/UDP-Lite | one WebSocket-style text or binary message per reliable UDP-Lite datagram |
+| WebSocket/DCCP | one WebSocket-style text or binary message per connected DCCP datagram session |
+| WebSocket/SCTP | one WebSocket-style text or binary message per connected SCTP packet session |
+| WebSocket/MQTT | one WebSocket-style text or binary message per MQTT `PUBLISH` packet on a persistent TCP connection |
+| WebSocket/CoAP | one WebSocket-style text or binary message per CoAP request/response pair over UDP |
+| WebSocket/AMQP | one WebSocket-style text or binary message per AMQP content frame on a persistent TCP connection |
+| WebSocket/QUIC | one JSON document per WebSocket data frame over a dedicated QUIC stream bridge |
+| WebSocket/HTTP/1.1 | one JSON document per WebSocket data frame after Upgrade |
+| WebSocket/HTTP/3 | one JSON document per WebSocket data frame after extended CONNECT |
+
+## Keepalive behavior
+
+- TCP / reliable UDP / RUDP / SRT / UDP-Lite / DCCP / SCTP / raw QUIC use reserved non-JSON control payloads.
+- RTP/RTCP uses RTCP APP packets for ACK, ping, and pong control traffic.
+- MQTT uses its native `PINGREQ`/`PINGRESP` packets; AMQP uses its native heartbeat frame.
+- CoAP uses an empty confirmable message as a ping, acknowledged with an empty ACK.
+- HTTP/1.1 / HTTP/3 use `GET /.well-known/json-rpc-2/ping`.
+- WebSocket transports use native Ping/Pong control frames.
+
+Keepalive traffic never enters the JSON-RPC method dispatcher.
+
+## Reconnect behavior
+
+- Client liveness checks are configured through `ClientLivenessConfig`.
+- Missed pongs are counted independently from request timeouts.
+- When the missed-pong threshold is hit, the client first tries `restore()`
+  and then `reconnect()` according to `ReconnectPolicy`.
+- `ReconnectPolicy` can apply exponential backoff, additive jitter and a
+  maximum elapsed reconnect budget to avoid reconnect storms.
+- Request timeouts are enforced per JSON-RPC call through the actor/session
+  layer.
+
+## TCP tuning
+
+- TCP-based transports share `TcpTuningConfig`.
+- `TCP_NODELAY` is enabled by default for lower request/response latency.
+- `TcpCongestionControl::Bbr` is available as an opt-in Linux/Android socket
+  setting; if the kernel does not expose `bbr`, socket setup fails explicitly
+  instead of silently falling back.
+- `fast_open` enables listener-side TCP Fast Open for TCP-bound servers on
+  supported operating systems.
+- Client-side TCP Fast Open is available on Linux/Android for raw TCP and
+  HTTP/1.1 connect paths; adapters that delegate socket creation to external
+  libraries may only inherit the `no_delay` part of the tuning profile.
+
+## Reliable UDP semantics
+
+- UDP transport is **message-oriented**: one JSON-RPC message must fit into one
+  datagram bounded by `UdpReliabilityConfig::max_packet_size`.
+- The current contract intentionally does **not** fragment or reassemble large
+  payloads. Oversized messages fail explicitly instead of silently splitting
+  data across packets.
+- Client requests are retried according to `UdpReliabilityConfig` until the
+  transport receives an ACK, a response, or the retry budget is exhausted.
+- The server deduplicates request packet ids per peer and replays the cached
+  response for duplicates, so client retransmits do not execute handlers twice.
+- UDP ping/pong packets are transport-level control traffic, not JSON-RPC
+  messages.
+- Because the transport is datagram-based, completion order is not tied to send
+  order; correlation is by JSON-RPC `id` and transport packet id.
+
+## RTP/RTCP semantics
+
+- RTP/RTCP is **message-oriented**: one JSON-RPC request or response maps to
+  one RTP packet, still bounded by `UdpReliabilityConfig::max_packet_size`.
+- RTP headers add sequence numbers, timestamps, and SSRC values to each JSON-RPC
+  payload, but JSON-RPC correlation still uses the transport `message_id` plus
+  the JSON-RPC `id`.
+- RTCP APP packets provide transport-level ACK and ping/pong control messages.
+- The transport reuses the same retransmit, timeout, and deduplication policy
+  as reliable UDP; the difference is the wire format, not the upper-layer
+  reliability contract.
+- Because RTP/RTCP is datagram-based, concurrent replies may complete out of
+  send order.
+
+## RUDP semantics
+
+- RUDP is **message-oriented**: one JSON-RPC request or response maps to one
+  RUDP packet, still bounded by `UdpReliabilityConfig::max_packet_size`.
+- The wire format keeps explicit packet sequence numbers and per-exchange
+  packet ids separate from the reliable UDP packet contract used by the
+  `udp` transport.
+- Retransmit timing, retry budget, deduplication, and oversized-message
+  handling reuse `UdpReliabilityConfig`.
+- Because RUDP is datagram-based, concurrent replies may complete out of send
+  order.
+
+## SRT semantics
+
+- SRT is **message-oriented**: one JSON-RPC request or response maps to one
+  encrypted SRT-style packet, still bounded by `UdpReliabilityConfig::max_packet_size`.
+- The transport keeps application-level ARQ and dedup semantics comparable to
+  the other UDP-family transports, but encrypts packet payloads with a shared
+  `SrtConfig` passphrase before transmission.
+- `srt` and `ws-srt` therefore require both UDP reliability settings and an
+  explicit passphrase configuration.
+- Because SRT is datagram-based, concurrent replies may complete out of send
+  order.
+
+## UDP-Lite semantics
+
+- UDP-Lite is **message-oriented**: one JSON-RPC request or response maps to
+  one UDP-Lite datagram, still bounded by `UdpReliabilityConfig::max_packet_size`.
+- The transport keeps the same application-level ACK/retry/dedup policy as the
+  reliable UDP transport, but the socket checksum coverage is configured
+  through `UdpLiteConfig`.
+- Coverage `0` means full packet coverage; values `>= 8` request partial
+  coverage while still protecting the UDP-Lite header.
+- `udplite` and `ws-udplite` are Linux/Android-only in this workspace because
+  they depend on kernel UDP-Lite socket support.
+
+## WebSocket over UDP semantics
+
+- WebSocket/UDP reuses the same reliable UDP carrier policy, but its payload is
+  a WebSocket-style text/binary/close frame envelope rather than raw JSON-RPC
+  bytes.
+- Client JSON-RPC requests are sent as text frames, so the server responds with
+  text frames too unless another client deliberately uses binary frames.
+- Transport-level liveness still uses the reliable UDP ping/pong packets, not
+  application WebSocket frames.
+- This is a dedicated transport in this workspace, not RFC 6455 over HTTP.
+
+## WebSocket over RTP semantics
+
+- WebSocket/RTP uses the same dedicated text/binary/close frame envelope as
+  WebSocket/UDP, but carries it inside RTP data packets instead of the custom
+  reliable-UDP packet format.
+- RTCP APP packets carry ACK/ping/pong transport control on the same UDP
+  socket.
+- As with WebSocket/UDP, completion may happen out of send order and is
+  correlated by JSON-RPC `id` plus the transport message id.
+- This is a dedicated transport in this workspace, not RFC 6455 over RTP.
+
+## WebSocket over RUDP semantics
+
+- WebSocket/RUDP reuses the same dedicated text/binary/close frame envelope as
+  WebSocket/UDP, but carries it inside RUDP packets instead of the baseline
+  reliable-UDP wire format.
+- Transport-level liveness still uses carrier ACK/ping/pong packets rather
+  than application WebSocket frames.
+- Completion may happen out of send order and is correlated by JSON-RPC `id`
+  plus the transport packet id.
+
+## WebSocket over SRT semantics
+
+- WebSocket/SRT keeps the same dedicated text/binary/close frame envelope as
+  WebSocket/UDP and WebSocket/RUDP, but uses the encrypted SRT-style packet
+  carrier underneath.
+- Transport-level liveness still uses carrier ACK/ping/pong packets rather
+  than application WebSocket frames.
+- Completion may happen out of send order and is correlated by JSON-RPC `id`
+  plus the transport packet id.
+
+## WebSocket over UDP-Lite semantics
+
+- WebSocket/UDP-Lite keeps the same dedicated text/binary/close frame envelope
+  as WebSocket/UDP, but carries it inside UDP-Lite datagrams.
+- Transport-level liveness still uses carrier ACK/ping/pong packets rather
+  than application WebSocket frames.
+- Completion may happen out of send order and is correlated by JSON-RPC `id`
+  plus the transport packet id.
+
+## DCCP semantics
+
+- DCCP preserves datagram boundaries and adds transport-level congestion
+  control without guaranteeing delivery.
+- In this workspace, one JSON-RPC request or response maps to one DCCP
+  datagram on a connected session.
+- The current client/server adapters keep one in-flight exchange per session,
+  so request/response ordering is serialized even though the carrier itself is
+  datagram-oriented.
+- Transport-level ping/pong uses the same reserved non-JSON control payloads
+  as raw TCP/QUIC.
+- DCCP transports are available only on Linux/Android builds where the kernel
+  exposes DCCP sockets.
+
+## WebSocket over DCCP semantics
+
+- WebSocket/DCCP uses the same dedicated text/binary/close frame envelope as
+  WebSocket/UDP, but rides over a connected DCCP session instead of the
+  reliable UDP carrier.
+- It is a workspace-specific transport adapter, not RFC 6455 over HTTP.
+- Ordering remains serialized per DCCP session in the current implementation.
+
+## SCTP semantics
+
+- SCTP preserves message boundaries and supports multi-streaming plus
+  multi-homing at the carrier level.
+- In this workspace, one JSON-RPC request or response maps to one SCTP packet
+  on a connected `SOCK_SEQPACKET` association.
+- The current adapter does not yet expose explicit stream-id or multi-home
+  selection policy through the public API, but it keeps the carrier semantics
+  isolated below the transport-agnostic JSON-RPC core.
+- Transport-level ping/pong uses the same reserved non-JSON control payloads
+  as raw TCP/QUIC.
+- SCTP transports are available only on Linux/Android builds where the kernel
+  exposes SCTP sockets.
+
+## WebSocket over SCTP semantics
+
+- WebSocket/SCTP uses the same dedicated text/binary/close frame envelope as
+  WebSocket/UDP and WebSocket/DCCP, but rides over a connected SCTP
+  association.
+- It is a workspace-specific transport adapter, not RFC 6455 over HTTP.
+
+## MQTT semantics
+
+- MQTT carries JSON-RPC payloads inside MQTT `PUBLISH` packets on a single
+  persistent TCP connection, reusing the real MQTT fixed-header and
+  remaining-length encoding with dedicated request/response topics.
+- Because the carrier is a single serialized TCP connection, request/response
+  ordering is serialized the same way as plain TCP.
+- Transport-level liveness uses native MQTT `PINGREQ`/`PINGRESP` packets.
+
+## CoAP semantics
+
+- CoAP carries JSON-RPC payloads inside CoAP request/response messages over
+  UDP, reusing the real CoAP header layout (version, type, token, message id)
+  with a custom method/response code for JSON-RPC payloads.
+- CoAP is **message-oriented**, like the other UDP-family transports, so
+  concurrent replies may complete out of send order.
+- Transport-level liveness uses an empty confirmable CoAP message as a ping,
+  acknowledged the same way as any other CoAP request.
+
+## AMQP semantics
+
+- AMQP carries JSON-RPC payloads inside AMQP content frames on a single
+  persistent TCP connection, using a simplified single-channel framing with
+  the real AMQP frame-end byte (`0xCE`).
+- Because the carrier is a single serialized TCP connection, request/response
+  ordering is serialized the same way as plain TCP.
+- Transport-level liveness uses a native AMQP heartbeat frame.
+
+## WebSocket over MQTT / CoAP / AMQP semantics
+
+- WebSocket/MQTT and WebSocket/AMQP keep the same dedicated text/binary/close
+  frame envelope as WebSocket/TCP, but carry it inside MQTT `PUBLISH` packets
+  or AMQP content frames respectively.
+- WebSocket/CoAP keeps the same dedicated frame envelope as WebSocket/UDP, but
+  carries it inside CoAP request/response messages.
+- These are workspace-specific transport adapters, not RFC 6455 over
+  MQTT/CoAP/AMQP.
+
+## Cancellation behavior
+
+- Dropping a client-side request future always removes it from the actor's
+  pending table.
+- QUIC and HTTP/3 additionally propagate cancellation down to the dedicated
+  carrier stream (`RESET_STREAM` / request-stream cancellation), so abandoned
+  multiplexed calls do not linger until their natural timeout.
+- Serialized carriers cannot cancel a single in-flight exchange independently;
+  they still perform session-level cleanup immediately.
+
+## Shutdown behavior
+
+- HTTP/3 transports send GOAWAY-style shutdown via `h3.shutdown(0)` and allow
+  in-flight streams to drain.
+- WebSocket transports send a Close frame with a bounded wait for peer
+  acknowledgement.
+- QUIC transports close connections with application code `0`.
+
+`ServerShutdownPolicy` controls the close-handshake timeout used by transport
+adapters.
+
+## Multiplexing and ordering
+
+- Serialized carriers: TCP, DCCP, HTTP/1.1 keep-alive session,
+  WebSocket/TCP, WebSocket/DCCP, WebSocket/HTTP/1.1, MQTT, AMQP,
+  WebSocket/MQTT, WebSocket/AMQP.
+- Multiplexed carriers: UDP, RTP/RTCP, RUDP, SRT, UDP-Lite, SCTP, CoAP, WebSocket/UDP,
+  WebSocket/RTP, WebSocket/RUDP, WebSocket/SRT, WebSocket/UDP-Lite, WebSocket/SCTP,
+  WebSocket/CoAP, QUIC, HTTP/3, WebSocket/QUIC, WebSocket/HTTP/3.
+
+For multiplexed carriers, concurrent calls may complete out of order. The
+client correlates replies strictly by JSON-RPC `id`.
+
+Server-side batch dispatch also completes out of order: independent batch items
+are executed concurrently and the batch response array is correlated by `id`
+rather than by original array position.
