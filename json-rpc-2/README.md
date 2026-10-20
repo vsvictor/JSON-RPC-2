@@ -36,6 +36,19 @@ binding, and datagram/broker WebSocket adapters use a private message envelope,
 not RFC 6455 over UDP or MQTT-over-WebSocket. See the conformance matrix before
 connecting an external peer.
 
+## Build the workspace
+
+From the repository root, run `tools/build-all.sh` (or
+`tools/build-all.sh --release`). This builds every workspace crate and target
+with all features supported by the target platform, including the FFI libraries
+and UniFFI binding generator. Tests and benches are compiled but not executed;
+the separate cargo-fuzz project is not a workspace member and is excluded.
+Additional Cargo build options are forwarded unchanged.
+
+The script builds and caches pinned Haivision libsrt with OpenSSL encryption
+using `tools/build-srt.sh`; native prerequisites are listed in
+[SRT build documentation](../json-rpc-2-datagram/SRT.md).
+
 ## Client certificate trust
 
 For QUIC, HTTP/3, and their WebSocket variants, configure the server certificate
