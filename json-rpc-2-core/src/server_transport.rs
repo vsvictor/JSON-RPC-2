@@ -76,9 +76,9 @@ pub type TransportFuture = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
 
 #[derive(Default)]
 pub struct RuntimeMetrics {
-    pub(crate) active_sessions: AtomicUsize,
-    pub(crate) active_streams: AtomicUsize,
-    pub(crate) reconnect_attempts: AtomicU64,
+    pub active_sessions: AtomicUsize,
+    pub active_streams: AtomicUsize,
+    pub reconnect_attempts: AtomicU64,
 }
 
 /// Observable transport/runtime health metrics.
