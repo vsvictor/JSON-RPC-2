@@ -1949,40 +1949,61 @@ impl RpcClient {
                     .await
                     .map_err(transport_error)?,
                 ),
-                #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
-                FfiTransportKind::UdpLite => AnyTransport::UdpLite(
-                    UdpLiteClientTransport::connect_with_configs(
-                        to,
-                        json_rpc_2::UdpReliabilityConfig::default(),
-                        udplite,
-                    )
-                    .await
-                    .map_err(transport_error)?,
-                ),
-                #[cfg(all(feature = "dccp", any(target_os = "linux", target_os = "android")))]
-                FfiTransportKind::Dccp => AnyTransport::Dccp(
-                    DccpClientTransport::connect(to)
-                        .await
-                        .map_err(transport_error)?,
-                ),
-                #[cfg(all(feature = "sctp", any(target_os = "linux", target_os = "android")))]
-                FfiTransportKind::Sctp => AnyTransport::Sctp(
-                    SctpClientTransport::connect(to)
-                        .await
-                        .map_err(transport_error)?,
-                ),
-                #[cfg(all(feature = "udplite", not(any(target_os = "linux", target_os = "android"))))]
-                FfiTransportKind::UdpLite => return Err(FfiError::InvalidConfiguration {
-                    details: "UDP-Lite is only supported on Linux and Android".into(),
-                }),
-                #[cfg(all(feature = "dccp", not(any(target_os = "linux", target_os = "android"))))]
-                FfiTransportKind::Dccp => return Err(FfiError::InvalidConfiguration {
-                    details: "DCCP is only supported on Linux and Android".into(),
-                }),
-                #[cfg(all(feature = "sctp", not(any(target_os = "linux", target_os = "android"))))]
-                FfiTransportKind::Sctp => return Err(FfiError::InvalidConfiguration {
-                    details: "SCTP is only supported on Linux and Android".into(),
-                }),
+                #[cfg(feature = "udplite")]
+                FfiTransportKind::UdpLite => {
+                    #[cfg(any(target_os = "linux", target_os = "android"))]
+                    {
+                        AnyTransport::UdpLite(
+                            UdpLiteClientTransport::connect_with_configs(
+                                to,
+                                json_rpc_2::UdpReliabilityConfig::default(),
+                                udplite,
+                            )
+                            .await
+                            .map_err(transport_error)?,
+                        )
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                    {
+                        return Err(FfiError::InvalidConfiguration {
+                            details: "UDP-Lite is only supported on Linux and Android".into(),
+                        });
+                    }
+                }
+                #[cfg(feature = "dccp")]
+                FfiTransportKind::Dccp => {
+                    #[cfg(any(target_os = "linux", target_os = "android"))]
+                    {
+                        AnyTransport::Dccp(
+                            DccpClientTransport::connect(to)
+                                .await
+                                .map_err(transport_error)?,
+                        )
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                    {
+                        return Err(FfiError::InvalidConfiguration {
+                            details: "DCCP is only supported on Linux and Android".into(),
+                        });
+                    }
+                }
+                #[cfg(feature = "sctp")]
+                FfiTransportKind::Sctp => {
+                    #[cfg(any(target_os = "linux", target_os = "android"))]
+                    {
+                        AnyTransport::Sctp(
+                            SctpClientTransport::connect(to)
+                                .await
+                                .map_err(transport_error)?,
+                        )
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                    {
+                        return Err(FfiError::InvalidConfiguration {
+                            details: "SCTP is only supported on Linux and Android".into(),
+                        });
+                    }
+                }
                 #[cfg(feature = "http1")]
                 FfiTransportKind::Http1 => AnyTransport::Http1(
                     Http1ClientTransport::connect(to)
@@ -2040,52 +2061,61 @@ impl RpcClient {
                     .await
                     .map_err(transport_error)?,
                 ),
-                #[cfg(all(
-                    feature = "websocket",
-                    feature = "udplite",
-                    any(target_os = "linux", target_os = "android")
-                ))]
-                FfiTransportKind::WsUdpLite => AnyTransport::WsUdpLite(
-                    UdpLiteWebSocketClientTransport::connect_with_configs(
-                        to,
-                        json_rpc_2::UdpReliabilityConfig::default(),
-                        udplite,
-                    )
-                    .await
-                    .map_err(transport_error)?,
-                ),
-                #[cfg(all(
-                    feature = "websocket",
-                    feature = "dccp",
-                    any(target_os = "linux", target_os = "android")
-                ))]
-                FfiTransportKind::WsDccp => AnyTransport::WsDccp(
-                    DccpWebSocketClientTransport::connect(to)
-                        .await
-                        .map_err(transport_error)?,
-                ),
-                #[cfg(all(
-                    feature = "websocket",
-                    feature = "sctp",
-                    any(target_os = "linux", target_os = "android")
-                ))]
-                FfiTransportKind::WsSctp => AnyTransport::WsSctp(
-                    SctpWebSocketClientTransport::connect(to)
-                        .await
-                        .map_err(transport_error)?,
-                ),
-                #[cfg(all(feature = "websocket", feature = "udplite", not(any(target_os = "linux", target_os = "android"))))]
-                FfiTransportKind::WsUdpLite => return Err(FfiError::InvalidConfiguration {
-                    details: "WebSocket over UDP-Lite is only supported on Linux and Android".into(),
-                }),
-                #[cfg(all(feature = "websocket", feature = "dccp", not(any(target_os = "linux", target_os = "android"))))]
-                FfiTransportKind::WsDccp => return Err(FfiError::InvalidConfiguration {
-                    details: "WebSocket over DCCP is only supported on Linux and Android".into(),
-                }),
-                #[cfg(all(feature = "websocket", feature = "sctp", not(any(target_os = "linux", target_os = "android"))))]
-                FfiTransportKind::WsSctp => return Err(FfiError::InvalidConfiguration {
-                    details: "WebSocket over SCTP is only supported on Linux and Android".into(),
-                }),
+                #[cfg(all(feature = "websocket", feature = "udplite"))]
+                FfiTransportKind::WsUdpLite => {
+                    #[cfg(any(target_os = "linux", target_os = "android"))]
+                    {
+                        AnyTransport::WsUdpLite(
+                            UdpLiteWebSocketClientTransport::connect_with_configs(
+                                to,
+                                json_rpc_2::UdpReliabilityConfig::default(),
+                                udplite,
+                            )
+                            .await
+                            .map_err(transport_error)?,
+                        )
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                    {
+                        return Err(FfiError::InvalidConfiguration {
+                            details: "WebSocket over UDP-Lite is only supported on Linux and Android".into(),
+                        });
+                    }
+                }
+                #[cfg(all(feature = "websocket", feature = "dccp"))]
+                FfiTransportKind::WsDccp => {
+                    #[cfg(any(target_os = "linux", target_os = "android"))]
+                    {
+                        AnyTransport::WsDccp(
+                            DccpWebSocketClientTransport::connect(to)
+                                .await
+                                .map_err(transport_error)?,
+                        )
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                    {
+                        return Err(FfiError::InvalidConfiguration {
+                            details: "WebSocket over DCCP is only supported on Linux and Android".into(),
+                        });
+                    }
+                }
+                #[cfg(all(feature = "websocket", feature = "sctp"))]
+                FfiTransportKind::WsSctp => {
+                    #[cfg(any(target_os = "linux", target_os = "android"))]
+                    {
+                        AnyTransport::WsSctp(
+                            SctpWebSocketClientTransport::connect(to)
+                                .await
+                                .map_err(transport_error)?,
+                        )
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                    {
+                        return Err(FfiError::InvalidConfiguration {
+                            details: "WebSocket over SCTP is only supported on Linux and Android".into(),
+                        });
+                    }
+                }
                 #[cfg(all(feature = "websocket", feature = "http1"))]
                 FfiTransportKind::WsHttp1 => {
                     let url = format!("ws://{to}/ws");
