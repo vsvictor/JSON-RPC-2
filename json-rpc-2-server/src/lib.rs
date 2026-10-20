@@ -25,43 +25,12 @@ pub use multi::{
     HasBind, HasTransport, HealthHandle, HealthSnapshot, MissingBind, MultiTransportServer,
     MultiTransportServerBuilder, NoTransport, RunningServer, TransportKind,
 };
-#[cfg(any(
-    feature = "tcp",
-    feature = "http1",
-    all(feature = "websocket", feature = "tcp"),
-    all(feature = "websocket", feature = "http1")
-))]
-pub use transports::apply_tcp_listener_tuning;
-#[cfg(any(
-    feature = "tcp",
-    feature = "http1",
-    all(feature = "websocket", feature = "tcp"),
-    all(feature = "websocket", feature = "http1")
-))]
-pub use transports::apply_tcp_stream_tuning;
-pub use transports::multiplex::{StreamMultiplexor, StreamMultiplexorHandle};
 #[cfg(any(feature = "dccp", feature = "sctp"))]
 pub use transports::websocket::protocol_adapter;
 pub use transports::websocket::{
     JsonRpcWebSocket, WebSocketFuture, WebSocketMessage, WebSocketProtocol, WebSocketTransport,
     WebSocketTransportFuture,
 };
-pub use transports::{
-    CONTROL_PATH, CONTROL_PING, CONTROL_PONG, CancellationToken, H3_NO_ERROR, QUIC_NO_ERROR,
-    RunningTransport, RuntimeMetrics, RuntimeMetricsSnapshot, Transport, TransportFuture,
-    TransportRuntime, log_control, log_json_rpc, log_transport_error,
-};
-
-/// Future returned by the abstract JSON-RPC protocol contract.
-pub type ProtocolFuture<'a> = Pin<Box<dyn Future<Output = Option<Bytes>> + Send + 'a>>;
-
-/// Transport-independent JSON-RPC message processing contract.
-///
-/// Implementations receive one complete JSON-RPC message and return its
-/// response bytes, or `None` when the request is a notification.
-pub trait JsonRpcProtocol: Send + Sync + 'static {
-    fn handle_message<'a>(&'a self, input: &'a [u8]) -> ProtocolFuture<'a>;
-}
 
 /// Errors encountered while registering a server method.
 #[derive(Clone, Debug, PartialEq, Eq)]

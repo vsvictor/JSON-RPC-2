@@ -1,10 +1,12 @@
 //! Shared JSON-RPC 2.0 wire types and protocol constants.
 
 mod amqp;
+pub mod client_transport;
 mod coap;
 mod mqtt;
 mod rtp;
 mod rudp;
+pub mod server_transport;
 mod srt;
 mod udp_lite;
 mod udp_reliable;
@@ -14,6 +16,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use amqp::{AmqpFrame, AmqpMessageKind, decode_amqp_frame, encode_amqp_frame};
+pub use client_transport::{
+    ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
+    RpcClientTransport, TransportError, closed, connect_tcp_stream, expects_response,
+    transport_error,
+};
 pub use coap::{CoapMessage, CoapMessageType, decode_coap_message, encode_coap_message};
 pub use mqtt::{MqttPacket, MqttPacketKind, decode_mqtt_packet, encode_mqtt_packet};
 pub use rtp::{
@@ -21,6 +28,12 @@ pub use rtp::{
     decode_rtp_packet, encode_rtcp_control_packet, encode_rtp_packet,
 };
 pub use rudp::{RudpPacket, RudpPacketKind, decode_rudp_packet, encode_rudp_packet};
+pub use server_transport::{
+    CancellationToken, H3_NO_ERROR, JsonRpcProtocol, ProtocolFuture, QUIC_NO_ERROR,
+    RunningTransport, RuntimeMetrics, RuntimeMetricsSnapshot, ServerShutdownPolicy, Transport,
+    TransportFuture, TransportLimits, TransportRuntime, apply_tcp_listener_tuning,
+    apply_tcp_stream_tuning, log_control, log_json_rpc, log_transport_error, multiplex,
+};
 pub use srt::{SrtConfig, SrtCrypto, SrtPacket, SrtPacketKind};
 pub use udp_lite::UdpLiteConfig;
 pub use udp_reliable::{
