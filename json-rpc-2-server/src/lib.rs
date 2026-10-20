@@ -19,15 +19,15 @@ use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
 pub mod multi;
-pub mod transports;
 
 pub use multi::{
     HasBind, HasTransport, HealthHandle, HealthSnapshot, MissingBind, MultiTransportServer,
     MultiTransportServerBuilder, NoTransport, RunningServer, TransportKind,
 };
-#[cfg(any(feature = "dccp", feature = "sctp"))]
-pub use transports::websocket::protocol_adapter;
-pub use transports::websocket::{
+#[cfg(all(feature = "websocket", any(feature = "dccp", feature = "sctp")))]
+pub use json_rpc_2_websockets::server::transports::protocol_adapter;
+#[cfg(feature = "websocket")]
+pub use json_rpc_2_websockets::server::transports::{
     JsonRpcWebSocket, WebSocketFuture, WebSocketMessage, WebSocketProtocol, WebSocketTransport,
     WebSocketTransportFuture,
 };

@@ -6,41 +6,35 @@ use std::{
 };
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-use json_rpc_2_client::transports::dccp::DccpClientTransport;
+use json_rpc_2_datagram::client::transports::dccp::DccpClientTransport;
 #[cfg(feature = "rtp")]
-use json_rpc_2_client::transports::rtp::RtpClientTransport;
+use json_rpc_2_datagram::client::transports::rtp::RtpClientTransport;
 #[cfg(feature = "rudp")]
-use json_rpc_2_client::transports::rudp::RudpClientTransport;
+use json_rpc_2_datagram::client::transports::rudp::RudpClientTransport;
 #[cfg(feature = "mqtt")]
-use json_rpc_2_client::transports::mqtt::MqttClientTransport;
+use json_rpc_2_iot::client::transports::mqtt::MqttClientTransport;
 #[cfg(feature = "coap")]
-use json_rpc_2_client::transports::coap::CoapClientTransport;
+use json_rpc_2_iot::client::transports::coap::CoapClientTransport;
 #[cfg(feature = "amqp")]
-use json_rpc_2_client::transports::amqp::AmqpClientTransport;
+use json_rpc_2_iot::client::transports::amqp::AmqpClientTransport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
-use json_rpc_2_client::transports::sctp::SctpClientTransport;
+use json_rpc_2_datagram::client::transports::sctp::SctpClientTransport;
 #[cfg(feature = "srt")]
-use json_rpc_2_client::transports::srt::SrtClientTransport;
+use json_rpc_2_datagram::client::transports::srt::SrtClientTransport;
 #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
-use json_rpc_2_client::transports::udplite::UdpLiteClientTransport;
+use json_rpc_2_datagram::client::transports::udplite::UdpLiteClientTransport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
-use json_rpc_2_client::transports::websocket::dccp::DccpWebSocketClientTransport;
+use json_rpc_2_websockets::client::transports::dccp::DccpWebSocketClientTransport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
-use json_rpc_2_client::transports::websocket::sctp::SctpWebSocketClientTransport;
-use json_rpc_2_client::{
-    RpcClient, RpcClientTransport, TransportError,
-    transports::{
-        http1::Http1ClientTransport,
-        http3::Http3ClientTransport,
-        quic::QuicClientTransport,
-        tcp::TcpClientTransport,
-        udp::UdpClientTransport,
-        websocket::{
-            http1::Http1WebSocketClientTransport, http3::Http3WebSocketClientTransport,
-            quic::QuicWebSocketClientTransport, tcp::TcpWebSocketClientTransport,
-            udp::UdpWebSocketClientTransport,
-        },
-    },
+use json_rpc_2_websockets::client::transports::sctp::SctpWebSocketClientTransport;
+use json_rpc_2_client::{RpcClient, RpcClientTransport, TransportError};
+use json_rpc_2_datagram::client::transports::udp::UdpClientTransport;
+use json_rpc_2_quic::client::transports::{http3::Http3ClientTransport, quic::QuicClientTransport};
+use json_rpc_2_tcp::client::transports::{http1::Http1ClientTransport, tcp::TcpClientTransport};
+use json_rpc_2_websockets::client::transports::{
+    http1::Http1WebSocketClientTransport, http3::Http3WebSocketClientTransport,
+    quic::QuicWebSocketClientTransport, tcp::TcpWebSocketClientTransport,
+    udp::UdpWebSocketClientTransport,
 };
 use json_rpc_2_server::{
     H3_ALPN, JsonRpcProtocol, MultiTransportServer, QUIC_ALPN, RpcServer, SrtConfig, TransportKind,

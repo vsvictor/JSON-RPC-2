@@ -59,12 +59,11 @@ pub mod transports {
     pub use json_rpc_2_server::apply_tcp_stream_tuning;
     pub use json_rpc_2_server::{
         CONTROL_PATH, CONTROL_PING, CONTROL_PONG, CancellationToken, H3_NO_ERROR, QUIC_NO_ERROR,
-        RunningTransport, RuntimeMetrics, RuntimeMetricsSnapshot, StreamMultiplexor,
-        StreamMultiplexorHandle, Transport, TransportFuture, TransportRuntime, log_control,
-        log_json_rpc, log_transport_error,
+        RunningTransport, RuntimeMetrics, RuntimeMetricsSnapshot, Transport, TransportFuture,
+        TransportRuntime, log_control, log_json_rpc, log_transport_error,
     };
     pub mod multiplex {
-        pub use json_rpc_2_server::{StreamMultiplexor, StreamMultiplexorHandle};
+        pub use json_rpc_2_server::multiplex::{StreamMultiplexor, StreamMultiplexorHandle};
     }
 
     #[cfg(feature = "dccp")]

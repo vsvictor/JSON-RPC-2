@@ -22,8 +22,6 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
-pub mod transports;
-
 const DEFAULT_MAX_MISSED_PONGS: u32 = 3;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 64;
