@@ -61,7 +61,6 @@ struct WebSocketJsonRpcAdapter {
     protocol: Arc<dyn WebSocketProtocol>,
 }
 
-#[cfg(any(feature = "dccp", feature = "sctp"))]
 #[cfg(any(feature = "mqtt", feature = "amqp"))]
 async fn handle_broker_message(
     protocol: &dyn WebSocketProtocol,
@@ -88,6 +87,7 @@ async fn handle_broker_message(
     response
 }
 
+#[cfg(any(feature = "dccp", feature = "sctp"))]
 impl JsonRpcProtocol for WebSocketJsonRpcAdapter {
     fn handle_message<'a>(&'a self, message: &'a [u8]) -> json_rpc_2_transport::ProtocolFuture<'a> {
         Box::pin(async move {

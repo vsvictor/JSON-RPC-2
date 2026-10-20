@@ -30,6 +30,22 @@ from the local installation together with its OpenSSL runtime dependencies.
 For cross compilation, use a target-specific system installation as below;
 the wrapper builds for the host.
 
+### Cargo and IDE integration
+
+Run `bash tools/build-srt.sh` once to prepare the pinned native library.
+The workspace's `.cargo/config.toml` then supplies its pkg-config and shared
+library paths to Cargo automatically, including Cargo commands launched by
+RustRover. No special IDE launcher or IDE environment settings are required.
+The paths are relative to the workspace root, not a particular user's directory.
+After preparing the library, reload the Cargo project in the IDE.
+
+Existing environment variables take precedence over these defaults. If you
+already set `PKG_CONFIG_PATH`, `LD_LIBRARY_PATH`, or `DYLD_LIBRARY_PATH`, include
+the corresponding local installation directory in your existing search paths,
+or use the wrapper, which prepends the required paths. Programs launched
+directly rather than through Cargo still need the matching runtime library
+search path.
+
 ### Alternative: system installation
 
 Install libsrt **1.5 or later with encryption enabled**, pkg-config and

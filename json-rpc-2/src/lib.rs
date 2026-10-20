@@ -18,6 +18,8 @@ pub use json_rpc_2_transport::*;
 
 pub mod client {
     pub use json_rpc_2_client::*;
+    #[cfg(any(feature = "quic", feature = "http3"))]
+    pub use json_rpc_2_quic::client::ClientTlsConfig;
 
     pub mod transports {
         #[cfg(feature = "dccp")]

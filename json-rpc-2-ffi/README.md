@@ -89,6 +89,14 @@ both:
   certificate to trust — the reference server uses a self-signed dev
   certificate, see `../certs/cert.pem`); `server_name` defaults to `host`.
 - `dccp`/`ws-dccp` and `sctp`/`ws-sctp` are available only on Linux/Android builds.
+
+For a separate certificate-setting step, create
+`RpcClientBuilder::new(kind, options)`, call
+`builder.set_ca_certificate_pem(pem_contents)`, then `builder.connect()`.
+The setter validates the PEM bundle immediately and preserves the previous
+certificate on error. It accepts certificate contents, not a file path or a
+private key. Set trust before connecting; existing clients are not modified.
+Existing `ConnectOptions.ca_pem` and transport-specific constructors remain supported.
 - `mqtt`/`ws-mqtt` and `amqp`/`ws-amqp` carry JSON-RPC over a persistent TCP
   connection; `coap`/`ws-coap` carries it over UDP.
 

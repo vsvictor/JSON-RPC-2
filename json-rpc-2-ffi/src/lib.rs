@@ -106,10 +106,6 @@ use json_rpc_2::{
         RpcClientError, RpcClientTransport,
     },
 };
-#[cfg(any(feature = "quic", feature = "http3"))]
-use quinn::crypto::rustls::QuicClientConfig;
-#[cfg(any(feature = "quic", feature = "http3"))]
-use rustls::pki_types::{CertificateDer, pem::PemObject};
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
@@ -1773,33 +1769,64 @@ impl QuicConnectOptions {
     }
 }
 
-/// Build a `quinn::Endpoint` trusting `ca_pem`, for `alpn` (QUIC vs HTTP/3).
-/// Mirrors the original CLI example's `Tls::client`.
+/// Build an endpoint with the shared Rust client trust configuration.
 #[cfg(any(feature = "quic", feature = "http3"))]
 fn quic_endpoint(
     local: IpAddr,
     alpn: &'static [u8],
     ca_pem: &str,
 ) -> Result<quinn::Endpoint, FfiError> {
-    let mut roots = rustls::RootCertStore::empty();
-    for certificate in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
-        let certificate = certificate.map_err(transport_error)?;
-        roots.add(certificate).map_err(transport_error)?;
+    let mut tls = json_rpc_2::client::ClientTlsConfig::default();
+    tls.set_ca_certificate_pem(ca_pem).map_err(transport_error)?;
+    tls.endpoint(SocketAddr::new(local, 0), alpn)
+        .map_err(transport_error)
+}
+
+/// Configure connection options, including server trust, before connecting.
+#[cfg(any(feature = "quic", feature = "http3"))]
+#[derive(uniffi::Object)]
+pub struct RpcClientBuilder {
+    kind: FfiTransportKind,
+    options: std::sync::Mutex<ConnectOptions>,
+}
+
+#[cfg(any(feature = "quic", feature = "http3"))]
+#[uniffi::export]
+impl RpcClientBuilder {
+    #[uniffi::constructor]
+    pub fn new(kind: FfiTransportKind, options: ConnectOptions) -> Arc<Self> {
+        Arc::new(Self {
+            kind,
+            options: std::sync::Mutex::new(options),
+        })
     }
-    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .map_err(transport_error)?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    tls.alpn_protocols = vec![alpn.to_vec()];
-    let mut endpoint =
-        quinn::Endpoint::client(SocketAddr::new(local, 0)).map_err(transport_error)?;
-    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(tls).map_err(transport_error)?,
-    )));
-    Ok(endpoint)
+
+    /// Replace the PEM CA bundle before connecting. Existing connections are unchanged.
+    pub fn set_ca_certificate_pem(&self, pem: String) -> Result<(), FfiError> {
+        let mut tls = json_rpc_2::client::ClientTlsConfig::default();
+        tls.set_ca_certificate_pem(&pem)
+            .map_err(|error| FfiError::InvalidConfiguration {
+                details: error.to_string(),
+            })?;
+        self.options
+            .lock()
+            .map_err(|error| FfiError::InvalidConfiguration {
+                details: error.to_string(),
+            })?
+            .ca_pem = Some(pem);
+        Ok(())
+    }
+
+    pub fn connect(&self) -> Result<Arc<RpcClient>, FfiError> {
+        let options = self
+            .options
+            .lock()
+            .map_err(|error| FfiError::InvalidConfiguration {
+                details: error.to_string(),
+            })?
+            .clone();
+        RpcClient::connect(self.kind, options)
+    }
 }
 
 /// JSON-RPC 2.0 client connected over any of the transports `json-rpc-2`
@@ -2467,6 +2494,40 @@ mod tests {
             broker_operation_timeout_ms: None,
             broker_response_timeout_ms: None,
         }
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn certificate_setter_validates_and_replaces_trust_before_connecting() {
+        let first = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .unwrap()
+            .cert
+            .pem();
+        let second = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .unwrap()
+            .cert
+            .pem();
+        let builder = RpcClientBuilder::new(FfiTransportKind::Quic, options());
+        builder.set_ca_certificate_pem(first.clone()).unwrap();
+        assert_eq!(builder.options.lock().unwrap().ca_pem.as_ref(), Some(&first));
+        for invalid in ["", "not PEM"] {
+            assert!(matches!(
+                builder.set_ca_certificate_pem(invalid.into()),
+                Err(FfiError::InvalidConfiguration { .. })
+            ));
+            assert_eq!(builder.options.lock().unwrap().ca_pem.as_ref(), Some(&first));
+        }
+        builder.set_ca_certificate_pem(second.clone()).unwrap();
+        assert_eq!(builder.options.lock().unwrap().ca_pem.as_ref(), Some(&second));
+        runtime().block_on(async {
+            let endpoint = quic_endpoint(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                QUIC_ALPN,
+                builder.options.lock().unwrap().ca_pem.as_deref().unwrap(),
+            )
+            .unwrap();
+            endpoint.close(0u32.into(), b"done");
+        });
     }
 
     #[cfg(feature = "tcp")]

@@ -19,8 +19,12 @@ http = "1"
 json-rpc-2-core = { path = "../json-rpc-2-core" }
 json-rpc-2-transport = { path = "../json-rpc-2-transport" }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 socket2 = "0.6"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "stream"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
 futures-util = { version = "0.3", features = ["sink"] }
+
+[dev-dependencies]
+rcgen = "0.13"

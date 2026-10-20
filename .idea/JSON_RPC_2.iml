@@ -30,6 +30,8 @@
       <sourceFolder url="file://$MODULE_DIR$/json-rpc-2-transport/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/json-rpc-2/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/json-rpc-2-ext/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/json-rpc-2-quic/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/json-rpc-2-transport/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

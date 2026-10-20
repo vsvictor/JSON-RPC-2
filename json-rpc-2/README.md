@@ -36,6 +36,29 @@ binding, and datagram/broker WebSocket adapters use a private message envelope,
 not RFC 6455 over UDP or MQTT-over-WebSocket. See the conformance matrix before
 connecting an external peer.
 
+## Client certificate trust
+
+For QUIC, HTTP/3, and their WebSocket variants, configure the server certificate
+before connecting. `json_rpc_2::client::ClientTlsConfig` provides
+`set_ca_certificate_pem(&str)` and `set_ca_certificate_file(path)`.
+These replace the trusted PEM bundle after validation; invalid input preserves
+the previous trust. Use `endpoint(local_address, alpn)` to create the endpoint
+passed to the transport's existing `connect` method. Select `QUIC_ALPN`,
+`H3_ALPN`, or `WS_QUIC_ALPN` for the corresponding transport (WebSocket/HTTP3
+also uses `H3_ALPN`). Endpoint creation requires a Tokio runtime.
+Server-name verification remains enabled. Trust changes apply to new endpoints,
+not established connections. Supply only public certificates, never the server key.
+
+```rust,ignore
+use json_rpc_2::{QUIC_ALPN, client::ClientTlsConfig};
+use json_rpc_2::client::transports::quic::QuicClientTransport;
+
+let mut tls = ClientTlsConfig::default();
+tls.set_ca_certificate_file("certs/cert.pem")?;
+let endpoint = tls.endpoint("0.0.0.0:0".parse()?, QUIC_ALPN)?;
+let transport = QuicClientTransport::connect(endpoint, address, "mobilespace.local").await?;
+```
+
 ## Architecture highlights
 
 - **Transport ownership**: concrete client and server adapters live in the

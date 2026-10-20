@@ -56,5 +56,8 @@ thiserror = "2"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
+[dev-dependencies]
+rcgen = "0.13"
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(uniffi_bindgen)"] }
