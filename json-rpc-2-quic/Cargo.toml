@@ -6,8 +6,8 @@ description = "QUIC-based JSON-RPC 2.0 transport implementations"
 
 [features]
 default = ["quic", "http3"]
-quic = ["json-rpc-2-client/quic", "json-rpc-2-server/quic"]
-http3 = ["json-rpc-2-client/http3", "json-rpc-2-server/http3"]
+quic = []
+http3 = []
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -16,9 +16,7 @@ bytes = "1"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 http = "1"
-json-rpc-2-client = { path = "../json-rpc-2-client", default-features = false }
 json-rpc-2-core = { path = "../json-rpc-2-core" }
-json-rpc-2-server = { path = "../json-rpc-2-server", default-features = false }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 socket2 = "0.6"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
