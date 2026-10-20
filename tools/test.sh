@@ -3,4 +3,4 @@
 # all transports over IPv4 and IPv6).
 source "$(dirname "$0")/common.sh"
 cargo fmt --all --check
-cargo test -q --workspace --all-targets "$@"
+bash "$ROOT/tools/build-srt.sh" cargo test -q --workspace --all-targets "$@"

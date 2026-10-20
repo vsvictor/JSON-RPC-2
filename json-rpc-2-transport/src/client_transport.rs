@@ -302,18 +302,16 @@ fn apply_tcp_congestion_sockref(
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn apply_tcp_congestion_raw<Fd>(socket: &Fd, congestion: TcpCongestionControl) -> io::Result<()>
-where
-    Fd: std::os::fd::AsFd,
+fn apply_tcp_congestion_raw(socket: &Socket, congestion: TcpCongestionControl) -> io::Result<()>
 {
     let Some(name) = congestion.as_socket_name() else {
         return Ok(());
     };
-    use std::os::fd::{AsFd, AsRawFd};
+    use std::os::fd::AsRawFd;
 
     let result = unsafe {
         libc::setsockopt(
-            socket.as_fd().as_raw_fd(),
+            socket.as_raw_fd(),
             libc::IPPROTO_TCP,
             libc::TCP_CONGESTION,
             name.as_ptr().cast(),

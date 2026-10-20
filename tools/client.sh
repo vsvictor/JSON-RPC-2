@@ -36,7 +36,7 @@ if ((each)); then
     esac
     for transport in "${transports[@]}"; do
         echo "### $transport"
-        "$BIN" client "$transport" "$@" "${host[@]}" || status=1
+        bash "$ROOT/tools/build-srt.sh" "$BIN" client "$transport" "$@" "${host[@]}" || status=1
     done
     exit "$status"
 fi

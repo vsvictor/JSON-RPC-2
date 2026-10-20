@@ -54,7 +54,7 @@ BIN="$ROOT/target/debug/JSON_RPC_2"
 # only when the build fails.
 build() {
     local output
-    if ! output="$(cargo build -q --color always 2>&1)"; then
+    if ! output="$(bash "$ROOT/tools/build-srt.sh" cargo build -q --color always 2>&1)"; then
         printf '%s\n' "$output" >&2
         exit 1
     fi
@@ -63,5 +63,5 @@ build() {
 # Run the demo binary with the given arguments.
 app() {
     build
-    "$BIN" "$@"
+    bash "$ROOT/tools/build-srt.sh" "$BIN" "$@"
 }

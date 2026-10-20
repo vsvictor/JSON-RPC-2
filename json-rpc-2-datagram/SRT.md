@@ -7,6 +7,31 @@ This intentionally changes network compatibility.
 
 ## Build and deployment
 
+The launch scripts in `tools/` build **Haivision/srt 1.5.7** directly from
+https://github.com/Haivision/srt, pinned to commit
+`899348d8318eb9a3c5a5b6ec43c4a1114288773a`. The shared library is built with
+OpenSSL encryption enabled and cached under `target/native/srt/`. No system
+installation or root access is needed. The first build needs internet access,
+Git, CMake, a C++ compiler, OpenSSL development files, pkg-config and libclang:
+
+* macOS: `brew install cmake openssl@3 pkg-config llvm`
+* Debian/Ubuntu: `apt install git cmake build-essential libssl-dev pkg-config libclang-dev`
+
+To use the same pinned library with Cargo directly:
+
+```sh
+bash tools/build-srt.sh cargo build --workspace
+bash tools/build-srt.sh cargo test -p json-rpc-2-datagram --no-default-features --features srt
+```
+
+The wrapper selects the local headers/library through `PKG_CONFIG_PATH` and
+sets the runtime library search path for its command. Deploy the shared library
+from the local installation together with its OpenSSL runtime dependencies.
+For cross compilation, use a target-specific system installation as below;
+the wrapper builds for the host.
+
+### Alternative: system installation
+
 Install libsrt **1.5 or later with encryption enabled**, pkg-config and
 libclang (bindgen):
 

@@ -210,13 +210,13 @@ pub enum FfiTransportKind {
     #[cfg(feature = "srt")]
     Srt,
     /// UDP-Lite datagrams with configurable checksum coverage.
-    #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
+    #[cfg(feature = "udplite")]
     UdpLite,
     /// DCCP datagrams with congestion control but without guaranteed delivery.
-    #[cfg(all(feature = "dccp", any(target_os = "linux", target_os = "android")))]
+    #[cfg(feature = "dccp")]
     Dccp,
     /// SCTP packets with message boundaries and association-oriented sessions.
-    #[cfg(all(feature = "sctp", any(target_os = "linux", target_os = "android")))]
+    #[cfg(feature = "sctp")]
     Sctp,
     /// HTTP/1.1 `POST /` over one persistent keep-alive connection.
     #[cfg(feature = "http1")]
@@ -243,25 +243,13 @@ pub enum FfiTransportKind {
     #[cfg(all(feature = "websocket", feature = "srt"))]
     WsSrt,
     /// Dedicated WebSocket-style framing over reliable UDP-Lite datagrams.
-    #[cfg(all(
-        feature = "websocket",
-        feature = "udplite",
-        any(target_os = "linux", target_os = "android")
-    ))]
+    #[cfg(all(feature = "websocket", feature = "udplite"))]
     WsUdpLite,
     /// Dedicated WebSocket-style framing over DCCP datagrams.
-    #[cfg(all(
-        feature = "websocket",
-        feature = "dccp",
-        any(target_os = "linux", target_os = "android")
-    ))]
+    #[cfg(all(feature = "websocket", feature = "dccp"))]
     WsDccp,
     /// Dedicated WebSocket-style framing over SCTP packets.
-    #[cfg(all(
-        feature = "websocket",
-        feature = "sctp",
-        any(target_os = "linux", target_os = "android")
-    ))]
+    #[cfg(all(feature = "websocket", feature = "sctp"))]
     WsSctp,
     /// WebSocket established with the HTTP/1.1 Upgrade mechanism.
     #[cfg(all(feature = "websocket", feature = "http1"))]
@@ -377,21 +365,21 @@ impl TransportCapabilities for FfiTransportKind {
                 socket: TransportSocket::Udp,
                 supports_ping: true,
             },
-            #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
+            #[cfg(feature = "udplite")]
             Self::UdpLite => TransportCapabilitySet {
                 multiplexing: TransportMultiplexing::Multiplexed,
                 security: TransportSecurity::Plain,
                 socket: TransportSocket::Udp,
                 supports_ping: true,
             },
-            #[cfg(all(feature = "dccp", any(target_os = "linux", target_os = "android")))]
+            #[cfg(feature = "dccp")]
             Self::Dccp => TransportCapabilitySet {
                 multiplexing: TransportMultiplexing::Serialized,
                 security: TransportSecurity::Plain,
                 socket: TransportSocket::Dccp,
                 supports_ping: true,
             },
-            #[cfg(all(feature = "sctp", any(target_os = "linux", target_os = "android")))]
+            #[cfg(feature = "sctp")]
             Self::Sctp => TransportCapabilitySet {
                 multiplexing: TransportMultiplexing::Multiplexed,
                 security: TransportSecurity::Plain,
@@ -461,33 +449,21 @@ impl TransportCapabilities for FfiTransportKind {
                 socket: TransportSocket::Udp,
                 supports_ping: true,
             },
-            #[cfg(all(
-                feature = "websocket",
-                feature = "udplite",
-                any(target_os = "linux", target_os = "android")
-            ))]
+            #[cfg(all(feature = "websocket", feature = "udplite"))]
             Self::WsUdpLite => TransportCapabilitySet {
                 multiplexing: TransportMultiplexing::Multiplexed,
                 security: TransportSecurity::Plain,
                 socket: TransportSocket::Udp,
                 supports_ping: true,
             },
-            #[cfg(all(
-                feature = "websocket",
-                feature = "dccp",
-                any(target_os = "linux", target_os = "android")
-            ))]
+            #[cfg(all(feature = "websocket", feature = "dccp"))]
             Self::WsDccp => TransportCapabilitySet {
                 multiplexing: TransportMultiplexing::Serialized,
                 security: TransportSecurity::Plain,
                 socket: TransportSocket::Dccp,
                 supports_ping: true,
             },
-            #[cfg(all(
-                feature = "websocket",
-                feature = "sctp",
-                any(target_os = "linux", target_os = "android")
-            ))]
+            #[cfg(all(feature = "websocket", feature = "sctp"))]
             Self::WsSctp => TransportCapabilitySet {
                 multiplexing: TransportMultiplexing::Multiplexed,
                 security: TransportSecurity::Plain,
@@ -1995,6 +1971,18 @@ impl RpcClient {
                         .await
                         .map_err(transport_error)?,
                 ),
+                #[cfg(all(feature = "udplite", not(any(target_os = "linux", target_os = "android"))))]
+                FfiTransportKind::UdpLite => return Err(FfiError::InvalidConfiguration {
+                    details: "UDP-Lite is only supported on Linux and Android".into(),
+                }),
+                #[cfg(all(feature = "dccp", not(any(target_os = "linux", target_os = "android"))))]
+                FfiTransportKind::Dccp => return Err(FfiError::InvalidConfiguration {
+                    details: "DCCP is only supported on Linux and Android".into(),
+                }),
+                #[cfg(all(feature = "sctp", not(any(target_os = "linux", target_os = "android"))))]
+                FfiTransportKind::Sctp => return Err(FfiError::InvalidConfiguration {
+                    details: "SCTP is only supported on Linux and Android".into(),
+                }),
                 #[cfg(feature = "http1")]
                 FfiTransportKind::Http1 => AnyTransport::Http1(
                     Http1ClientTransport::connect(to)
@@ -2086,6 +2074,18 @@ impl RpcClient {
                         .await
                         .map_err(transport_error)?,
                 ),
+                #[cfg(all(feature = "websocket", feature = "udplite", not(any(target_os = "linux", target_os = "android"))))]
+                FfiTransportKind::WsUdpLite => return Err(FfiError::InvalidConfiguration {
+                    details: "WebSocket over UDP-Lite is only supported on Linux and Android".into(),
+                }),
+                #[cfg(all(feature = "websocket", feature = "dccp", not(any(target_os = "linux", target_os = "android"))))]
+                FfiTransportKind::WsDccp => return Err(FfiError::InvalidConfiguration {
+                    details: "WebSocket over DCCP is only supported on Linux and Android".into(),
+                }),
+                #[cfg(all(feature = "websocket", feature = "sctp", not(any(target_os = "linux", target_os = "android"))))]
+                FfiTransportKind::WsSctp => return Err(FfiError::InvalidConfiguration {
+                    details: "WebSocket over SCTP is only supported on Linux and Android".into(),
+                }),
                 #[cfg(all(feature = "websocket", feature = "http1"))]
                 FfiTransportKind::WsHttp1 => {
                     let url = format!("ws://{to}/ws");

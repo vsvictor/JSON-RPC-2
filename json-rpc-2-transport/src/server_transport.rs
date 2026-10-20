@@ -375,18 +375,16 @@ fn apply_tcp_congestion_sockref(
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn apply_tcp_congestion_raw<Fd>(socket: &Fd, congestion: TcpCongestionControl) -> io::Result<()>
-where
-    Fd: std::os::fd::AsFd,
+fn apply_tcp_congestion_raw(socket: &socket2::Socket, congestion: TcpCongestionControl) -> io::Result<()>
 {
     let Some(name) = congestion.as_socket_name() else {
         return Ok(());
     };
-    use std::os::fd::{AsFd, AsRawFd};
+    use std::os::fd::AsRawFd;
 
     let result = unsafe {
         libc::setsockopt(
-            socket.as_fd().as_raw_fd(),
+            socket.as_raw_fd(),
             libc::IPPROTO_TCP,
             libc::TCP_CONGESTION,
             name.as_ptr().cast(),
@@ -433,13 +431,20 @@ fn apply_tcp_fast_open_listener(
         if result == -1 {
             return Err(io::Error::last_os_error());
         }
-        return Ok(());
+        Ok(())
     }
-    #[allow(unreachable_code)]
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "TCP Fast Open listeners are only supported on linux/android/macos/ios in this crate",
-    ))
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "TCP Fast Open listeners are only supported on linux/android/macos/ios in this crate",
+        ))
+    }
 }
 
 fn serialize_value(value: &Value) -> String {

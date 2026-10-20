@@ -21,7 +21,7 @@ export JSON_RPC_WS_HTTP3_PORT=$((base + 9))
 export JSON_RPC_CERT="$CERT" JSON_RPC_KEY="$(dirname "$CERT")/key.pem" JSON_RPC_CA= JSON_RPC_SERVER_NAME=
 build
 
-"$BIN" server &
+bash "$ROOT/tools/build-srt.sh" "$BIN" server &
 server=$!
 trap 'kill -INT "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true; rm -rf "$(dirname "$CERT")"' EXIT
 
@@ -34,6 +34,6 @@ for _ in $(seq 100); do
     sleep 0.1
 done
 
-echo; "$BIN" client --host "$(required JSON_RPC_E2E_HOST)"
+echo; bash "$ROOT/tools/build-srt.sh" "$BIN" client --host "$(required JSON_RPC_E2E_HOST)"
 echo; "$ROOT/tools/curl.sh" "$(required JSON_RPC_E2E_HOST)"
 echo
