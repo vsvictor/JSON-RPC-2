@@ -39,7 +39,7 @@ for delivery and deduplication limits.
 | WebSocket/CoAP | one WebSocket-style text or binary message per CoAP request/response pair over UDP |
 | WebSocket/AMQP | one WebSocket-style text or binary message per AMQP content frame on a persistent TCP connection |
 | WebSocket/QUIC | one JSON document per WebSocket data frame over a dedicated QUIC stream bridge |
-| WebSocket/HTTP/1.1 | one JSON document per WebSocket data frame after Upgrade |
+| WebSocket/HTTP/1.1 | one JSON document per WebSocket data frame after Upgrade (`ws://` or `wss://` on the client) |
 | WebSocket/HTTP/3 | one JSON document per WebSocket data frame after extended CONNECT |
 
 ## Keepalive behavior
