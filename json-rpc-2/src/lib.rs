@@ -50,6 +50,8 @@ pub mod client {
         pub use json_rpc_2_tcp::client::transports::http1;
         #[cfg(feature = "tcp")]
         pub use json_rpc_2_tcp::client::transports::tcp;
+        #[cfg(feature = "tls")]
+        pub use json_rpc_2_tcp::client::transports::tls;
 
         #[cfg(feature = "websocket")]
         pub mod websocket {
@@ -92,6 +94,8 @@ pub mod transports {
     pub use json_rpc_2_tcp::server::transports::http1;
     #[cfg(feature = "tcp")]
     pub use json_rpc_2_tcp::server::transports::tcp;
+    #[cfg(feature = "tls")]
+    pub use json_rpc_2_tcp::server::transports::tls;
 
     #[cfg(feature = "websocket")]
     pub mod websocket {

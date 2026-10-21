@@ -1899,7 +1899,6 @@ dependencies = [
  "json-rpc-2",
  "quinn",
  "rcgen",
- "rustls",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
@@ -1951,7 +1950,6 @@ dependencies = [
 name = "json-rpc-2-runtime"
 version = "0.1.0"
 dependencies = [
- "arc-swap",
  "axum",
  "base64 0.22.1",
  "bytes",
@@ -1968,20 +1966,15 @@ dependencies = [
  "json-rpc-2-tcp",
  "json-rpc-2-transport",
  "json-rpc-2-websockets",
- "jsonrpsee",
  "libc",
- "proptest",
  "quinn",
  "rcgen",
- "reqwest",
  "rustls",
  "serde",
  "serde_json",
  "socket2",
  "tokio",
- "tokio-test",
  "tokio-tungstenite",
- "tokio-util",
  "tracing",
 ]
 
@@ -2019,9 +2012,9 @@ dependencies = [
  "json-rpc-2-core",
  "json-rpc-2-transport",
  "libc",
- "socket2",
+ "rustls",
  "tokio",
- "tokio-tungstenite",
+ "tokio-rustls",
  "tokio-util",
 ]
 

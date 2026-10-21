@@ -1,0 +1,4 @@
+[env]
+PKG_CONFIG_PATH = { value = "target/native/srt/899348d8318eb9a3c5a5b6ec43c4a1114288773a/install/lib/pkgconfig", relative = true }
+LD_LIBRARY_PATH = { value = "target/native/srt/899348d8318eb9a3c5a5b6ec43c4a1114288773a/install/lib", relative = true }
+DYLD_LIBRARY_PATH = { value = "target/native/srt/899348d8318eb9a3c5a5b6ec43c4a1114288773a/install/lib", relative = true }

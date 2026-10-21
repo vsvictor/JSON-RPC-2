@@ -13,6 +13,7 @@ for delivery and deduplication limits.
 | Transport | Framing |
 |---|---|
 | TCP | one compact JSON document per newline-delimited line |
+| TLS/TCP | one compact JSON document per newline-delimited line inside a verified TLS connection |
 | UDP | one JSON-RPC message per reliable transport datagram |
 | RTP/RTCP | one JSON-RPC message per RTP packet, with RTCP APP control packets multiplexed on the same UDP socket |
 | RUDP | one JSON-RPC message per reliable RUDP packet |
@@ -43,7 +44,7 @@ for delivery and deduplication limits.
 
 ## Keepalive behavior
 
-- TCP / reliable UDP / RUDP / SRT / UDP-Lite / DCCP / SCTP / raw QUIC use reserved non-JSON control payloads.
+- TCP / TLS/TCP / reliable UDP / RUDP / SRT / UDP-Lite / DCCP / SCTP / raw QUIC use reserved non-JSON control payloads.
 - RTP/RTCP uses RTCP APP packets for ACK, ping, and pong control traffic.
 - The MQTT-like profile uses `PINGREQ`/`PINGRESP` packet layouts; the AMQP-like profile uses the heartbeat frame layout.
 - The CoAP subset uses an empty confirmable message as a ping, acknowledged locally with an empty ACK. Standard CoAP ping expects an empty Reset instead.
@@ -75,6 +76,19 @@ Keepalive traffic never enters the JSON-RPC method dispatcher.
 - Client-side TCP Fast Open is available on Linux/Android for raw TCP and
   HTTP/1.1 connect paths; adapters that delegate socket creation to external
   libraries may only inherit the `no_delay` part of the tuning profile.
+- TLS/TCP uses the same TCP tuning options as raw TCP.
+
+## TLS/TCP semantics
+
+- TLS/TCP carries the same newline-delimited JSON-RPC messages and reserved
+  ping/pong control payloads as raw TCP, inside a TLS 1.2 or TLS 1.3 session.
+- The client requires an explicit trusted PEM CA bundle and a server name.
+  Certificate-chain and hostname verification are always enabled.
+- The server uses the configured certificate chain and private key. TLS/TCP
+  negotiates the `json-rpc-2-tls` ALPN identifier so it cannot be confused
+  with a different application protocol on the same endpoint.
+- Calls on one connection are serialized; reconnect creates a new verified
+  TLS session, and an interrupted request is never replayed.
 
 ## Reliable UDP semantics
 
@@ -299,7 +313,7 @@ adapters.
 
 ## Multiplexing and ordering
 
-- Serialized carriers: TCP, DCCP, HTTP/1.1 keep-alive session,
+- Serialized carriers: TCP, TLS/TCP, DCCP, HTTP/1.1 keep-alive session,
   WebSocket/TCP, WebSocket/DCCP, WebSocket/HTTP/1.1.
 - Multiplexed carriers: UDP, RTP/RTCP, RUDP, SRT, UDP-Lite, SCTP, CoAP, WebSocket/UDP,
   WebSocket/RTP, WebSocket/RUDP, WebSocket/SRT, WebSocket/UDP-Lite, WebSocket/SCTP,

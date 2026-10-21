@@ -35,6 +35,7 @@ use json_rpc_2::{
             rudp::RudpClientTransport,
             srt::SrtClientTransport,
             tcp::TcpClientTransport,
+            tls::TlsClientTransport,
             udp::UdpClientTransport,
             websocket::{
                 amqp::AmqpWebSocketClientTransport, coap::CoapWebSocketClientTransport,
@@ -251,6 +252,9 @@ fn configured_server(
             Kind::Tcp => {
                 server.set_tcp_port(port);
             }
+            Kind::Tls => {
+                server.set_tls_port(port);
+            }
             Kind::Udp => {
                 server.set_udp_port(port);
             }
@@ -429,6 +433,16 @@ async fn call(
                 options,
             )
             .await
+        }
+        Kind::Tls => {
+            let transport = TlsClientTransport::connect_with_certificates(
+                to,
+                &server_name,
+                &tls.certificates,
+                options.tcp_tuning.clone(),
+            )
+            .await?;
+            demonstrate(&label, transport, params, options).await
         }
         Kind::Udp => {
             let transport =

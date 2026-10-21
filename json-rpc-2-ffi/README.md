@@ -6,13 +6,13 @@ consumed from Kotlin (Android/JVM, via JNA) and Swift (iOS).
 
 **No JSON-RPC protocol logic is reimplemented here.** This crate only:
 - drives the existing `json_rpc_2::client::RpcClient` and every client
-  transport the base crate ships (`tcp`, `udp`, `rtp`, `rudp`, `srt`, `udplite`, `dccp`,
+  transport the base crate ships (`tcp`, `tls`, `udp`, `rtp`, `rudp`, `srt`, `udplite`, `dccp`,
   `sctp`, `http1`, `ws-tcp`, `ws-udp`, `ws-rtp`, `ws-rudp`, `ws-srt`, `ws-udplite`,
   `ws-dccp`, `ws-sctp`, `ws-http1`, `quic`, `http3`, `ws-quic`, `ws-http3`),
   delegating to a local `AnyTransport` enum that
   simply forwards to whichever concrete transport was selected,
-- replicates the original CLI example's TLS/QUIC endpoint setup (trusting a
-  caller-supplied PEM) for the four TLS-based transports (`quic`, `http3`,
+- replicates the original CLI example's TLS endpoint setup (trusting a
+  caller-supplied PEM) for the TLS-based transports (`tls`, `quic`, `http3`,
   `ws-quic`, `ws-http3`),
 - runs everything on a dedicated background Tokio runtime and exposes
   **blocking** functions (`connect`, `call`, `notify`, `disconnect`) so
@@ -63,8 +63,8 @@ Then rebuild the consumers:
 
 ## Transport & API surface
 
-All 28 transports `json-rpc-2` ships are exposed via `FfiTransportKind`
-(`Tcp`, `Udp`, `Rtp`, `Rudp`, `Srt`, `UdpLite`, `Dccp`, `Sctp`, `Mqtt`, `Coap`, `Amqp`, `Http1`, `WsTcp`, `WsUdp`,
+All 29 transports `json-rpc-2` ships are exposed via `FfiTransportKind`
+(`Tcp`, `Tls`, `Udp`, `Rtp`, `Rudp`, `Srt`, `UdpLite`, `Dccp`, `Sctp`, `Mqtt`, `Coap`, `Amqp`, `Http1`, `WsTcp`, `WsUdp`,
 `WsRtp`, `WsRudp`, `WsSrt`, `WsUdpLite`, `WsDccp`, `WsSctp`, `WsMqtt`, `WsCoap`, `WsAmqp`, `WsHttp1`, `Quic`, `Http3`,
 `WsQuic`, `WsHttp3`) and
 both:
@@ -73,7 +73,7 @@ both:
   `ConnectOptions { host, port, ca_pem, server_name, srt_passphrase, udplite_send_coverage, udplite_recv_coverage }`
 - explicit transport-specific entry points:
   `connect_tcp`, `connect_udp`, `connect_rtp`, `connect_rudp`, `connect_srt`, `connect_udplite`,
-  `connect_dccp`, `connect_sctp`, `connect_mqtt`, `connect_coap`, `connect_amqp`, `connect_http1`, `connect_ws_tcp`,
+  `connect_tls`, `connect_dccp`, `connect_sctp`, `connect_mqtt`, `connect_coap`, `connect_amqp`, `connect_http1`, `connect_ws_tcp`,
   `connect_ws_udp`, `connect_ws_rtp`, `connect_ws_rudp`, `connect_ws_srt`, `connect_ws_udplite`,
   `connect_ws_dccp`, `connect_ws_sctp`, `connect_ws_mqtt`, `connect_ws_coap`, `connect_ws_amqp`, `connect_ws_http1`, `connect_quic`,
   `connect_http3`, `connect_ws_quic`, `connect_ws_http3`
@@ -88,6 +88,8 @@ both:
 - `quic`/`http3`/`ws-quic`/`ws-http3` additionally require `ca_pem` (a PEM-encoded
   certificate to trust — the reference server uses a self-signed dev
   certificate, see `../certs/cert.pem`); `server_name` defaults to `host`.
+- `tls` uses TLS over TCP and also requires `ca_pem`; `server_name` defaults
+  to `host`. Use `connect_tls` or the generic `RpcClient.connect`.
 - `dccp`/`ws-dccp` and `sctp`/`ws-sctp` are available only on Linux/Android builds.
 
 For a separate certificate-setting step, create
@@ -101,7 +103,7 @@ Existing `ConnectOptions.ca_pem` and transport-specific constructors remain supp
   connection; `coap`/`ws-coap` carries it over UDP.
 
 Default ports for each transport are documented in the base repository's
-`.env` (`JSON_RPC_TCP_PORT`, `JSON_RPC_UDP_PORT`, `JSON_RPC_RTP_PORT`,
+`.env` (`JSON_RPC_TCP_PORT`, `JSON_RPC_TLS_PORT`, `JSON_RPC_UDP_PORT`, `JSON_RPC_RTP_PORT`,
 `JSON_RPC_RUDP_PORT`, `JSON_RPC_SRT_PORT`, `JSON_RPC_UDPLITE_PORT`, `JSON_RPC_DCCP_PORT`,
 `JSON_RPC_SCTP_PORT`, `JSON_RPC_MQTT_PORT`, `JSON_RPC_COAP_PORT`, `JSON_RPC_AMQP_PORT`,
 `JSON_RPC_HTTP1_PORT`, `JSON_RPC_QUIC_PORT`,

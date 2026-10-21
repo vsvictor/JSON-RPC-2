@@ -10,6 +10,7 @@ source "$(dirname "$0")/common.sh"
 base="${JSON_RPC_E2E_PORT_BASE:-$(required JSON_RPC_E2E_PORT_BASE)}"
 export JSON_RPC_TRANSPORT=all JSON_RPC_BIND="$(required JSON_RPC_E2E_BIND)"
 export JSON_RPC_TCP_PORT=$base JSON_RPC_UDP_PORT=$((base + 1)) JSON_RPC_QUIC_PORT=$((base + 2))
+export JSON_RPC_TLS_PORT=$((base + 14))
 export JSON_RPC_DCCP_PORT=$((base + 10))
 export JSON_RPC_SCTP_PORT=$((base + 12))
 export JSON_RPC_HTTP1_PORT=$((base + 3)) JSON_RPC_HTTP3_PORT=$((base + 4))

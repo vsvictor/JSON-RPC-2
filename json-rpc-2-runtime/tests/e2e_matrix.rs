@@ -31,6 +31,8 @@ use json_rpc_2_runtime::{
     H3_ALPN, MultiTransportServer, QUIC_ALPN, RunningServer, TransportKind, WS_QUIC_ALPN,
 };
 use json_rpc_2_server::{JsonRpcProtocol, RpcServer};
+#[cfg(feature = "tls")]
+use json_rpc_2_tcp::client::transports::tls::TlsClientTransport;
 use json_rpc_2_tcp::client::transports::{http1::Http1ClientTransport, tcp::TcpClientTransport};
 #[cfg(all(feature = "websocket", feature = "amqp"))]
 use json_rpc_2_websockets::client::transports::amqp::AmqpWebSocketClientTransport;
@@ -130,6 +132,20 @@ async fn connect(
     let server_name = to.ip().to_string();
     let connect = match kind {
         TransportKind::Tcp => boxed(TcpClientTransport::connect(to)),
+        #[cfg(feature = "tls")]
+        TransportKind::Tls => {
+            let certificate = certificate.clone();
+            let server_name = server_name.clone();
+            boxed(async move {
+                TlsClientTransport::connect_with_certificates(
+                    to,
+                    &server_name,
+                    &[certificate],
+                    json_rpc_2_transport::TcpTuningConfig::default(),
+                )
+                .await
+            })
+        }
         TransportKind::Udp => boxed(UdpClientTransport::connect(to)),
         #[cfg(feature = "rtp")]
         TransportKind::Rtp => boxed(RtpClientTransport::connect(to)),
@@ -224,6 +240,8 @@ async fn start_all(
         .set_ws_quic_port(0)
         .set_ws_http1_port(0)
         .set_ws_http3_port(0);
+    #[cfg(feature = "tls")]
+    let builder = builder.set_tls_port(0);
     #[cfg(feature = "rtp")]
     let builder = builder.set_rtp_port(0);
     #[cfg(feature = "rudp")]

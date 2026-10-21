@@ -13,7 +13,7 @@ Compatibility facade over the split workspace crates:
 - `json-rpc-2-quic`: non-WebSocket QUIC/HTTP3 transports
 - `json-rpc-2-server`: transport-agnostic dispatcher and typestate builder
 - `json-rpc-2-runtime`: multi-transport server orchestration and health endpoints
-- `json-rpc-2-tcp`: non-WebSocket TCP/HTTP1 transports
+- `json-rpc-2-tcp`: non-WebSocket TCP/TLS/HTTP1 transports
 - `json-rpc-2-websockets`: all WebSocket-family transports and shared WebSocket
   adapter surface
 - `json-rpc-2-cli`: extracted demo / CLI binary (`JSON_RPC_2`)
@@ -61,6 +61,9 @@ passed to the transport's existing `connect` method. Select `QUIC_ALPN`,
 also uses `H3_ALPN`). Endpoint creation requires a Tokio runtime.
 Server-name verification remains enabled. Trust changes apply to new endpoints,
 not established connections. Supply only public certificates, never the server key.
+For TLS/TCP, use `json_rpc_2::client::transports::tls::TlsClientTransport::connect(
+address, server_name, ca_pem)`; it performs the verified TLS handshake before sending
+newline-delimited JSON-RPC.
 
 ```rust,ignore
 use json_rpc_2::{QUIC_ALPN, client::ClientTlsConfig};
@@ -139,6 +142,7 @@ use explicit `ClientLimits` / `ServerLimits`.
 Client and server adapters cover:
 
 - TCP
+- TLS-encrypted TCP
 - reliable UDP
 - RTP/RTCP over UDP
 - RUDP
@@ -177,6 +181,7 @@ batch handling, and error generation.
 Transport families can now be compiled out when not needed:
 
 - `tcp`
+- `tls`
 - `udp`
 - `rtp`
 - `rudp`
@@ -202,7 +207,7 @@ cores, and the FFI crate mirrors the same transport groups.
 Transport-level liveness checks stay separate from JSON-RPC application
 traffic:
 
-- TCP, reliable UDP, and raw QUIC use reserved non-JSON control payloads.
+- TCP, TLS/TCP, reliable UDP, and raw QUIC use reserved non-JSON control payloads.
 - RTP/RTCP uses RTCP APP control packets for ACK/ping/pong on the same UDP socket.
 - RUDP and UDP-Lite use dedicated datagram control packets for ACK/ping/pong;
   UDP-Lite can reduce checksum coverage to keep partially corrupted payloads

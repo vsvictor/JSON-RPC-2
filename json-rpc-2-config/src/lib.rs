@@ -30,7 +30,7 @@ environment variables, the optional overlay file (JSON_RPC_ENV_OVERLAY),
 are required: set them in .env.
 
   TRANSPORTS            JSON_RPC_TRANSPORT      all (default) or a comma-separated list of
-                                                tcp, udp, rtp, rudp, srt, udplite, dccp, sctp, quic, http1, http3,
+                                                tcp, tls, udp, rtp, rudp, srt, udplite, dccp, sctp, quic, http1, http3,
                                                 mqtt, coap, amqp,
                                                 ws-tcp, ws-udp, ws-rtp, ws-rudp, ws-srt, ws-udplite, ws-dccp, ws-sctp,
                                                 ws-quic, ws-http1, ws-http3, ws-mqtt, ws-coap, ws-amqp
@@ -73,7 +73,7 @@ Client:
                                                 enable TCP Fast Open on supported adapter-owned TCP sockets
   --tcp-fastopen-queue-len <N> JSON_RPC_TCP_FASTOPEN_QUEUE_LEN
                                                 Fast Open listener queue length
-TCP tuning applies only to tcp/http1/ws-tcp/ws-http1, never MQTT/AMQP broker library sockets.
+TCP tuning applies only to tcp/tls/http1/ws-tcp/ws-http1, never MQTT/AMQP broker library sockets.
 In mixed selections it affects only those local TCP adapters; broker socket tuning is not exposed.
   --udp-retransmit-ms <N>   JSON_RPC_UDP_RETRANSMIT_MS
                                                 delay between UDP retransmits
@@ -121,6 +121,7 @@ Ports (server and client) apply to local socket transports and are required for 
 local-listener transport. MQTT and AMQP use the external broker URL and service route above;
 their legacy port options are deprecated and rejected:
   --tcp-port <N>      * JSON_RPC_TCP_PORT       TCP
+  --tls-port <N>      * JSON_RPC_TLS_PORT       TLS-encrypted TCP
   --udp-port <N>      * JSON_RPC_UDP_PORT       reliable UDP
   --rtp-port <N>      * JSON_RPC_RTP_PORT       RTP/RTCP over UDP
   --rudp-port <N>     * JSON_RPC_RUDP_PORT      Reliable UDP with explicit sequencing
@@ -718,6 +719,7 @@ impl KindSettings for TransportKind {
     fn port_setting(self) -> &'static str {
         match self {
             TransportKind::Tcp => "JSON_RPC_TCP_PORT",
+            TransportKind::Tls => "JSON_RPC_TLS_PORT",
             TransportKind::Udp => "JSON_RPC_UDP_PORT",
             TransportKind::Rtp => "JSON_RPC_RTP_PORT",
             TransportKind::Rudp => "JSON_RPC_RUDP_PORT",

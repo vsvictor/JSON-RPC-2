@@ -6,8 +6,9 @@ description = "Compatibility facade for split JSON-RPC 2.0 core/client/server cr
 readme = "README.md"
 
 [features]
-default = ["tcp", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "websocket", "mqtt", "coap", "amqp"]
+default = ["tcp", "tls", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "websocket", "mqtt", "coap", "amqp"]
 tcp = ["json-rpc-2-tcp/tcp", "json-rpc-2-websockets/tcp", "json-rpc-2-runtime/tcp"]
+tls = ["tcp", "json-rpc-2-tcp/tls", "json-rpc-2-runtime/tls"]
 udp = ["json-rpc-2-datagram/udp", "json-rpc-2-websockets/udp", "json-rpc-2-runtime/udp"]
 rtp = ["json-rpc-2-datagram/rtp", "json-rpc-2-websockets/rtp", "json-rpc-2-runtime/rtp"]
 rudp = ["json-rpc-2-datagram/rudp", "json-rpc-2-websockets/rudp", "json-rpc-2-runtime/rudp"]

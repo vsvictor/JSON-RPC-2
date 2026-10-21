@@ -79,6 +79,7 @@ add_transport() {
 }
 
 add_transport tcp --tcp-port JSON_RPC_TCP_PORT
+add_transport tls --tls-port JSON_RPC_TLS_PORT
 add_transport udp --udp-port JSON_RPC_UDP_PORT
 add_transport rtp --rtp-port JSON_RPC_RTP_PORT
 add_transport rudp --rudp-port JSON_RPC_RUDP_PORT

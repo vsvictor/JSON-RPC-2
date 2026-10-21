@@ -42,6 +42,10 @@ use json_rpc_2_runtime::{
 use json_rpc_2_server::{JsonRpcProtocol, RegistrationError, RpcError, RpcServer};
 use json_rpc_2_tcp::client::transports::{http1::Http1ClientTransport, tcp::TcpClientTransport};
 use json_rpc_2_tcp::server::transports::{http1::Http1Transport, tcp::TcpTransport};
+#[cfg(feature = "tls")]
+use json_rpc_2_tcp::{
+    client::transports::tls::TlsClientTransport, server::transports::tls::TlsTransport,
+};
 #[cfg(all(feature = "websocket", feature = "amqp"))]
 use json_rpc_2_websockets::client::transports::amqp::AmqpWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "coap"))]
@@ -184,6 +188,34 @@ async fn start(
             let server = TcpTransport::new(listener).start(protocol.clone());
             (server, boxed(TcpClientTransport::connect(address)))
         }
+        #[cfg(feature = "tls")]
+        "tls" => {
+            let (certificate, key) = identity();
+            let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.clone()], key)
+            .unwrap();
+            tls.alpn_protocols = vec![json_rpc_2_transport::TLS_ALPN.to_vec()];
+            let listener = TcpListener::bind(SocketAddr::new(ip, 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = TlsTransport::new(listener, Arc::new(tls)).start(protocol.clone());
+            (
+                server,
+                boxed(async move {
+                    TlsClientTransport::connect_with_certificates(
+                        address,
+                        &server_name,
+                        &[certificate],
+                        json_rpc_2_transport::TcpTuningConfig::default(),
+                    )
+                    .await
+                }),
+            )
+        }
         "udp" => {
             let socket = tokio::net::UdpSocket::bind(SocketAddr::new(ip, 0))
                 .await
@@ -321,6 +353,8 @@ const ADDRESS_FAMILIES: [IpAddr; 2] = [
 
 const TRANSPORTS: &[&str] = &[
     "tcp",
+    #[cfg(feature = "tls")]
+    "tls",
     "udp",
     #[cfg(any(target_os = "linux", target_os = "android"))]
     "dccp",
@@ -499,6 +533,20 @@ async fn connect(
     let server_name = to.ip().to_string();
     let connect = match kind {
         TransportKind::Tcp => boxed(TcpClientTransport::connect(to)),
+        #[cfg(feature = "tls")]
+        TransportKind::Tls => {
+            let certificate = certificate.clone();
+            let server_name = server_name.clone();
+            boxed(async move {
+                TlsClientTransport::connect_with_certificates(
+                    to,
+                    &server_name,
+                    &[certificate],
+                    json_rpc_2_transport::TcpTuningConfig::default(),
+                )
+                .await
+            })
+        }
         TransportKind::Udp => boxed(UdpClientTransport::connect(to)),
         #[cfg(feature = "rtp")]
         TransportKind::Rtp => boxed(RtpClientTransport::connect(to)),
@@ -604,6 +652,8 @@ async fn serves_every_transport_on_every_bind_address() {
         .set_ws_quic_port(0)
         .set_ws_http1_port(0)
         .set_ws_http3_port(0);
+    #[cfg(feature = "tls")]
+    let builder = builder.set_tls_port(0);
     #[cfg(feature = "rtp")]
     let builder = builder.set_rtp_port(0);
     #[cfg(feature = "rudp")]
@@ -655,7 +705,7 @@ async fn serves_every_transport_on_every_bind_address() {
             .filter(|kind| !kind.is_broker())
         {
             let to = running.address(kind, ip).unwrap();
-            assert_ne!(to.port(), 0, "{kind:?} {ip}");
+            assert_ne!(to.port(), 0, "listener must use an assigned port: {to}");
             let client = RpcClient::new(connect(kind, to, &certificate).await);
             let params = json!({"transport": kind.id(), "ip": ip});
             let result: Value = client.request("echo", params.clone()).await.unwrap();
@@ -682,6 +732,52 @@ async fn starts_only_transports_with_a_port() {
     let running = server.start().await.unwrap();
     let kinds: Vec<_> = running.listeners().map(|(kind, _)| kind).collect();
     assert_eq!(kinds, [TransportKind::Tcp, TransportKind::WebSocketTcp]);
+    running.close().await.unwrap();
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn tls_transport_verifies_server_certificate_and_serves_json_rpc() {
+    let (certificate, key) = identity();
+    let running = MultiTransportServer::builder(make_server())
+        .set_bind([IpAddr::V4(Ipv4Addr::LOCALHOST)])
+        .set_tls_port(0)
+        .set_tls(vec![certificate.clone()], key)
+        .start()
+        .await
+        .unwrap();
+    let address = running
+        .address(TransportKind::Tls, IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .unwrap();
+    let transport = TlsClientTransport::connect_with_certificates(
+        address,
+        "127.0.0.1",
+        std::slice::from_ref(&certificate),
+        json_rpc_2_transport::TcpTuningConfig::default(),
+    )
+    .await
+    .unwrap();
+    let client = RpcClient::new(transport);
+    client.transport_ping().await.unwrap();
+    let result: Value = client
+        .request("echo", json!({"secure": true}))
+        .await
+        .unwrap();
+    assert_eq!(result, json!({"secure": true}));
+    client.close().await.unwrap();
+    let address = running
+        .address(TransportKind::Tls, IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .unwrap();
+    assert!(
+        TlsClientTransport::connect_with_certificates(
+            address,
+            "wrong.example",
+            std::slice::from_ref(&certificate),
+            json_rpc_2_transport::TcpTuningConfig::default(),
+        )
+        .await
+        .is_err()
+    );
     running.close().await.unwrap();
 }
 

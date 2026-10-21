@@ -2,3 +2,5 @@
 pub mod http1;
 #[cfg(feature = "tcp")]
 pub mod tcp;
+#[cfg(feature = "tls")]
+pub mod tls;

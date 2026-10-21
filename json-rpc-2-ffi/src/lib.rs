@@ -3,7 +3,7 @@
 //! This crate does **not** reimplement the JSON-RPC 2.0 protocol or any
 //! transport: it is a thin binding layer that drives the existing
 //! [`json_rpc_2::client::RpcClient`] and every client transport the crate
-//! ships (`tcp`, `udp`, `rtp`, `rudp`, `srt`, `udplite`, `dccp`, `sctp`, `mqtt`, `coap`,
+//! ships (`tcp`, `tls`, `udp`, `rtp`, `rudp`, `srt`, `udplite`, `dccp`, `sctp`, `mqtt`, `coap`,
 //! `amqp`, `http1`, `quic`, `http3`, `ws-tcp`, `ws-udp`, `ws-rtp`, `ws-rudp`, `ws-srt`,
 //! `ws-udplite`, `ws-dccp`, `ws-sctp`, `ws-mqtt`, `ws-coap`, `ws-amqp`, `ws-quic`,
 //! `ws-http1`, `ws-http3`), exposing
@@ -48,6 +48,8 @@ use json_rpc_2::client::transports::sctp::SctpClientTransport;
 use json_rpc_2::client::transports::srt::SrtClientTransport;
 #[cfg(feature = "tcp")]
 use json_rpc_2::client::transports::tcp::TcpClientTransport;
+#[cfg(feature = "tls")]
+use json_rpc_2::client::transports::tls::TlsClientTransport;
 #[cfg(feature = "udp")]
 use json_rpc_2::client::transports::udp::UdpClientTransport;
 #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
@@ -187,6 +189,9 @@ pub enum FfiTransportKind {
     /// Newline-delimited JSON over one persistent TCP connection.
     #[cfg(feature = "tcp")]
     Tcp,
+    /// Newline-delimited JSON over a certificate-verified TLS TCP connection.
+    #[cfg(feature = "tls")]
+    Tls,
     /// Reliable application-level JSON-RPC over UDP datagrams.
     #[cfg(feature = "udp")]
     Udp,
@@ -309,6 +314,13 @@ impl TransportCapabilities for FfiTransportKind {
             Self::Tcp => TransportCapabilitySet {
                 multiplexing: TransportMultiplexing::Serialized,
                 security: TransportSecurity::Plain,
+                socket: TransportSocket::Tcp,
+                supports_ping: true,
+            },
+            #[cfg(feature = "tls")]
+            Self::Tls => TransportCapabilitySet {
+                multiplexing: TransportMultiplexing::Serialized,
+                security: TransportSecurity::Tls,
                 socket: TransportSocket::Tcp,
                 supports_ping: true,
             },
@@ -509,7 +521,7 @@ impl TransportCapabilities for FfiTransportKind {
 /// `port`; credentials can be embedded in that URL, which is never formatted
 /// for debug output. `broker_route` selects the request topic/queue. `ca_pem`
 /// and `server_name` are only used by the
-/// TLS-based transports (`quic`, `http3`, `ws-quic`, `ws-http3`); the self-signed
+/// TLS-based transports (`tls`, `quic`, `http3`, `ws-quic`, `ws-http3`); the self-signed
 /// certificate the server publishes must be trusted explicitly, there is no
 /// public CA to fall back on. `srt_passphrase` is only used by `srt` and
 /// `ws-srt`. `udplite_*_coverage` is only used by `udplite` and
@@ -523,8 +535,8 @@ pub struct ConnectOptions {
     /// `JSON_RPC_TCP_PORT`). For MQTT/AMQP this is used only when
     /// `broker_url` is omitted.
     pub port: u16,
-    /// PEM-encoded certificate(s) to trust; required for `quic`, `http3`,
-    /// `ws-quic`, and `ws-http3`.
+    /// PEM-encoded certificate(s) to trust; required for `tls`, `quic`,
+    /// `http3`, `ws-quic`, and `ws-http3`.
     pub ca_pem: Option<String>,
     /// TLS name to verify; defaults to `host` (as in the original CLI
     /// example).
@@ -654,6 +666,8 @@ pub struct QuicConnectOptions {
 enum AnyTransport {
     #[cfg(feature = "tcp")]
     Tcp(TcpClientTransport),
+    #[cfg(feature = "tls")]
+    Tls(TlsClientTransport),
     #[cfg(feature = "udp")]
     Udp(UdpClientTransport),
     #[cfg(feature = "rtp")]
@@ -727,6 +741,8 @@ impl RpcClientTransport for AnyTransport {
         match self {
             #[cfg(feature = "tcp")]
             Self::Tcp(transport) => transport.send(message),
+            #[cfg(feature = "tls")]
+            Self::Tls(transport) => transport.send(message),
             #[cfg(feature = "udp")]
             Self::Udp(transport) => transport.send(message),
             #[cfg(feature = "rtp")]
@@ -804,6 +820,8 @@ impl RpcClientTransport for AnyTransport {
         match self {
             #[cfg(feature = "tcp")]
             Self::Tcp(transport) => transport.send_with_expectation(message, expects_response),
+            #[cfg(feature = "tls")]
+            Self::Tls(transport) => transport.send_with_expectation(message, expects_response),
             #[cfg(feature = "udp")]
             Self::Udp(transport) => transport.send_with_expectation(message, expects_response),
             #[cfg(feature = "rtp")]
@@ -884,6 +902,8 @@ impl RpcClientTransport for AnyTransport {
         match self {
             #[cfg(feature = "tcp")]
             Self::Tcp(transport) => transport.send_cancelable(message, expects_response, cancel),
+            #[cfg(feature = "tls")]
+            Self::Tls(transport) => transport.send_cancelable(message, expects_response, cancel),
             #[cfg(feature = "udp")]
             Self::Udp(transport) => transport.send_cancelable(message, expects_response, cancel),
             #[cfg(feature = "rtp")]
@@ -965,6 +985,8 @@ impl RpcClientTransport for AnyTransport {
         match self {
             #[cfg(feature = "tcp")]
             Self::Tcp(transport) => transport.transport_ping(),
+            #[cfg(feature = "tls")]
+            Self::Tls(transport) => transport.transport_ping(),
             #[cfg(feature = "udp")]
             Self::Udp(transport) => transport.transport_ping(),
             #[cfg(feature = "rtp")]
@@ -1038,6 +1060,8 @@ impl RpcClientTransport for AnyTransport {
         match self {
             #[cfg(feature = "tcp")]
             Self::Tcp(transport) => transport.kind(),
+            #[cfg(feature = "tls")]
+            Self::Tls(transport) => transport.kind(),
             #[cfg(feature = "udp")]
             Self::Udp(transport) => transport.kind(),
             #[cfg(feature = "rtp")]
@@ -1111,6 +1135,8 @@ impl RpcClientTransport for AnyTransport {
         match self {
             #[cfg(feature = "tcp")]
             Self::Tcp(transport) => transport.peer(),
+            #[cfg(feature = "tls")]
+            Self::Tls(transport) => transport.peer(),
             #[cfg(feature = "udp")]
             Self::Udp(transport) => transport.peer(),
             #[cfg(feature = "rtp")]
@@ -1184,6 +1210,8 @@ impl RpcClientTransport for AnyTransport {
         match self {
             #[cfg(feature = "tcp")]
             Self::Tcp(transport) => transport.reconnect(),
+            #[cfg(feature = "tls")]
+            Self::Tls(transport) => transport.reconnect(),
             #[cfg(feature = "udp")]
             Self::Udp(transport) => transport.reconnect(),
             #[cfg(feature = "rtp")]
@@ -1257,6 +1285,8 @@ impl RpcClientTransport for AnyTransport {
         match self {
             #[cfg(feature = "tcp")]
             Self::Tcp(transport) => transport.close(),
+            #[cfg(feature = "tls")]
+            Self::Tls(transport) => transport.close(),
             #[cfg(feature = "udp")]
             Self::Udp(transport) => transport.close(),
             #[cfg(feature = "rtp")]
@@ -1855,7 +1885,7 @@ impl RpcClient {
                 send_checksum_coverage: options.udplite_send_coverage.unwrap_or(8),
                 recv_checksum_coverage: options.udplite_recv_coverage.unwrap_or(8),
             };
-            #[cfg(any(feature = "quic", feature = "http3"))]
+            #[cfg(any(feature = "tls", feature = "quic", feature = "http3"))]
             let server_name = options
                 .server_name
                 .clone()
@@ -1930,6 +1960,16 @@ impl RpcClient {
                     TcpClientTransport::connect(to)
                         .await
                         .map_err(transport_error)?,
+                ),
+                #[cfg(feature = "tls")]
+                FfiTransportKind::Tls => AnyTransport::Tls(
+                    TlsClientTransport::connect(
+                        to,
+                        &server_name,
+                        options.ca_pem.as_deref().expect("checked above"),
+                    )
+                    .await
+                    .map_err(transport_error)?,
                 ),
                 #[cfg(feature = "udp")]
                 FfiTransportKind::Udp => AnyTransport::Udp(
@@ -2276,6 +2316,12 @@ impl RpcClient {
 #[uniffi::export]
 pub fn connect_tcp(options: TcpConnectOptions) -> Result<Arc<RpcClient>, FfiError> {
     RpcClient::connect(FfiTransportKind::Tcp, options.into_connect_options())
+}
+
+#[cfg(feature = "tls")]
+#[uniffi::export]
+pub fn connect_tls(options: ConnectOptions) -> Result<Arc<RpcClient>, FfiError> {
+    RpcClient::connect(FfiTransportKind::Tls, options)
 }
 
 #[cfg(feature = "udp")]

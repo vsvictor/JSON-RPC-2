@@ -67,6 +67,7 @@ pub const CONTROL_PATH: &str = "/.well-known/json-rpc-2/ping";
 pub const CONTROL_PING: &[u8] = b"#json-rpc-2-control-ping";
 pub const CONTROL_PONG: &[u8] = b"#json-rpc-2-control-pong";
 pub const QUIC_ALPN: &[u8] = b"json-rpc-2";
+pub const TLS_ALPN: &[u8] = b"json-rpc-2-tls";
 pub const WS_QUIC_ALPN: &[u8] = b"json-rpc-2-ws";
 pub const H3_ALPN: &[u8] = b"h3";
 

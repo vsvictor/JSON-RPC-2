@@ -5,8 +5,9 @@ edition = "2024"
 description = "Multi-transport JSON-RPC 2.0 server runtime and orchestration"
 
 [features]
-default = ["tcp", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "websocket", "mqtt", "coap", "amqp"]
+default = ["tcp", "tls", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "websocket", "mqtt", "coap", "amqp"]
 tcp = ["dep:futures-util", "dep:json-rpc-2-tcp", "json-rpc-2-tcp/tcp", "json-rpc-2-websockets?/tcp"]
+tls = ["tcp", "dep:json-rpc-2-tcp", "json-rpc-2-tcp/tls"]
 udp = ["dep:json-rpc-2-datagram", "json-rpc-2-datagram/udp", "json-rpc-2-websockets?/udp"]
 rtp = ["dep:json-rpc-2-datagram", "json-rpc-2-datagram/rtp", "json-rpc-2-websockets?/rtp"]
 rudp = ["dep:json-rpc-2-datagram", "json-rpc-2-datagram/rudp", "json-rpc-2-websockets?/rudp"]
@@ -23,7 +24,6 @@ http3 = ["dep:axum", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn", "dep:jso
 websocket = ["rtp", "rudp", "srt", "udplite", "mqtt", "coap", "amqp", "dep:axum", "dep:base64", "dep:futures-util", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn", "dep:tokio-tungstenite", "dep:json-rpc-2-websockets", "json-rpc-2-websockets/websocket"]
 
 [dependencies]
-arc-swap = "1"
 axum = { version = "0.8", features = ["ws"], optional = true }
 base64 = { version = "0.22", optional = true }
 bytes = "1"
@@ -46,7 +46,6 @@ serde_json = "1"
 socket2 = "0.6"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "stream"], optional = true }
-tokio-util = { version = "0.7", features = ["codec", "rt"] }
 tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]
@@ -57,10 +56,6 @@ json-rpc-2-client = { path = "../json-rpc-2-client" }
 json-rpc-2-datagram = { path = "../json-rpc-2-datagram", default-features = false, features = ["udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp"] }
 json-rpc-2-iot = { path = "../json-rpc-2-iot", default-features = false, features = ["mqtt", "coap", "amqp"] }
 json-rpc-2-quic = { path = "../json-rpc-2-quic", default-features = false, features = ["quic", "http3"] }
-json-rpc-2-tcp = { path = "../json-rpc-2-tcp", default-features = false, features = ["tcp", "http1"] }
+json-rpc-2-tcp = { path = "../json-rpc-2-tcp", default-features = false, features = ["tcp", "tls", "http1"] }
 json-rpc-2-websockets = { path = "../json-rpc-2-websockets", default-features = false, features = ["websocket", "rtp", "rudp", "srt", "udplite"] }
-proptest = "1"
 rcgen = "0.13"
-tokio-test = "0.4"
-jsonrpsee = { version = "0.24", features = ["http-client"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

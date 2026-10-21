@@ -1,6 +1,7 @@
 #![cfg_attr(
     not(any(
         feature = "tcp",
+        feature = "tls",
         feature = "udp",
         feature = "rtp",
         feature = "rudp",
@@ -92,6 +93,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::Serialize;
 #[cfg(any(
     feature = "tcp",
+    feature = "tls",
     feature = "http1",
     all(feature = "websocket", feature = "tcp"),
     all(feature = "websocket", feature = "http1")
@@ -136,10 +138,12 @@ use json_rpc_2_server::{JsonRpcProtocol, RpcServer};
 use json_rpc_2_tcp::server::transports::http1::Http1Transport;
 #[cfg(feature = "tcp")]
 use json_rpc_2_tcp::server::transports::tcp::TcpTransport;
+#[cfg(feature = "tls")]
+use json_rpc_2_tcp::server::transports::tls::TlsTransport;
 use json_rpc_2_transport::TcpTuningConfig;
 use json_rpc_2_transport::{
-    RunningTransport, RuntimeMetricsSnapshot, ServerLimits, ServerShutdownPolicy, Transport,
-    TransportRuntime,
+    RunningTransport, RuntimeMetricsSnapshot, ServerLimits, ServerShutdownPolicy, TLS_ALPN,
+    Transport, TransportRuntime,
 };
 #[cfg(all(feature = "websocket", feature = "amqp"))]
 use json_rpc_2_websockets::server::transports::amqp::AmqpWebSocketTransport;
@@ -195,6 +199,8 @@ pub use json_rpc_2_transport::{H3_ALPN, QUIC_ALPN, WS_QUIC_ALPN};
 pub enum TransportKind {
     #[cfg(feature = "tcp")]
     Tcp,
+    #[cfg(feature = "tls")]
+    Tls,
     #[cfg(feature = "udp")]
     Udp,
     #[cfg(feature = "rtp")]
@@ -283,6 +289,8 @@ impl TransportKind {
     pub const ALL: &[TransportKind] = &[
         #[cfg(feature = "tcp")]
         TransportKind::Tcp,
+        #[cfg(feature = "tls")]
+        TransportKind::Tls,
         #[cfg(feature = "udp")]
         TransportKind::Udp,
         #[cfg(feature = "rtp")]
@@ -356,6 +364,8 @@ impl TransportKind {
         match self {
             #[cfg(feature = "tcp")]
             TransportKind::Tcp => "tcp",
+            #[cfg(feature = "tls")]
+            TransportKind::Tls => "tls",
             #[cfg(feature = "udp")]
             TransportKind::Udp => "udp",
             #[cfg(feature = "rtp")]
@@ -430,6 +440,8 @@ impl TransportKind {
         match self {
             #[cfg(feature = "tcp")]
             TransportKind::Tcp => "TCP",
+            #[cfg(feature = "tls")]
+            TransportKind::Tls => "TLS/TCP",
             #[cfg(feature = "udp")]
             TransportKind::Udp => "UDP",
             #[cfg(feature = "rtp")]
@@ -521,6 +533,13 @@ impl TransportCapabilities for TransportKind {
             TransportKind::Tcp => TransportCapabilitySet {
                 multiplexing: TransportMultiplexing::Serialized,
                 security: TransportSecurity::Plain,
+                socket: TransportSocket::Tcp,
+                supports_ping: true,
+            },
+            #[cfg(feature = "tls")]
+            TransportKind::Tls => TransportCapabilitySet {
+                multiplexing: TransportMultiplexing::Serialized,
+                security: TransportSecurity::Tls,
                 socket: TransportSocket::Tcp,
                 supports_ping: true,
             },
@@ -727,6 +746,7 @@ impl TransportCapabilities for TransportKind {
             },
             #[cfg(not(any(
                 feature = "tcp",
+                feature = "tls",
                 feature = "udp",
                 feature = "rtp",
                 feature = "rudp",
@@ -746,8 +766,8 @@ impl TransportCapabilities for TransportKind {
     }
 }
 
-/// Certificate chain and private key of the QUIC-based transports.
-#[cfg(any(feature = "quic", feature = "http3"))]
+/// Certificate chain and private key of the TLS-based transports.
+#[cfg(any(feature = "tls", feature = "quic", feature = "http3"))]
 struct Identity {
     certificates: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
@@ -759,7 +779,7 @@ pub struct MultiTransportServer {
     protocol: Arc<dyn JsonRpcProtocol>,
     bind: Vec<IpAddr>,
     ports: [Option<u16>; TRANSPORT_SLOT_COUNT],
-    #[cfg(any(feature = "quic", feature = "http3"))]
+    #[cfg(any(feature = "tls", feature = "quic", feature = "http3"))]
     identity: Option<Identity>,
     limits: ServerLimits,
     shutdown: ServerShutdownPolicy,
@@ -789,7 +809,7 @@ impl MultiTransportServer {
             protocol,
             bind: Vec::new(),
             ports: [None; TRANSPORT_SLOT_COUNT],
-            #[cfg(any(feature = "quic", feature = "http3"))]
+            #[cfg(any(feature = "tls", feature = "quic", feature = "http3"))]
             identity: None,
             limits: ServerLimits::default(),
             shutdown: ServerShutdownPolicy::default(),
@@ -920,6 +940,12 @@ impl MultiTransportServer {
     #[cfg(feature = "tcp")]
     pub fn set_tcp_port(&mut self, port: u16) -> &mut Self {
         self.set_port(TransportKind::Tcp, port)
+    }
+
+    /// TCP port of the TLS-encrypted newline-delimited JSON transport.
+    #[cfg(feature = "tls")]
+    pub fn set_tls_port(&mut self, port: u16) -> &mut Self {
+        self.set_port(TransportKind::Tls, port)
     }
 
     /// UDP port of the reliable datagram transport.
@@ -1107,11 +1133,11 @@ impl MultiTransportServer {
         certificates: Vec<CertificateDer<'static>>,
         key: PrivateKeyDer<'static>,
     ) -> &mut Self {
-        #[cfg(any(feature = "quic", feature = "http3"))]
+        #[cfg(any(feature = "tls", feature = "quic", feature = "http3"))]
         {
             self.identity = Some(Identity { certificates, key });
         }
-        #[cfg(not(any(feature = "quic", feature = "http3")))]
+        #[cfg(not(any(feature = "tls", feature = "quic", feature = "http3")))]
         {
             let _ = (certificates, key);
         }
@@ -1238,7 +1264,7 @@ impl MultiTransportServer {
                 "raw and WebSocket AMQP services require distinct request queues".into(),
             );
         }
-        #[cfg(any(feature = "quic", feature = "http3"))]
+        #[cfg(any(feature = "tls", feature = "quic", feature = "http3"))]
         if self.identity.is_none()
             && let Some(kind) = transports.iter().find(|kind| kind.security().is_tls())
         {
@@ -1445,6 +1471,17 @@ impl MultiTransportServer {
                 (
                     listener.local_addr()?,
                     TcpTransport::new(listener)
+                        .with_runtime(Arc::clone(runtime))
+                        .start(protocol),
+                )
+            }
+            #[cfg(feature = "tls")]
+            TransportKind::Tls => {
+                let listener = bind_tcp(address, &runtime.tcp_tuning)?;
+                let config = self.tls_server_config(TLS_ALPN)?;
+                (
+                    listener.local_addr()?,
+                    TlsTransport::new(listener, config)
                         .with_runtime(Arc::clone(runtime))
                         .start(protocol),
                 )
@@ -1723,6 +1760,25 @@ impl MultiTransportServer {
             address,
             transport,
         })
+    }
+
+    /// QUIC server endpoint (TLS 1.3) bound to `address`.
+    #[cfg(feature = "tls")]
+    fn tls_server_config(&self, alpn: &[u8]) -> io::Result<Arc<rustls::ServerConfig>> {
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no TLS certificate"))?;
+        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(io::Error::other)?
+        .with_no_client_auth()
+        .with_single_cert(identity.certificates.clone(), identity.key.clone_key())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        config.alpn_protocols = vec![alpn.to_vec()];
+        Ok(Arc::new(config))
     }
 
     /// QUIC server endpoint (TLS 1.3) bound to `address`.
@@ -2143,6 +2199,11 @@ mod builder {
             self.set_port(TransportKind::Tcp, port)
         }
 
+        #[cfg(feature = "tls")]
+        pub fn set_tls_port(self, port: u16) -> Builder<BindState, HasTransport> {
+            self.set_port(TransportKind::Tls, port)
+        }
+
         #[cfg(feature = "udp")]
         pub fn set_udp_port(self, port: u16) -> Builder<BindState, HasTransport> {
             self.set_port(TransportKind::Udp, port)
@@ -2300,6 +2361,11 @@ mod builder {
         #[cfg(feature = "tcp")]
         pub fn set_tcp_port(self, port: u16) -> Self {
             self.set_port(TransportKind::Tcp, port)
+        }
+
+        #[cfg(feature = "tls")]
+        pub fn set_tls_port(self, port: u16) -> Self {
+            self.set_port(TransportKind::Tls, port)
         }
 
         #[cfg(feature = "udp")]

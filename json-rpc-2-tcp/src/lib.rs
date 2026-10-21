@@ -27,4 +27,9 @@ pub mod transports {
         pub use crate::client::transports::tcp::*;
         pub use crate::server::transports::tcp::*;
     }
+    #[cfg(feature = "tls")]
+    pub mod tls {
+        pub use crate::client::transports::tls::*;
+        pub use crate::server::transports::tls::*;
+    }
 }
