@@ -2,12 +2,10 @@
 
 use std::{io, sync::Arc, time::Instant};
 
-use futures_util::{SinkExt, StreamExt};
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
 };
-use tokio_util::codec::{Framed, LinesCodec};
 
 use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_transport::JsonRpcProtocol;
@@ -94,7 +92,8 @@ async fn handle_connection(
 ) -> Result<(), io::Error> {
     apply_tcp_stream_tuning(&stream, &runtime.tcp_tuning)?;
     let peer = stream.peer_addr()?;
-    let mut framed = Framed::new(stream, LinesCodec::new_with_max_length(MAX_MESSAGE_BYTES));
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
     let TransportSession {
         context,
         mut push_receiver,
@@ -103,62 +102,100 @@ async fn handle_connection(
     let mut gateway_metadata = None;
     loop {
         let event = tokio::select! {
-            line = framed.next() => (line, None),
-            push = push_receiver.recv() => (None, Some(push)),
+            line = read_limited_line(&mut reader) => ReadEvent::Line(line),
+            push = push_receiver.recv() => ReadEvent::Push(push),
             _ = shutdown.cancelled() => break,
         };
-        if let Some(push) = event.1 {
-            let Some(push) = push else { break };
-            let push = String::from_utf8(push.to_vec())
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            framed
-                .send(push)
-                .await
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut line = match event {
+            ReadEvent::Push(Some(push)) => {
+                write_half.write_all(&push).await?;
+                write_half.write_all(b"\n").await?;
+                write_half.flush().await?;
+                continue;
+            }
+            ReadEvent::Push(None) | ReadEvent::Line(Ok(None)) => break,
+            ReadEvent::Line(Err(error)) => return Err(error),
+            ReadEvent::Line(Ok(Some(line))) => line,
+        };
+        if line.last() == Some(&b'\n') {
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+        }
+        let metadata = std::str::from_utf8(&line)
+            .ok()
+            .map(GatewayRequestMetadata::parse)
+            .transpose()?
+            .flatten();
+        if let Some(metadata) = metadata {
+            if let Some(payload_length) = metadata.payload_length {
+                let mut payload = vec![0; payload_length];
+                reader.read_exact(&mut payload).await?;
+                let message_context = metadata.context(None);
+                process_message(&protocol, &mut write_half, peer, &payload, &message_context)
+                    .await?;
+            } else {
+                gateway_metadata = Some(metadata);
+            }
             continue;
         }
-        // `None` means the client closed its side.
-        let Some(line) = event.0 else { break };
-        let line = line.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if let Some(metadata) = GatewayRequestMetadata::parse(&line)? {
-            gateway_metadata = Some(metadata);
-            continue;
-        }
-        if line.as_bytes() == CONTROL_PING {
+        if line == CONTROL_PING {
             log_control("TCP", peer, "ping", "pong");
-            framed
-                .send(String::from_utf8(CONTROL_PONG.to_vec()).expect("ASCII control payload"))
-                .await
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            write_half.write_all(&CONTROL_PONG).await?;
+            write_half.write_all(b"\n").await?;
+            write_half.flush().await?;
             continue;
         }
-        let started = Instant::now();
         let message_context = gateway_metadata
             .take()
             .map(|metadata| metadata.context(None))
             .unwrap_or_else(|| session.context().clone());
-        let response = protocol
-            .handle_message_with_context(line.as_bytes(), &message_context)
-            .await;
-        log_json_rpc(
-            "TCP",
-            peer,
-            line.as_bytes(),
-            response.as_deref(),
-            started.elapsed(),
-        );
-        if let Some(response) = response {
-            let response = String::from_utf8(response.to_vec())
-                .expect("serialized JSON-RPC responses are valid UTF-8");
-            framed
-                .send(response)
-                .await
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        }
+        process_message(&protocol, &mut write_half, peer, &line, &message_context).await?;
     }
-    let mut stream = framed.into_inner();
-    match stream.shutdown().await {
-        Err(error) if error.kind() != io::ErrorKind::NotConnected => Err(error),
-        _ => Ok(()),
+    write_half.shutdown().await
+}
+
+enum ReadEvent {
+    Line(io::Result<Option<Vec<u8>>>),
+    Push(Option<bytes::Bytes>),
+}
+
+async fn read_limited_line<R>(reader: &mut R) -> io::Result<Option<Vec<u8>>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    let read = reader
+        .take((MAX_MESSAGE_BYTES + 2) as u64)
+        .read_until(b'\n', &mut line)
+        .await?;
+    if read == 0 {
+        return Ok(None);
     }
+    if read > MAX_MESSAGE_BYTES + 1 || line.last() != Some(&b'\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "TCP line exceeds the maximum message size",
+        ));
+    }
+    Ok(Some(line))
+}
+
+async fn process_message(
+    protocol: &Arc<dyn JsonRpcProtocol>,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    peer: std::net::SocketAddr,
+    payload: &[u8],
+    context: &json_rpc_2_transport::TransportContext,
+) -> io::Result<()> {
+    let started = Instant::now();
+    let response = protocol.handle_message_with_context(payload, context).await;
+    log_json_rpc("TCP", peer, payload, response.as_deref(), started.elapsed());
+    if let Some(response) = response {
+        writer.write_all(&response).await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await?;
+    }
+    Ok(())
 }

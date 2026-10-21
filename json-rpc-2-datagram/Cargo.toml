@@ -23,8 +23,5 @@ libsrt-sys = { package = "tstrans-srt-sys", version = "0.8", default-features = 
 tokio = { version = "1.53.3", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
 
-[build-dependencies]
-pkg-config = "0.3"
-
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

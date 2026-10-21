@@ -64,6 +64,7 @@ pub struct TransportContext {
 pub struct GatewayRequestMetadata {
     pub connection_id: String,
     pub transport: String,
+    pub payload_length: Option<usize>,
 }
 
 impl GatewayRequestMetadata {
@@ -80,6 +81,17 @@ impl GatewayRequestMetadata {
         let mut fields = rest.split_ascii_whitespace();
         let connection_id = fields.next();
         let transport = fields.next();
+        let payload_length = fields
+            .next()
+            .map(|value| {
+                value.parse::<usize>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "gateway metadata payload length must be a non-negative integer",
+                    )
+                })
+            })
+            .transpose()?;
         if fields.next().is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -107,9 +119,16 @@ impl GatewayRequestMetadata {
                 "invalid gateway metadata value",
             ));
         }
+        if payload_length.is_some_and(|length| length > json_rpc_2_core::MAX_MESSAGE_BYTES) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "gateway metadata payload exceeds the maximum message size",
+            ));
+        }
         Ok(Some(Self {
             connection_id: connection_id.to_owned(),
             transport: transport.to_owned(),
+            payload_length,
         }))
     }
 
@@ -128,16 +147,18 @@ mod gateway_metadata_tests {
 
     #[test]
     fn parses_gateway_metadata_without_changing_the_payload_contract() {
-        let metadata =
-            GatewayRequestMetadata::parse("JRPC-GW/1 550e8400-e29b-41d4-a716-446655440000 ws-tcp")
-                .unwrap()
-                .unwrap();
+        let metadata = GatewayRequestMetadata::parse(
+            "JRPC-GW/1 550e8400-e29b-41d4-a716-446655440000 ws-tcp 25",
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(
             metadata.connection_id,
             "550e8400-e29b-41d4-a716-446655440000"
         );
         assert_eq!(metadata.transport, "ws-tcp");
+        assert_eq!(metadata.payload_length, Some(25));
     }
 
     #[test]
@@ -156,6 +177,7 @@ mod gateway_metadata_tests {
             "JRPC-GW/1 connection-id",
             "JRPC-GW/1 connection-id tcp extra",
             "JRPC-GW/1 invalid_id tcp",
+            "JRPC-GW/1 connection-id tcp not-a-length",
         ] {
             assert!(
                 GatewayRequestMetadata::parse(line).is_err(),
