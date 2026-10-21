@@ -36,7 +36,7 @@ fn capture(level: Level, run: impl FnOnce()) -> String {
 }
 
 #[test]
-fn debug_logs_full_requests_responses_notifications_and_control() {
+fn debug_logs_opaque_message_metadata_without_payloads() {
     let request = br#"{"jsonrpc":"2.0","method":"echo","params":["hello"],"id":1}"#;
     let response = br#"{"jsonrpc":"2.0","result":["hello"],"id":1}"#;
     let notification = br#"{"jsonrpc":"2.0","method":"notify","params":["notice"]}"#;
@@ -63,20 +63,21 @@ fn debug_logs_full_requests_responses_notifications_and_control() {
         batch_response,
     ] {
         assert!(
-            output.contains(std::str::from_utf8(payload).unwrap()),
+            !output.contains(std::str::from_utf8(payload).unwrap()),
             "{output}"
         );
     }
-    assert!(output.contains("direction=\"received\""), "{output}");
-    assert!(output.contains("direction=\"outgoing\""), "{output}");
-    assert!(output.contains("json-rpc notification without response"));
+    assert!(output.contains(&format!("request_bytes={}", request.len())));
+    assert!(output.contains(&format!("response_bytes={}", response.len())));
+    assert!(output.contains("notification=true"));
+    assert!(output.contains("notification=false"));
     assert!(output.contains("handled control traffic"));
     assert!(output.contains("ping"));
     assert!(output.contains("pong"));
 }
 
 #[test]
-fn debug_does_not_truncate_large_payloads() {
+fn debug_does_not_log_large_payloads() {
     let payload = format!(
         r#"{{"jsonrpc":"2.0","method":"echo","params":["{}"],"id":1}}"#,
         "x".repeat(32_768)
@@ -90,7 +91,9 @@ fn debug_does_not_truncate_large_payloads() {
             Duration::ZERO,
         );
     });
-    assert_eq!(output.matches(&payload).count(), 2);
+    assert!(!output.contains(&payload));
+    assert!(output.contains(&format!("request_bytes={}", payload.len())));
+    assert!(output.contains(&format!("response_bytes={}", payload.len())));
 }
 
 #[test]
