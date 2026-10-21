@@ -11,13 +11,14 @@ use tokio_tungstenite::{
 };
 
 use super::{
-    CancellationToken, WebSocketMessage, WebSocketProtocol, WebSocketTransport,
-    WebSocketTransportFuture,
+    CancellationToken, WebSocketMessage, WebSocketProtocol, WebSocketSessionGuard,
+    WebSocketTransport, WebSocketTransportFuture,
 };
 use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_transport::multiplex::StreamMultiplexor;
 use json_rpc_2_transport::{
-    TransportRuntime, apply_tcp_stream_tuning, log_control, log_json_rpc, log_transport_error,
+    TransportRuntime, TransportSession, apply_tcp_stream_tuning, log_control, log_json_rpc,
+    log_transport_error,
 };
 
 const MAX_WS_MESSAGE_BYTES: usize = MAX_MESSAGE_BYTES;
@@ -109,10 +110,16 @@ async fn run_websocket_session(
     shutdown: CancellationToken,
     runtime: Arc<TransportRuntime>,
 ) {
+    let mut session = TransportSession::new("ws-tcp", true);
+    let _session_guard = WebSocketSessionGuard::new(Arc::clone(&protocol), session.context.clone());
     loop {
-        let message = tokio::select! {
-            message = websocket.next() => message,
-            _ = shutdown.cancelled() => {
+        let event = tokio::select! {
+            message = websocket.next() => SessionEvent::Frame(message),
+            payload = session.push_receiver.recv() => SessionEvent::Push(payload),
+            _ = shutdown.cancelled() => SessionEvent::Shutdown,
+        };
+        let message = match event {
+            SessionEvent::Shutdown => {
                 close_session(
                     websocket,
                     CloseCode::Away,
@@ -122,6 +129,29 @@ async fn run_websocket_session(
                 .await;
                 return;
             }
+            SessionEvent::Push(Some(payload)) => {
+                if payload.len() > MAX_WS_MESSAGE_BYTES {
+                    close_session(
+                        websocket,
+                        CloseCode::Size,
+                        "push message too large",
+                        runtime.close_timeout(),
+                    )
+                    .await;
+                    return;
+                }
+                let message = match String::from_utf8(payload.to_vec()) {
+                    Ok(text) => Message::Text(text.into()),
+                    Err(_) => Message::Binary(payload),
+                };
+                if websocket.send(message).await.is_err() {
+                    return;
+                }
+                log_control("WebSocket/TCP", peer, "server_push", "sent");
+                continue;
+            }
+            SessionEvent::Push(None) => return,
+            SessionEvent::Frame(message) => message,
         };
         let message = match message {
             Some(Ok(message)) => message,
@@ -173,7 +203,10 @@ async fn run_websocket_session(
             WebSocketMessage::Binary(data) => data.to_vec(),
         };
         let started = Instant::now();
-        if let Some(response) = protocol.handle_message(request).await {
+        if let Some(response) = protocol
+            .handle_message_with_context(request, &session.context)
+            .await
+        {
             let response = match response {
                 WebSocketMessage::Text(text) => {
                     let response_bytes = text.as_bytes().to_vec();
@@ -212,6 +245,12 @@ async fn run_websocket_session(
     }
 }
 
+enum SessionEvent {
+    Frame(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
+    Push(Option<Bytes>),
+    Shutdown,
+}
+
 async fn close_session(
     mut websocket: WebSocketStream<TcpStream>,
     code: CloseCode,
@@ -229,4 +268,97 @@ async fn close_session(
         while let Some(Ok(_)) = websocket.next().await {}
     })
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use futures_util::{SinkExt, StreamExt};
+    use json_rpc_2_core::WebSocketFuture;
+    use json_rpc_2_transport::{CancellationToken, TransportContext, TransportRuntime};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_tungstenite::{
+        WebSocketStream,
+        tungstenite::{Message, protocol::WebSocketConfig},
+    };
+
+    use super::{Role, WebSocketMessage, WebSocketProtocol, serve};
+
+    struct SessionEcho {
+        opened: tokio::sync::mpsc::UnboundedSender<TransportContext>,
+    }
+
+    impl WebSocketProtocol for SessionEcho {
+        fn handle_message<'a>(&'a self, message: WebSocketMessage) -> WebSocketFuture<'a> {
+            Box::pin(async move { Some(message) })
+        }
+
+        fn handle_message_with_context<'a>(
+            &'a self,
+            message: WebSocketMessage,
+            context: &'a TransportContext,
+        ) -> WebSocketFuture<'a> {
+            Box::pin(async move {
+                match message {
+                    WebSocketMessage::Text(text) => Some(WebSocketMessage::Text(format!(
+                        "{}:{}:{text}",
+                        context.transport, context.connection_id
+                    ))),
+                    message => Some(message),
+                }
+            })
+        }
+
+        fn session_opened(&self, context: &TransportContext) {
+            let _ = self.opened.send(context.clone());
+            if let Some(sender) = &context.push_sender {
+                let _ = sender.send(Bytes::from_static(b"server-push"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_tcp_preserves_session_context_and_delivers_push() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (opened, mut sessions) = tokio::sync::mpsc::unbounded_channel();
+        let protocol = Arc::new(SessionEcho { opened });
+        let shutdown = CancellationToken::new();
+        let server = tokio::spawn(serve(
+            listener,
+            protocol,
+            shutdown.clone(),
+            Arc::new(TransportRuntime::default()),
+        ));
+
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut client: WebSocketStream<TcpStream> = WebSocketStream::from_raw_socket(
+            stream,
+            Role::Client,
+            Some(WebSocketConfig::default()),
+        )
+        .await;
+        let context = tokio::time::timeout(std::time::Duration::from_secs(2), sessions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(context.transport, "ws-tcp");
+        let connection_id = context.connection_id;
+
+        assert_eq!(
+            client.next().await.unwrap().unwrap(),
+            Message::Text("server-push".into())
+        );
+        client.send(Message::Text("request".into())).await.unwrap();
+        assert_eq!(
+            client.next().await.unwrap().unwrap(),
+            Message::Text(format!("ws-tcp:{connection_id}:request").into())
+        );
+
+        drop(client);
+        shutdown.cancel();
+        server.await.unwrap().unwrap();
+    }
 }
