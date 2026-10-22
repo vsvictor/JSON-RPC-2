@@ -100,18 +100,30 @@ async fn serve_session(
     requests: Arc<Semaphore>,
 ) -> io::Result<()> {
     let socket = Arc::new(socket);
+    let mut session = json_rpc_2_transport::TransportSession::new("srt", true);
+    let guard =
+        json_rpc_2_transport::ProtocolSessionGuard::new(protocol.clone(), session.context.clone());
     let mut handlers = JoinSet::new();
     let result = async {
-        loop {
-            let frame = tokio::select! {
+        'receiving: loop {
+            let receive = socket.recv();
+            tokio::pin!(receive);
+            let frame = loop { tokio::select! {
                 biased;
-                _ = shutdown.cancelled() => break,
+                _ = shutdown.cancelled() => break 'receiving,
                 Some(result) = handlers.join_next(), if !handlers.is_empty() => {
                     result.map_err(io::Error::other)??;
+                    if protocol.session_close_requested(&session.context) {
+                        break 'receiving;
+                    }
                     continue;
                 }
-                result = socket.recv() => result?,
-            };
+                Some(payload) = session.push_receiver.recv() => {
+                    socket.send(Frame { kind: Kind::Push, id: 0, payload }).await?;
+                    continue;
+                }
+                result = &mut receive => break result?,
+            }};
             match frame.kind {
                 Kind::Ping => {
                     socket.send(Frame { kind: Kind::Pong, id: frame.id, payload: Bytes::new() }).await?;
@@ -124,6 +136,7 @@ async fn serve_session(
                     };
                     let socket = socket.clone();
                     let protocol = protocol.clone();
+                    let context = session.context.clone();
                     let metrics = runtime.metrics.clone();
                     handlers.spawn(async move {
                         let _permit = permit;
@@ -134,9 +147,8 @@ async fn serve_session(
                         }
                         let _metric = RequestMetric(metrics);
                         let started = std::time::Instant::now();
-                        let response = json_rpc_2_transport::dispatch_stateless(
-                            protocol.as_ref(), frame.payload.clone(), "srt",
-                        ).await;
+                        let response = protocol.handle_owned_message(frame.payload.clone(), &context)
+                            .await.map(json_rpc_2_transport::TransportMessage::into_bytes);
                         log_json_rpc("SRT", "peer", &frame.payload, response.as_deref(), started.elapsed());
                         let (kind, payload) = match response {
                             Some(payload) => (Kind::Response, payload),
@@ -150,6 +162,8 @@ async fn serve_session(
         }
         Ok(())
     }.await;
+    drop(guard);
+    drop(session.push_receiver);
     let result = match result {
         Ok(()) => {
             tokio::time::timeout(runtime.close_timeout(), async {

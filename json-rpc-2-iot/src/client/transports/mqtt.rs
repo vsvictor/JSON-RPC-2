@@ -9,6 +9,11 @@ pub struct MqttClientTransport {
     inner: Client,
 }
 impl MqttClientTransport {
+    /// Receive an unsolicited server push without allocating an RPC correlation ID.
+    /// Calls may run concurrently with requests. Reconnect resets the receive queue.
+    pub async fn receive_push(&self) -> Result<Bytes, TransportError> {
+        self.inner.receive_push().await
+    }
     pub async fn connect(address: SocketAddr) -> Result<Self, TransportError> {
         Self::connect_with_config(MqttConfig::for_address(address)).await
     }

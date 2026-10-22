@@ -1,10 +1,12 @@
 //! WebSocket-over-HTTP/3 extended CONNECT adapter (RFC 9220).
+//!
+//! Each accepted CONNECT stream owns its persistent context and push channel.
 
 use std::{io, sync::Arc, time::Instant};
 
 use super::{
-    CancellationToken, WebSocketMessage, WebSocketProtocol, WebSocketTransport,
-    WebSocketTransportFuture,
+    CancellationToken, WebSocketMessage, WebSocketProtocol, WebSocketSessionGuard,
+    WebSocketTransport, WebSocketTransportFuture,
 };
 use axum::http::{HeaderValue, Method, Response, StatusCode, header};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -14,7 +16,7 @@ use h3::{ext::Protocol, server::RequestResolver};
 use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_transport::multiplex::StreamMultiplexor;
 use json_rpc_2_transport::{
-    H3_NO_ERROR, TransportRuntime, log_control, log_json_rpc, log_transport_error,
+    H3_NO_ERROR, TransportRuntime, TransportSession, log_control, log_json_rpc, log_transport_error,
 };
 use quinn::Endpoint;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -214,7 +216,7 @@ where
             log_transport_error("WebSocket/HTTP/3", peer, "recv-bridge", error.as_ref());
         }
     });
-    let send_task = tokio::spawn(async move {
+    let mut send_task = tokio::spawn(async move {
         if let Err(error) = copy_io_to_h3(ws_reader, send_stream).await {
             log_transport_error("WebSocket/HTTP/3", peer, "send-bridge", error.as_ref());
         }
@@ -224,12 +226,19 @@ where
     // bridge flushes the final Close frame, finishes the H3 stream and exits.
     // The peer then finishes its half; give it a bounded time to do so.
     run_websocket_session(ws_io, peer, protocol, shutdown, runtime.clone()).await;
-    let _ = send_task.await;
-    if tokio::time::timeout(runtime.close_timeout(), &mut recv_task)
-        .await
-        .is_err()
-    {
-        recv_task.abort();
+    for (task, operation) in [
+        (&mut send_task, "send-bridge"),
+        (&mut recv_task, "recv-bridge"),
+    ] {
+        match tokio::time::timeout(runtime.close_timeout(), &mut *task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log_transport_error("WebSocket/HTTP/3", peer, operation, &error),
+            Err(error) => {
+                log_transport_error("WebSocket/HTTP/3", peer, operation, &error);
+                task.abort();
+                let _ = task.await;
+            }
+        }
     }
     Ok(())
 }
@@ -309,11 +318,39 @@ async fn run_websocket_session(
         .max_message_size(Some(MAX_WS_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_WS_MESSAGE_BYTES));
     let mut websocket = WebSocketStream::from_raw_socket(stream, Role::Server, Some(config)).await;
+    let mut session = TransportSession::new("ws-http3", true);
+    let mut guard = Some(WebSocketSessionGuard::new(
+        protocol.clone(),
+        session.context.clone(),
+    ));
 
     loop {
         let message = tokio::select! {
             message = websocket.next() => message,
+            payload = session.push_receiver.recv() => {
+                let Some(payload) = payload else { return };
+                if payload.len() > MAX_WS_MESSAGE_BYTES {
+                    guard.take();
+                    close_session(websocket, CloseCode::Size, "push message too large", runtime.close_timeout()).await;
+                    return;
+                }
+                let message = if json_rpc_2_transport::gateway::is_gateway_frame(&payload) {
+                    Message::Binary(payload)
+                } else {
+                    match std::str::from_utf8(&payload) {
+                        Ok(text) => Message::Text(text.to_owned().into()),
+                        Err(_) => Message::Binary(payload),
+                    }
+                };
+                if let Err(error) = websocket.send(message).await {
+                    log_transport_error("WebSocket/HTTP/3", peer, "push", &error);
+                    return;
+                }
+                log_control("WebSocket/HTTP/3", peer, "server_push", "sent");
+                continue;
+            }
             _ = shutdown.cancelled() => {
+                guard.take();
                 close_session(
                     websocket,
                     CloseCode::Away,
@@ -336,6 +373,7 @@ async fn run_websocket_session(
         let request = match message {
             Message::Text(text) => {
                 if text.len() > MAX_WS_MESSAGE_BYTES {
+                    guard.take();
                     close_session(
                         websocket,
                         CloseCode::Size,
@@ -349,6 +387,7 @@ async fn run_websocket_session(
             }
             Message::Binary(data) => {
                 if data.len() > MAX_WS_MESSAGE_BYTES {
+                    guard.take();
                     close_session(
                         websocket,
                         CloseCode::Size,
@@ -362,20 +401,27 @@ async fn run_websocket_session(
             }
             Message::Ping(payload) => {
                 log_control("WebSocket/HTTP/3", peer, "ping", "pong");
-                if websocket.send(Message::Pong(payload)).await.is_err() {
+                if let Err(error) = websocket.send(Message::Pong(payload)).await {
+                    log_transport_error("WebSocket/HTTP/3", peer, "pong", &error);
                     return;
                 }
                 continue;
             }
-            // tungstenite queues the Close reply; the next read flushes it
-            // and ends the stream, completing the closing handshake.
-            Message::Pong(_) | Message::Close(_) | Message::Frame(_) => continue,
+            Message::Close(_) => {
+                guard.take();
+                if let Err(error) = websocket.flush().await {
+                    log_transport_error("WebSocket/HTTP/3", peer, "close reply", &error);
+                }
+                return;
+            }
+            Message::Pong(_) | Message::Frame(_) => continue,
         };
 
         let request_bytes = super::message_bytes_for_log(&request);
         let started = Instant::now();
-        if let Some(response) =
-            super::handle_stateless_message(protocol.as_ref(), request, "ws-http3").await
+        if let Some(response) = protocol
+            .handle_message_with_context(request, &session.context)
+            .await
         {
             let response = match response {
                 WebSocketMessage::Text(text) => {
@@ -399,7 +445,8 @@ async fn run_websocket_session(
                     Message::Binary(data)
                 }
             };
-            if websocket.send(response).await.is_err() {
+            if let Err(error) = websocket.send(response).await {
+                log_transport_error("WebSocket/HTTP/3", peer, "response", &error);
                 return;
             }
         } else {
@@ -426,11 +473,24 @@ async fn close_session(
         code,
         reason: reason.into(),
     };
-    if websocket.close(Some(frame)).await.is_err() {
+    if let Err(error) = websocket.close(Some(frame)).await {
+        log_transport_error("WebSocket/HTTP/3", "session", "close", &error);
         return;
     }
-    let _ = tokio::time::timeout(timeout, async {
-        while let Some(Ok(_)) = websocket.next().await {}
+    if let Err(error) = tokio::time::timeout(timeout, async {
+        while let Some(message) = websocket.next().await {
+            match message {
+                Ok(Message::Close(_)) => break,
+                Err(error) => {
+                    log_transport_error("WebSocket/HTTP/3", "session", "close reply", &error);
+                    break;
+                }
+                _ => {}
+            }
+        }
     })
-    .await;
+    .await
+    {
+        log_transport_error("WebSocket/HTTP/3", "session", "close timeout", &error);
+    }
 }

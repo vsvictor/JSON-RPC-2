@@ -11,6 +11,8 @@ struct Envelope {
     correlation_id: String,
     #[serde(default)]
     control: bool,
+    #[serde(default)]
+    metadata: Metadata,
 }
 struct Publish {
     destination: String,
@@ -37,12 +39,14 @@ impl Session {
         reply_to: Option<String>,
         correlation_id: String,
         control: bool,
+        metadata: Metadata,
     ) -> Result<(), TransportError> {
         let data = serde_json::to_vec(&Envelope {
             payload: payload.to_vec(),
             reply_to,
             correlation_id,
             control,
+            metadata,
         })
         .map_err(|_| TransportError::new("MQTT envelope encoding failed"))?;
         let (done, wait) = oneshot::channel();
@@ -154,7 +158,8 @@ pub(super) async fn open(
                         if let Ok(envelope) = serde_json::from_slice::<Envelope>(&packet.payload) {
                             if envelope.payload.len() > max_payload || envelope.correlation_id.len() > 256 { continue; }
                             if envelope.reply_to.as_ref().is_some_and(|topic| !topic.starts_with("json-rpc-2/replies/") || topic.contains(['#', '+', '\0'])) { continue; }
-                            let message = Message { payload: envelope.payload.into(), reply_to: envelope.reply_to, correlation_id: envelope.correlation_id, control: envelope.control,
+                            if envelope.metadata.session.as_ref().is_some_and(|session| !session.push_to.starts_with("json-rpc-2/replies/") || session.push_to.contains(['#', '+', '\0'])) { continue; }
+                            let message = Message { payload: envelope.payload.into(), reply_to: envelope.reply_to, correlation_id: envelope.correlation_id, control: envelope.control, metadata: envelope.metadata,
                                 #[cfg(feature = "amqp")] ack: None };
                             // A full dispatch queue must not block network polling / PUBACKs.
                             if incoming.try_send(message).is_err() { break; }

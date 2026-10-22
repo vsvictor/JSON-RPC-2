@@ -12,6 +12,13 @@ pub struct SrtWebSocketClientTransport {
 }
 
 impl SrtWebSocketClientTransport {
+    pub async fn recv_push(&self) -> Result<json_rpc_2_core::WebSocketMessage, TransportError> {
+        let frame = self.inner.inner.recv_push().await?;
+        json_rpc_2_core::decode_websocket_message(&frame)
+            .map_err(json_rpc_2_transport::transport_error)?
+            .ok_or_else(|| TransportError::new("received WebSocket close instead of push"))
+    }
+
     pub async fn connect(
         address: SocketAddr,
         passphrase: impl Into<String>,

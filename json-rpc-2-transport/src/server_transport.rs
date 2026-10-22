@@ -55,6 +55,11 @@ pub trait JsonRpcProtocol: Send + Sync + 'static {
 
     fn session_closed(&self, _context: &TransportContext) {}
 
+    /// Carrier adapters may request connection teardown after a control frame.
+    fn session_close_requested(&self, _context: &TransportContext) -> bool {
+        false
+    }
+
     /// Retain separate response envelope/payload buffers on supporting carriers.
     fn handle_transport_message<'a>(
         &'a self,

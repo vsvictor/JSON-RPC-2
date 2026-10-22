@@ -87,6 +87,9 @@ async fn handle_connection(
     shutdown: CancellationToken,
 ) -> io::Result<()> {
     let peer = stream.peer_addr();
+    let session = json_rpc_2_transport::TransportSession::new("dccp", false);
+    let _guard =
+        json_rpc_2_transport::ProtocolSessionGuard::new(protocol.clone(), session.context.clone());
     loop {
         let message = tokio::select! {
             message = stream.recv() => message,
@@ -102,9 +105,13 @@ async fn handle_connection(
         }
         let started = Instant::now();
         let message = bytes::Bytes::from(message);
-        let response =
-            json_rpc_2_transport::dispatch_stateless(protocol.as_ref(), message.clone(), "dccp")
-                .await;
+        let response = protocol
+            .handle_owned_message(message.clone(), &session.context)
+            .await
+            .map(json_rpc_2_transport::TransportMessage::into_bytes);
+        if protocol.session_close_requested(&session.context) {
+            break;
+        }
         log_json_rpc(
             "DCCP",
             peer,

@@ -1,8 +1,9 @@
 use super::*;
 use futures_util::StreamExt;
 use lapin::{
-    BasicProperties, Channel, Confirmation, Connection, ConnectionProperties, options::*,
-    types::FieldTable,
+    BasicProperties, Channel, Confirmation, Connection, ConnectionProperties,
+    options::*,
+    types::{AMQPValue, FieldTable},
 };
 
 pub(super) struct Session {
@@ -24,6 +25,7 @@ impl Session {
         reply_to: Option<String>,
         correlation_id: String,
         control: bool,
+        metadata: Metadata,
     ) -> Result<(), TransportError> {
         let mut properties = BasicProperties::default()
             .with_correlation_id(correlation_id.into())
@@ -39,6 +41,16 @@ impl Session {
         if let Some(reply_to) = reply_to {
             properties = properties.with_reply_to(reply_to.into());
         }
+        let mut headers = FieldTable::default();
+        headers.insert(
+            "json-rpc-2-session".into(),
+            AMQPValue::LongString(
+                serde_json::to_vec(&metadata)
+                    .map_err(|_| TransportError::new("AMQP metadata encoding failed"))?
+                    .into(),
+            ),
+        );
+        properties = properties.with_headers(headers);
         let confirmation = self
             .channel
             .basic_publish(
@@ -175,6 +187,18 @@ pub(super) async fn open(
                         .kind()
                         .as_ref()
                         .is_some_and(|kind| kind.as_str() == "json-rpc-2.ping"),
+                    metadata: delivery
+                        .properties
+                        .headers()
+                        .as_ref()
+                        .and_then(|headers| headers.inner().get("json-rpc-2-session"))
+                        .and_then(|value| match value {
+                            AMQPValue::LongString(value) => {
+                                serde_json::from_slice(value.as_bytes()).ok()
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default(),
                     ack: Some(delivery.acker),
                 };
                 if incoming.send(message).await.is_err() {

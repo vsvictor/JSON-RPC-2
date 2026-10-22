@@ -34,6 +34,7 @@ pub(crate) enum Kind {
     Pong = 5,
     Drain = 6,
     Drained = 7,
+    Push = 8,
 }
 
 pub(crate) struct Frame {
@@ -388,6 +389,7 @@ impl NativeSocket {
             5 => Kind::Pong,
             6 => Kind::Drain,
             7 => Kind::Drained,
+            8 => Kind::Push,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

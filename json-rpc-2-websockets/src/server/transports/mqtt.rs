@@ -1,10 +1,9 @@
 //! WebSocket application envelopes through MQTT 3.1.1 brokers.
 use super::{WebSocketProtocol, WebSocketTransport, WebSocketTransportFuture};
-use bytes::Bytes;
 pub use json_rpc_2_iot::MqttConfig;
 use json_rpc_2_iot::server::transports::mqtt::MqttTransport;
 use json_rpc_2_transport::Transport;
-use json_rpc_2_transport::{CancellationToken, JsonRpcProtocol, ProtocolFuture, TransportRuntime};
+use json_rpc_2_transport::{CancellationToken, TransportRuntime};
 use std::{io, sync::Arc};
 
 pub struct MqttWebSocketTransport {
@@ -32,24 +31,10 @@ impl WebSocketTransport for MqttWebSocketTransport {
         protocol: Arc<dyn WebSocketProtocol>,
         shutdown: CancellationToken,
     ) -> WebSocketTransportFuture {
-        self.inner.run(Arc::new(Adapter(protocol)), shutdown)
-    }
-}
-struct Adapter(Arc<dyn WebSocketProtocol>);
-impl JsonRpcProtocol for Adapter {
-    fn handle_message<'a>(&'a self, message: &'a [u8]) -> ProtocolFuture<'a> {
-        Box::pin(async move {
-            let message = json_rpc_2_core::decode_websocket_message(message).ok()??;
-            let response = super::handle_broker_message(
-                self.0.as_ref(),
-                message,
-                "WebSocket/MQTT",
-            )
-            .await?;
-            json_rpc_2_core::encode_websocket_message(&response)
-                .ok()
-                .map(Bytes::from)
-        })
+        self.inner.run(
+            Arc::new(super::BrokerWebSocketAdapter::new(protocol, "ws-mqtt")),
+            shutdown,
+        )
     }
 }
 pub async fn serve(
@@ -60,7 +45,7 @@ pub async fn serve(
 ) -> io::Result<()> {
     json_rpc_2_iot::server::transports::mqtt::serve(
         config,
-        Arc::new(Adapter(protocol)),
+        Arc::new(super::BrokerWebSocketAdapter::new(protocol, "ws-mqtt")),
         shutdown,
         runtime,
     )

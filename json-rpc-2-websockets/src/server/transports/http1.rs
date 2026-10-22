@@ -1,4 +1,7 @@
 //! WebSocket-over-HTTP/1.1 Upgrade adapter.
+//!
+//! Each upgraded connection owns a persistent context and receives protocol push
+//! on that same WebSocket. Close removes the context before flushing its reply.
 
 use std::{io, sync::Arc, time::Instant};
 
@@ -18,12 +21,14 @@ use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
 use super::{
-    CancellationToken, WebSocketMessage, WebSocketProtocol, WebSocketTransport,
-    WebSocketTransportFuture,
+    CancellationToken, WebSocketMessage, WebSocketProtocol, WebSocketSessionGuard,
+    WebSocketTransport, WebSocketTransportFuture,
 };
 use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_transport::multiplex::{StreamMultiplexor, StreamMultiplexorHandle};
-use json_rpc_2_transport::{TransportRuntime, log_control, log_json_rpc, log_transport_error};
+use json_rpc_2_transport::{
+    TransportRuntime, TransportSession, log_control, log_json_rpc, log_transport_error,
+};
 
 /// WebSocket transport established using the HTTP/1.1 Upgrade mechanism.
 pub struct Http1WebSocketTransport {
@@ -247,10 +252,38 @@ async fn websocket_session(
     shutdown: CancellationToken,
     runtime: Arc<TransportRuntime>,
 ) {
+    let mut session = TransportSession::new("ws-http1", true);
+    let mut guard = Some(WebSocketSessionGuard::new(
+        protocol.clone(),
+        session.context.clone(),
+    ));
     loop {
         let message = tokio::select! {
             message = socket.next() => message,
+            payload = session.push_receiver.recv() => {
+                let Some(payload) = payload else { return };
+                if payload.len() > MAX_MESSAGE_BYTES {
+                    guard.take();
+                    close_session(socket, close_code::SIZE, "push message too large", runtime.close_timeout()).await;
+                    return;
+                }
+                let message = if json_rpc_2_transport::gateway::is_gateway_frame(&payload) {
+                    Message::Binary(payload)
+                } else {
+                    match std::str::from_utf8(&payload) {
+                        Ok(text) => Message::Text(text.to_owned().into()),
+                        Err(_) => Message::Binary(payload),
+                    }
+                };
+                if let Err(error) = socket.send(message).await {
+                    log_transport_error("WebSocket/HTTP/1.1", peer, "push", &error);
+                    return;
+                }
+                log_control("WebSocket/HTTP/1.1", peer, "server_push", "sent");
+                continue;
+            }
             _ = shutdown.cancelled() => {
+                guard.take();
                 close_session(
                     socket,
                     close_code::AWAY,
@@ -261,10 +294,18 @@ async fn websocket_session(
                 return;
             }
         };
-        let Some(Ok(message)) = message else { return };
+        let message = match message {
+            Some(Ok(message)) => message,
+            None => return,
+            Some(Err(error)) => {
+                log_transport_error("WebSocket/HTTP/1.1", peer, "frame", &error);
+                return;
+            }
+        };
         let request = match message {
             Message::Text(text) => {
                 if text.len() > MAX_MESSAGE_BYTES {
+                    guard.take();
                     close_session(
                         socket,
                         close_code::SIZE,
@@ -278,6 +319,7 @@ async fn websocket_session(
             }
             Message::Binary(data) => {
                 if data.len() > MAX_MESSAGE_BYTES {
+                    guard.take();
                     close_session(
                         socket,
                         close_code::SIZE,
@@ -291,52 +333,60 @@ async fn websocket_session(
             }
             Message::Ping(data) => {
                 log_control("WebSocket/HTTP/1.1", peer, "ping", "pong");
-                if socket.send(Message::Pong(data)).await.is_err() {
+                if let Err(error) = socket.send(Message::Pong(data)).await {
+                    log_transport_error("WebSocket/HTTP/1.1", peer, "pong", &error);
                     return;
                 }
                 continue;
             }
             Message::Pong(_) => continue,
-            // The WebSocket library queues the Close reply; the next read
-            // flushes it and ends the stream, completing the handshake.
-            Message::Close(_) => continue,
+            Message::Close(_) => {
+                guard.take();
+                if let Err(error) = futures_util::SinkExt::flush(&mut socket).await {
+                    log_transport_error("WebSocket/HTTP/1.1", peer, "close reply", &error);
+                }
+                return;
+            }
         };
         let request_bytes = super::message_bytes_for_log(&request);
         let started = Instant::now();
-        let response =
-            match super::handle_stateless_message(protocol.as_ref(), request, "ws-http1").await {
-                Some(WebSocketMessage::Text(text)) => {
-                    log_json_rpc(
-                        "WebSocket/HTTP/1.1",
-                        peer,
-                        &request_bytes,
-                        Some(text.as_bytes()),
-                        started.elapsed(),
-                    );
-                    Message::Text(text.into())
-                }
-                Some(WebSocketMessage::Binary(data)) => {
-                    log_json_rpc(
-                        "WebSocket/HTTP/1.1",
-                        peer,
-                        &request_bytes,
-                        Some(data.as_ref()),
-                        started.elapsed(),
-                    );
-                    Message::Binary(data)
-                }
-                None => {
-                    log_json_rpc(
-                        "WebSocket/HTTP/1.1",
-                        peer,
-                        &request_bytes,
-                        None,
-                        started.elapsed(),
-                    );
-                    continue;
-                }
-            };
-        if socket.send(response).await.is_err() {
+        let response = match protocol
+            .handle_message_with_context(request, &session.context)
+            .await
+        {
+            Some(WebSocketMessage::Text(text)) => {
+                log_json_rpc(
+                    "WebSocket/HTTP/1.1",
+                    peer,
+                    &request_bytes,
+                    Some(text.as_bytes()),
+                    started.elapsed(),
+                );
+                Message::Text(text.into())
+            }
+            Some(WebSocketMessage::Binary(data)) => {
+                log_json_rpc(
+                    "WebSocket/HTTP/1.1",
+                    peer,
+                    &request_bytes,
+                    Some(data.as_ref()),
+                    started.elapsed(),
+                );
+                Message::Binary(data)
+            }
+            None => {
+                log_json_rpc(
+                    "WebSocket/HTTP/1.1",
+                    peer,
+                    &request_bytes,
+                    None,
+                    started.elapsed(),
+                );
+                continue;
+            }
+        };
+        if let Err(error) = socket.send(response).await {
+            log_transport_error("WebSocket/HTTP/1.1", peer, "response", &error);
             return;
         }
     }
@@ -354,15 +404,24 @@ async fn close_session(
         code,
         reason: reason.into(),
     };
-    if socket.send(Message::Close(Some(frame))).await.is_err() {
+    if let Err(error) = socket.send(Message::Close(Some(frame))).await {
+        log_transport_error("WebSocket/HTTP/1.1", "session", "close", &error);
         return;
     }
-    let _ = tokio::time::timeout(timeout, async {
-        while let Some(Ok(message)) = socket.next().await {
-            if matches!(message, Message::Close(_)) {
-                break;
+    if let Err(error) = tokio::time::timeout(timeout, async {
+        while let Some(message) = socket.next().await {
+            match message {
+                Ok(Message::Close(_)) => break,
+                Err(error) => {
+                    log_transport_error("WebSocket/HTTP/1.1", "session", "close reply", &error);
+                    break;
+                }
+                _ => {}
             }
         }
     })
-    .await;
+    .await
+    {
+        log_transport_error("WebSocket/HTTP/1.1", "session", "close timeout", &error);
+    }
 }

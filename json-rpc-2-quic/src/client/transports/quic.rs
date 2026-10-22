@@ -53,6 +53,18 @@ impl QuicClientTransport {
             .map_err(transport_error)
     }
 
+    /// Receive one server-initiated message on its own unidirectional stream.
+    /// Push traffic never shares a request's response stream.
+    pub async fn recv_push(&self) -> Result<Bytes, TransportError> {
+        let connection = self.current_connection().await?;
+        let mut stream = connection.accept_uni().await.map_err(transport_error)?;
+        stream
+            .read_to_end(MAX_MESSAGE_BYTES)
+            .await
+            .map(Bytes::from)
+            .map_err(transport_error)
+    }
+
     async fn current_connection(&self) -> Result<Connection, TransportError> {
         self.connection
             .lock()

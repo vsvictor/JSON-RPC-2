@@ -19,7 +19,7 @@ use json_rpc_2_transport::{
     ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
     RpcClientTransport, TransportError, closed, expects_response,
 };
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use native::{Frame, Kind, NativeSocket};
@@ -30,6 +30,7 @@ struct Connection {
     socket: Arc<NativeSocket>,
     pending: Pending,
     stop: CancellationToken,
+    push_receiver: Mutex<mpsc::Receiver<Bytes>>,
 }
 
 impl Drop for Connection {
@@ -115,10 +116,12 @@ impl SrtClientTransport {
         );
         let pending: Pending = Arc::new(StdMutex::new(HashMap::new()));
         let stop = CancellationToken::new();
+        let (pushes, push_receiver) = mpsc::channel(1024);
         let connection = Arc::new(Connection {
             socket: socket.clone(),
             pending: pending.clone(),
             stop: stop.clone(),
+            push_receiver: Mutex::new(push_receiver),
         });
         tokio::spawn(async move {
             let error = loop {
@@ -127,6 +130,11 @@ impl SrtClientTransport {
                     result = socket.recv() => result,
                 };
                 match result {
+                    Ok(frame) if frame.kind == Kind::Push && frame.id == 0 => {
+                        if let Err(error) = pushes.try_send(frame.payload) {
+                            break format!("SRT push receiver unavailable: {error}");
+                        }
+                    }
                     Ok(frame) if frame.kind == Kind::Drain => {
                         // Ordered SRT messages ensure all prior responses have
                         // reached their pending callers before this barrier ACK.
@@ -151,11 +159,22 @@ impl SrtClientTransport {
                 }
             };
             socket.close();
+            stop.cancel();
             for (_, sender) in pending.lock().unwrap().drain() {
                 let _ = sender.send(Err(error.clone()));
             }
         });
         Ok(connection)
+    }
+
+    /// Receive a push independently of correlated request acknowledgements.
+    pub async fn recv_push(&self) -> Result<Bytes, TransportError> {
+        let connection = self.state.lock().await.clone().ok_or_else(closed)?;
+        let mut receiver = connection.push_receiver.lock().await;
+        tokio::select! {
+            payload = receiver.recv() => payload.ok_or_else(closed),
+            _ = connection.stop.cancelled() => Err(closed()),
+        }
     }
 
     async fn exchange(

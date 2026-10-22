@@ -87,11 +87,19 @@ async fn handle_connection(
     shutdown: CancellationToken,
 ) -> io::Result<()> {
     let peer = stream.peer_addr();
+    let mut session = json_rpc_2_transport::TransportSession::new("sctp", true);
+    let _guard =
+        json_rpc_2_transport::ProtocolSessionGuard::new(protocol.clone(), session.context.clone());
     loop {
-        let message = tokio::select! {
-            message = stream.recv() => message,
-            _ = shutdown.cancelled() => break,
-        }?;
+        let receive = stream.recv();
+        tokio::pin!(receive);
+        let message = loop {
+            tokio::select! {
+                message = &mut receive => break message?,
+                Some(push) = session.push_receiver.recv() => stream.send(&push).await?,
+                _ = shutdown.cancelled() => return Ok(()),
+            }
+        };
         if message.is_empty() {
             break;
         }
@@ -102,9 +110,13 @@ async fn handle_connection(
         }
         let started = Instant::now();
         let message = bytes::Bytes::from(message);
-        let response =
-            json_rpc_2_transport::dispatch_stateless(protocol.as_ref(), message.clone(), "sctp")
-                .await;
+        let response = protocol
+            .handle_owned_message(message.clone(), &session.context)
+            .await
+            .map(json_rpc_2_transport::TransportMessage::into_bytes);
+        if protocol.session_close_requested(&session.context) {
+            break;
+        }
         log_json_rpc(
             "SCTP",
             peer,

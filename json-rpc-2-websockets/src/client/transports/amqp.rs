@@ -12,6 +12,17 @@ pub struct AmqpWebSocketClientTransport {
 }
 
 impl AmqpWebSocketClientTransport {
+    /// Receive and decode an unsolicited server WebSocket push.
+    pub async fn receive_push(&self) -> Result<bytes::Bytes, TransportError> {
+        let frame = self.inner.inner().receive_push().await?;
+        match json_rpc_2_core::decode_websocket_message(&frame).map_err(TransportError::new)? {
+            Some(json_rpc_2_core::WebSocketMessage::Binary(payload)) => Ok(payload),
+            Some(json_rpc_2_core::WebSocketMessage::Text(payload)) => Ok(payload.into()),
+            None => Err(TransportError::new(
+                "WebSocket/AMQP peer closed the session",
+            )),
+        }
+    }
     pub async fn connect(address: SocketAddr) -> Result<Self, TransportError> {
         Self::connect_with_config(AmqpConfig {
             request_queue: "json-rpc-2.ws.requests".into(),

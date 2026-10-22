@@ -23,6 +23,29 @@ protocol's `handle_message_with_context` with the gateway connection ID and
 source transport. Client push must use the gateway Control Plane, not the
 shared backend connection.
 
+## Ingress sessions and push
+
+Connection-oriented ingress adapters expose `session_opened`/`session_closed`
+and pass a stable `TransportContext` to each message handler. TCP/TLS, SCTP,
+SRT, raw QUIC, and persistent WebSocket sessions have a push sender; request-only
+HTTP and sessionless datagrams do not. DCCP exposes a stable non-push context.
+Message-oriented WebSocket adapters translate push payloads into their carrier
+envelopes and close the underlying session on a Close frame.
+
+Raw QUIC creates one context per connection, not per request stream or peer IP.
+Quinn path migration therefore preserves the application connection ID.
+Push opens a separate server-initiated unidirectional stream; clients receive
+it through `QuicClientTransport::recv_push()`, independently of RPC responses.
+The gateway can bind backend affinity to this connection ID and release it on
+`session_closed`, without interpreting QUIC's rotating wire connection IDs.
+
+SRT push uses a distinct application frame kind, separate from correlated
+responses/ACKs. `SrtClientTransport::recv_push()` and
+`SrtWebSocketClientTransport::recv_push()` expose it; push receive queues are
+bounded and isolated across reconnect generations. MQTT/AMQP use explicit
+per-client broker sessions and push routes; see
+[broker integration](docs/BROKER-INTEGRATION.md).
+
 ## Binary wire contract (version 3)
 
 All integers are unsigned, big-endian. Frames contain no delimiter or Base64:

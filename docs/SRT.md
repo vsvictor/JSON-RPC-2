@@ -100,7 +100,7 @@ Each frame starts with **one SRT message of exactly 18 bytes**:
 | --- | --- | --- |
 | 0 | 4 | ASCII `JRPC` |
 | 4 | 1 | Version `1` |
-| 5 | 1 | Kind: request=1, response=2, empty/notification ACK=3, ping=4, pong=5, drain=6, drained=7 |
+| 5 | 1 | Kind: request=1, response=2, empty/notification ACK=3, ping=4, pong=5, drain=6, drained=7, push=8 |
 | 6 | 8 | Correlation ID, unsigned big-endian |
 | 14 | 4 | Payload length, unsigned big-endian |
 
@@ -111,6 +111,14 @@ bounded by `MAX_MESSAGE_BYTES`; invalid headers/lengths close the session.
 Complete JSON-RPC documents (including batches) are opaque payloads.
 Notifications receive only an application ACK, never a JSON-RPC response.
 There is no private handshake, packet ARQ, encryption or application replay.
+
+Push frames use correlation ID `0` and a normal bounded opaque payload. They
+are delivered to a separate per-connection receive queue and cannot complete a
+pending RPC. Use `SrtClientTransport::recv_push()` (or the corresponding WS
+client method). The server exposes a stable `TransportContext` for each accepted
+association, removes it on EOF/Close/shutdown, and serializes complete push and
+response frames without interleaving fragments. Existing request/response
+framing remains unchanged; peers must understand kind `8` before using push.
 
 Client requests are correlated independently, so late replies after
 cancellation cannot satisfy subsequent calls. Cancellation during a partial

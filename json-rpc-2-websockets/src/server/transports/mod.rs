@@ -94,18 +94,39 @@ pub fn protocol_adapter(protocol: Arc<dyn WebSocketProtocol>) -> Arc<dyn JsonRpc
     protocol_adapter_with_kind(protocol, "websocket")
 }
 
-#[cfg(any(feature = "dccp", feature = "sctp"))]
+#[cfg(any(feature = "dccp", feature = "sctp", feature = "srt"))]
 fn protocol_adapter_with_kind(
     protocol: Arc<dyn WebSocketProtocol>,
     kind: &'static str,
 ) -> Arc<dyn JsonRpcProtocol> {
-    Arc::new(WebSocketJsonRpcAdapter { protocol, kind })
+    Arc::new(WebSocketJsonRpcAdapter {
+        protocol,
+        kind,
+        sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+    })
 }
 
-#[cfg(any(feature = "dccp", feature = "sctp"))]
+#[cfg(any(feature = "dccp", feature = "sctp", feature = "srt"))]
 struct WebSocketJsonRpcAdapter {
     protocol: Arc<dyn WebSocketProtocol>,
     kind: &'static str,
+    sessions: std::sync::Mutex<std::collections::HashMap<String, AdaptedSession>>,
+}
+
+#[cfg(any(feature = "dccp", feature = "sctp", feature = "srt"))]
+struct AdaptedSession {
+    context: TransportContext,
+    relay: Option<tokio::task::JoinHandle<()>>,
+    closing: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(any(feature = "dccp", feature = "sctp", feature = "srt"))]
+impl Drop for AdaptedSession {
+    fn drop(&mut self) {
+        if let Some(relay) = &self.relay {
+            relay.abort();
+        }
+    }
 }
 
 #[cfg(any(feature = "mqtt", feature = "amqp"))]
@@ -113,18 +134,19 @@ async fn handle_broker_message(
     protocol: &dyn WebSocketProtocol,
     message: WebSocketMessage,
     transport: &str,
+    context: &TransportContext,
 ) -> Option<WebSocketMessage> {
     let request = message_bytes_for_log(&message);
     let started = std::time::Instant::now();
-    let kind = match transport {
-        "WebSocket/AMQP" => "ws-amqp",
-        "WebSocket/MQTT" => "ws-mqtt",
-        _ => "websocket",
-    };
-    let response = handle_stateless_message(protocol, message, kind).await;
+    let response = protocol.handle_message_with_context(message, context).await;
     let response_bytes = response
         .as_ref()
         .map(json_rpc_2_core::websocket_message_bytes);
+    let transport = match transport {
+        "ws-mqtt" => "WebSocket/MQTT",
+        "ws-amqp" => "WebSocket/AMQP",
+        other => other,
+    };
     json_rpc_2_transport::log_json_rpc(
         transport,
         "external",
@@ -135,6 +157,150 @@ async fn handle_broker_message(
     response
 }
 
+#[cfg(any(feature = "mqtt", feature = "amqp"))]
+pub(super) struct BrokerWebSocketAdapter {
+    protocol: Arc<dyn WebSocketProtocol>,
+    kind: &'static str,
+    sessions: std::sync::Mutex<std::collections::HashMap<String, BrokerWebSocketSession>>,
+}
+
+#[cfg(any(feature = "mqtt", feature = "amqp"))]
+struct BrokerWebSocketSession {
+    context: TransportContext,
+    _guard: WebSocketSessionGuard,
+    relay: tokio::task::JoinHandle<()>,
+    closing: bool,
+}
+
+#[cfg(any(feature = "mqtt", feature = "amqp"))]
+impl Drop for BrokerWebSocketSession {
+    fn drop(&mut self) {
+        self.relay.abort();
+    }
+}
+
+#[cfg(any(feature = "mqtt", feature = "amqp"))]
+impl BrokerWebSocketAdapter {
+    pub fn new(protocol: Arc<dyn WebSocketProtocol>, kind: &'static str) -> Self {
+        Self {
+            protocol,
+            kind,
+            sessions: std::sync::Mutex::new(Default::default()),
+        }
+    }
+}
+
+#[cfg(any(feature = "mqtt", feature = "amqp"))]
+impl JsonRpcProtocol for BrokerWebSocketAdapter {
+    fn handle_message<'a>(&'a self, message: &'a [u8]) -> json_rpc_2_transport::ProtocolFuture<'a> {
+        Box::pin(async move {
+            let context = TransportSession::stateless(self.kind);
+            self.handle_message_with_context(message, &context).await
+        })
+    }
+
+    fn handle_message_with_context<'a>(
+        &'a self,
+        message: &'a [u8],
+        context: &'a TransportContext,
+    ) -> json_rpc_2_transport::ProtocolFuture<'a> {
+        let context = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&context.connection_id)
+            .map(|session| session.context.clone())
+            .unwrap_or_else(|| TransportContext {
+                transport: self.kind.to_owned(),
+                push_sender: None,
+                ..context.clone()
+            });
+        Box::pin(async move {
+            let message = match json_rpc_2_core::decode_websocket_message(message) {
+                Ok(message) => message,
+                Err(error) => {
+                    json_rpc_2_transport::log_transport_error(
+                        self.kind,
+                        &context.connection_id,
+                        "decode frame",
+                        &error,
+                    );
+                    None
+                }
+            };
+            let Some(message) = message else {
+                if let Some(session) = self
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .get_mut(&context.connection_id)
+                {
+                    session.closing = true;
+                }
+                return None;
+            };
+            let response =
+                handle_broker_message(self.protocol.as_ref(), message, self.kind, &context).await?;
+            json_rpc_2_core::encode_websocket_message(&response)
+                .ok()
+                .map(Bytes::from)
+        })
+    }
+
+    fn session_opened(&self, context: &TransportContext) {
+        let mut translated = context.clone();
+        translated.transport = self.kind.to_owned();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let raw_sender = context.push_sender.clone();
+        translated.push_sender = raw_sender.as_ref().map(|_| sender);
+        let guard = WebSocketSessionGuard::new(self.protocol.clone(), translated.clone());
+        let relay = tokio::spawn(async move {
+            while let Some(payload) = receiver.recv().await {
+                let frame = match json_rpc_2_core::encode_websocket_message(&push_message(payload))
+                {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        json_rpc_2_transport::log_transport_error(
+                            "WebSocket",
+                            "session",
+                            "encode push",
+                            &error,
+                        );
+                        break;
+                    }
+                };
+                if raw_sender
+                    .as_ref()
+                    .is_none_or(|sender| sender.send(Bytes::from(frame)).is_err())
+                {
+                    break;
+                }
+            }
+        });
+        self.sessions.lock().unwrap().insert(
+            context.connection_id.clone(),
+            BrokerWebSocketSession {
+                context: translated,
+                _guard: guard,
+                relay,
+                closing: false,
+            },
+        );
+    }
+
+    fn session_closed(&self, context: &TransportContext) {
+        self.sessions.lock().unwrap().remove(&context.connection_id);
+    }
+
+    fn session_close_requested(&self, context: &TransportContext) -> bool {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(&context.connection_id)
+            .is_some_and(|session| session.closing)
+    }
+}
+
 fn message_bytes_for_log(message: &WebSocketMessage) -> Bytes {
     // Retain binary payloads without copying while the protocol owns the message.
     match message {
@@ -143,6 +309,17 @@ fn message_bytes_for_log(message: &WebSocketMessage) -> Bytes {
     }
 }
 
+#[cfg(any(
+    test,
+    feature = "udp",
+    feature = "rtp",
+    feature = "rudp",
+    feature = "coap",
+    feature = "udplite",
+    feature = "dccp",
+    feature = "sctp",
+    feature = "srt",
+))]
 async fn handle_stateless_message(
     protocol: &dyn WebSocketProtocol,
     message: WebSocketMessage,
@@ -154,7 +331,7 @@ async fn handle_stateless_message(
         .await
 }
 
-#[cfg(any(feature = "dccp", feature = "sctp"))]
+#[cfg(any(feature = "dccp", feature = "sctp", feature = "srt"))]
 impl JsonRpcProtocol for WebSocketJsonRpcAdapter {
     fn handle_message<'a>(&'a self, message: &'a [u8]) -> json_rpc_2_transport::ProtocolFuture<'a> {
         Box::pin(async move {
@@ -172,11 +349,41 @@ impl JsonRpcProtocol for WebSocketJsonRpcAdapter {
         message: &'a [u8],
         context: &'a TransportContext,
     ) -> json_rpc_2_transport::ProtocolFuture<'a> {
+        let context = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&context.connection_id)
+            .map(|session| session.context.clone())
+            .unwrap_or_else(|| {
+                let mut context = context.clone();
+                context.transport = self.kind.to_owned();
+                context
+            });
         Box::pin(async move {
-            let inbound = json_rpc_2_core::decode_websocket_message(message).ok()??;
+            let inbound = match json_rpc_2_core::decode_websocket_message(message) {
+                Ok(Some(inbound)) => inbound,
+                result => {
+                    if let Err(error) = result {
+                        json_rpc_2_transport::log_transport_error(
+                            "WebSocket",
+                            &context.connection_id,
+                            "decode frame",
+                            &error,
+                        );
+                    }
+                    if let Some(session) = self.sessions.lock().unwrap().get(&context.connection_id)
+                    {
+                        session
+                            .closing
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    return None;
+                }
+            };
             let outbound = self
                 .protocol
-                .handle_message_with_context(inbound, context)
+                .handle_message_with_context(inbound, &context)
                 .await?;
             json_rpc_2_core::encode_websocket_message(&outbound)
                 .ok()
@@ -185,11 +392,74 @@ impl JsonRpcProtocol for WebSocketJsonRpcAdapter {
     }
 
     fn session_opened(&self, context: &TransportContext) {
-        self.protocol.session_opened(context);
+        let mut translated = context.clone();
+        translated.transport = self.kind.to_owned();
+        let relay = context.push_sender.clone().map(|carrier| {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+            translated.push_sender = Some(sender);
+            tokio::spawn(async move {
+                while let Some(payload) = receiver.recv().await {
+                    let frame =
+                        match json_rpc_2_core::encode_websocket_message(&push_message(payload)) {
+                            Ok(frame) => frame,
+                            Err(error) => {
+                                json_rpc_2_transport::log_transport_error(
+                                    "WebSocket",
+                                    "session",
+                                    "encode push",
+                                    &error,
+                                );
+                                break;
+                            }
+                        };
+                    if carrier.send(Bytes::from(frame)).is_err() {
+                        break;
+                    }
+                }
+            })
+        });
+        self.sessions.lock().unwrap().insert(
+            context.connection_id.clone(),
+            AdaptedSession {
+                context: translated.clone(),
+                relay,
+                closing: std::sync::atomic::AtomicBool::new(false),
+            },
+        );
+        self.protocol.session_opened(&translated);
     }
 
     fn session_closed(&self, context: &TransportContext) {
-        self.protocol.session_closed(context);
+        let translated = self.sessions.lock().unwrap().remove(&context.connection_id);
+        if let Some(session) = translated {
+            self.protocol.session_closed(&session.context);
+        }
+    }
+
+    fn session_close_requested(&self, context: &TransportContext) -> bool {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(&context.connection_id)
+            .is_some_and(|session| session.closing.load(std::sync::atomic::Ordering::Acquire))
+    }
+}
+
+#[cfg(any(
+    test,
+    feature = "mqtt",
+    feature = "amqp",
+    feature = "sctp",
+    feature = "srt",
+    feature = "dccp",
+))]
+fn push_message(payload: Bytes) -> WebSocketMessage {
+    if !json_rpc_2_transport::gateway::is_gateway_frame(&payload)
+        && let Ok(text) = std::str::from_utf8(&payload)
+    {
+        WebSocketMessage::Text(text.to_owned())
+    } else {
+        WebSocketMessage::Binary(payload)
     }
 }
 
@@ -280,6 +550,23 @@ pub type WebSocketTransportFuture = TransportFuture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_preserves_text_binary_and_utf8_gateway_frames() {
+        assert_eq!(
+            push_message(Bytes::from_static(b"notification")),
+            WebSocketMessage::Text("notification".to_owned())
+        );
+        for payload in [
+            Bytes::from_static(b"\xff\0binary"),
+            Bytes::from_static(b"JRPC-GW\x03\0utf8"),
+        ] {
+            assert_eq!(
+                push_message(payload.clone()),
+                WebSocketMessage::Binary(payload)
+            );
+        }
+    }
 
     struct Reply {
         request: Bytes,

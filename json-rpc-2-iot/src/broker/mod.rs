@@ -6,10 +6,41 @@ use std::{
     collections::HashMap,
     future::Future,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::{RwLock, mpsc, oneshot};
+
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const SESSION_LEASE: Duration = Duration::from_secs(45);
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MessageKind {
+    #[default]
+    Rpc,
+    Open,
+    Close,
+    Heartbeat,
+    Push,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ClientSession {
+    id: String,
+    push_to: String,
+}
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Metadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session: Option<ClientSession>,
+    #[serde(default)]
+    kind: MessageKind,
+}
 
 #[cfg(feature = "amqp")]
 mod amqp;
@@ -185,6 +216,7 @@ pub(crate) struct Message {
     pub reply_to: Option<String>,
     pub correlation_id: String,
     pub control: bool,
+    pub metadata: Metadata,
     #[cfg(feature = "amqp")]
     pub ack: Option<lapin::Acker>,
 }
@@ -202,17 +234,32 @@ impl Session {
         reply_to: Option<String>,
         correlation_id: String,
         control: bool,
+        metadata: Metadata,
     ) -> Result<(), TransportError> {
         match self {
             #[cfg(feature = "mqtt")]
             Self::Mqtt(s) => {
-                s.publish(destination, payload, reply_to, correlation_id, control)
-                    .await
+                s.publish(
+                    destination,
+                    payload,
+                    reply_to,
+                    correlation_id,
+                    control,
+                    metadata,
+                )
+                .await
             }
             #[cfg(feature = "amqp")]
             Self::Amqp(s) => {
-                s.publish(destination, payload, reply_to, correlation_id, control)
-                    .await
+                s.publish(
+                    destination,
+                    payload,
+                    reply_to,
+                    correlation_id,
+                    control,
+                    metadata,
+                )
+                .await
             }
         }
     }
@@ -245,20 +292,25 @@ impl Drop for PendingGuard {
     }
 }
 struct Connection {
-    session: Session,
+    session: Arc<Session>,
+    identity: ClientSession,
     reader: tokio::task::JoinHandle<()>,
+    heartbeat: tokio::task::JoinHandle<()>,
 }
 pub(crate) struct Client {
     config: Config,
     connection: RwLock<Option<Connection>>,
     pending: Pending,
+    push: tokio::sync::Mutex<mpsc::Receiver<Bytes>>,
 }
 impl Client {
     pub async fn connect(config: Config) -> Result<Self, TransportError> {
+        let (_, push) = mpsc::channel(256);
         let this = Self {
             config,
             connection: RwLock::new(None),
             pending: Arc::default(),
+            push: tokio::sync::Mutex::new(push),
         };
         this.reconnect().await?;
         Ok(this)
@@ -266,17 +318,60 @@ impl Client {
     pub async fn reconnect(&self) -> Result<(), TransportError> {
         let mut connection = self.connection.write().await;
         if let Some(old) = connection.take() {
+            old.heartbeat.abort();
             old.reader.abort();
+            self.pending.lock().unwrap().clear();
+            let _ = self.lifecycle(&old, MessageKind::Close).await;
             let _ = bounded(self.config.operation_timeout(), old.session.close()).await;
         }
         self.pending.lock().unwrap().clear();
         let (session, mut incoming) = self.config.open(false).await?;
+        let session = Arc::new(session);
+        let identity = ClientSession {
+            id: uuid::Uuid::new_v4().to_string(),
+            push_to: session.reply_to().to_owned(),
+        };
+        bounded(
+            self.config.operation_timeout(),
+            session.publish(
+                self.config.request_address(),
+                Bytes::new(),
+                None,
+                String::new(),
+                false,
+                Metadata {
+                    session: Some(identity.clone()),
+                    kind: MessageKind::Open,
+                },
+            ),
+        )
+        .await?;
+        let (push, receiver) = mpsc::channel(256);
+        *self.push.lock().await = receiver;
         let pending = self.pending.clone();
+        let reader_stopped = CancellationToken::new();
+        let heartbeat_stop = reader_stopped.clone();
         #[cfg(feature = "amqp")]
         let ack_timeout = self.config.operation_timeout();
         let reader = tokio::spawn(async move {
             while let Some(message) = incoming.recv().await {
-                if let Some(sender) = pending.lock().unwrap().remove(&message.correlation_id) {
+                if message.metadata.kind == MessageKind::Close {
+                    #[cfg(feature = "amqp")]
+                    if let Some(ack) = message.ack {
+                        let _ = tokio::time::timeout(
+                            ack_timeout,
+                            ack.ack(lapin::options::BasicAckOptions::default()),
+                        )
+                        .await;
+                    }
+                    break;
+                } else if message.metadata.kind == MessageKind::Push {
+                    // Never let a slow push consumer block RPC replies and acknowledgements.
+                    if push.try_send(message.payload).is_err() {
+                        break;
+                    }
+                } else if let Some(sender) = pending.lock().unwrap().remove(&message.correlation_id)
+                {
                     let _ = sender.send(message.payload);
                 }
                 #[cfg(feature = "amqp")]
@@ -289,9 +384,73 @@ impl Client {
                 }
             }
             pending.lock().unwrap().clear();
+            reader_stopped.cancel();
         });
-        *connection = Some(Connection { session, reader });
+        let heartbeat_session = session.clone();
+        let heartbeat_identity = identity.clone();
+        let config = self.config.clone();
+        let heartbeat = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = heartbeat_stop.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
+                if bounded(
+                    config.operation_timeout(),
+                    heartbeat_session.publish(
+                        config.request_address(),
+                        Bytes::new(),
+                        None,
+                        String::new(),
+                        false,
+                        Metadata {
+                            session: Some(heartbeat_identity.clone()),
+                            kind: MessageKind::Heartbeat,
+                        },
+                    ),
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        *connection = Some(Connection {
+            session,
+            identity,
+            reader,
+            heartbeat,
+        });
         Ok(())
+    }
+    async fn lifecycle(
+        &self,
+        connection: &Connection,
+        kind: MessageKind,
+    ) -> Result<(), TransportError> {
+        bounded(
+            self.config.operation_timeout(),
+            connection.session.publish(
+                self.config.request_address(),
+                Bytes::new(),
+                None,
+                String::new(),
+                false,
+                Metadata {
+                    session: Some(connection.identity.clone()),
+                    kind,
+                },
+            ),
+        )
+        .await
+    }
+    /// Receive an unsolicited push independently of pending RPC exchanges.
+    /// A full 256-message queue closes the reader; reconnect starts a fresh queue.
+    pub async fn receive_push(&self) -> Result<Bytes, TransportError> {
+        self.push.lock().await.recv().await.ok_or_else(closed)
     }
     pub async fn send(
         &self,
@@ -311,7 +470,7 @@ impl Client {
         if expects_response {
             self.pending.lock().unwrap().insert(id.clone(), sender);
         }
-        {
+        let (session, reply_to, metadata) = {
             let connection = self.connection.read().await;
             let connection = connection.as_ref().ok_or_else(closed)?;
             if connection.reader.is_finished() {
@@ -320,18 +479,27 @@ impl Client {
                 ));
             }
             let reply_to = expects_response.then(|| connection.session.reply_to().to_owned());
-            bounded(
-                self.config.operation_timeout(),
-                connection.session.publish(
-                    self.config.request_address(),
-                    payload,
-                    reply_to,
-                    id,
-                    control,
-                ),
+            (
+                connection.session.clone(),
+                reply_to,
+                Metadata {
+                    session: Some(connection.identity.clone()),
+                    kind: MessageKind::Rpc,
+                },
             )
-            .await?;
-        }
+        };
+        bounded(
+            self.config.operation_timeout(),
+            session.publish(
+                self.config.request_address(),
+                payload,
+                reply_to,
+                id,
+                control,
+                metadata,
+            ),
+        )
+        .await?;
         if !expects_response {
             return Ok(None);
         }
@@ -346,9 +514,12 @@ impl Client {
     pub async fn close(&self) -> Result<(), TransportError> {
         let mut connection = self.connection.write().await;
         if let Some(old) = connection.take() {
+            old.heartbeat.abort();
             old.reader.abort();
             self.pending.lock().unwrap().clear();
+            let lifecycle = self.lifecycle(&old, MessageKind::Close).await;
             bounded(self.config.operation_timeout(), old.session.close()).await?;
+            lifecycle?;
         }
         Ok(())
     }
@@ -356,8 +527,88 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         if let Some(c) = self.connection.get_mut().take() {
+            c.heartbeat.abort();
             c.reader.abort();
         }
+    }
+}
+
+struct IngressSession {
+    guard: json_rpc_2_transport::ProtocolSessionGuard,
+    push: tokio::task::JoinHandle<()>,
+    push_to: String,
+    activity: Arc<SessionActivity>,
+}
+
+struct SessionActivity {
+    last_seen: Mutex<Instant>,
+    requests: AtomicUsize,
+}
+
+struct ActiveRequest(Arc<SessionActivity>);
+impl Drop for ActiveRequest {
+    fn drop(&mut self) {
+        *self.0.last_seen.lock().unwrap() = Instant::now();
+        self.0.requests.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+impl Drop for IngressSession {
+    fn drop(&mut self) {
+        self.push.abort();
+    }
+}
+
+fn ingress_session(
+    config: &Config,
+    protocol: Arc<dyn json_rpc_2_transport::JsonRpcProtocol>,
+    session: Arc<Session>,
+    identity: &ClientSession,
+) -> IngressSession {
+    let transport = match config {
+        #[cfg(feature = "mqtt")]
+        Config::Mqtt(_) => "mqtt",
+        #[cfg(feature = "amqp")]
+        Config::Amqp(_) => "amqp",
+    };
+    let mut ingress = json_rpc_2_transport::TransportSession::new(transport, true);
+    let guard = json_rpc_2_transport::ProtocolSessionGuard::new(protocol, ingress.context);
+    let push_to = identity.push_to.clone();
+    let destination = push_to.clone();
+    let config = config.clone();
+    let push = tokio::spawn(async move {
+        while let Some(payload) = ingress.push_receiver.recv().await {
+            if payload.len() > config.max_payload() {
+                break;
+            }
+            if bounded(
+                config.operation_timeout(),
+                session.publish(
+                    &destination,
+                    payload,
+                    None,
+                    String::new(),
+                    false,
+                    Metadata {
+                        session: None,
+                        kind: MessageKind::Push,
+                    },
+                ),
+            )
+            .await
+            .is_err()
+            {
+                break;
+            }
+        }
+    });
+    IngressSession {
+        guard,
+        push,
+        push_to,
+        activity: Arc::new(SessionActivity {
+            last_seen: Mutex::new(Instant::now()),
+            requests: AtomicUsize::new(0),
+        }),
     }
 }
 
@@ -377,7 +628,7 @@ pub(crate) async fn serve(
     shutdown: CancellationToken,
     runtime: Arc<json_rpc_2_transport::TransportRuntime>,
 ) -> std::io::Result<()> {
-    let mut workers = tokio::task::JoinSet::new();
+    let mut workers = tokio::task::JoinSet::<Option<String>>::new();
     let mut connected_once = prepared.is_some();
     loop {
         let opened = if let Some(prepared) = prepared.take() {
@@ -403,16 +654,125 @@ pub(crate) async fn serve(
             }
         };
         let session = Arc::new(session);
+        let mut sessions: HashMap<String, IngressSession> = HashMap::new();
+        let mut retired: HashMap<String, Instant> = HashMap::new();
+        let mut leases = tokio::time::interval(HEARTBEAT_INTERVAL);
+        let worker_limit = runtime
+            .limits
+            .max_connections
+            .min(runtime.limits.max_concurrent_requests)
+            .max(1);
         loop {
             let message = tokio::select! {
                 _ = shutdown.cancelled() => break,
-                result = workers.join_next(), if !workers.is_empty() => { let _ = result; continue; },
-                message = incoming.recv(), if workers.len() < runtime.limits.max_connections.min(runtime.limits.max_concurrent_requests).max(1) => match message { Some(m) => m, None => break },
+                _ = leases.tick() => {
+                    retired.retain(|_, closed| closed.elapsed() < SESSION_LEASE + HEARTBEAT_INTERVAL);
+                    sessions.retain(|_, session| !session.push.is_finished() && (
+                        session.activity.requests.load(Ordering::Relaxed) > 0
+                        || session.activity.last_seen.lock().unwrap().elapsed() < SESSION_LEASE
+                    ));
+                    continue;
+                },
+                result = workers.join_next(), if !workers.is_empty() => {
+                    if let Some(Ok(Some(id))) = result {
+                        sessions.remove(&id);
+                        if retired.len() < runtime.limits.max_connections {
+                            retired.insert(id, Instant::now());
+                        }
+                    }
+                    continue;
+                },
+                message = incoming.recv() => match message { Some(m) => m, None => break },
             };
+            let mut context = None;
+            if let Some(identity) = &message.metadata.session {
+                let valid = uuid::Uuid::parse_str(&identity.id).is_ok()
+                    && !identity.push_to.is_empty()
+                    && identity.push_to.len() <= 255
+                    && !retired.contains_key(&identity.id);
+                let valid = valid
+                    && sessions
+                        .get(&identity.id)
+                        .is_none_or(|existing| existing.push_to == identity.push_to);
+                if valid && message.metadata.kind == MessageKind::Close {
+                    sessions.remove(&identity.id);
+                } else if valid {
+                    if !sessions.contains_key(&identity.id)
+                        && sessions.len() < runtime.limits.max_connections
+                    {
+                        sessions.insert(
+                            identity.id.clone(),
+                            ingress_session(&config, protocol.clone(), session.clone(), identity),
+                        );
+                    }
+                    if let Some(ingress) = sessions.get_mut(&identity.id) {
+                        *ingress.activity.last_seen.lock().unwrap() = Instant::now();
+                        context = Some(ingress.guard.context().clone());
+                    }
+                }
+                if message.metadata.kind != MessageKind::Rpc || context.is_none() {
+                    #[cfg(feature = "amqp")]
+                    if let Some(ack) = message.ack {
+                        let _ = tokio::time::timeout(
+                            config.operation_timeout(),
+                            ack.ack(lapin::options::BasicAckOptions::default()),
+                        )
+                        .await;
+                    }
+                    continue;
+                }
+            } else if message.metadata.kind != MessageKind::Rpc {
+                #[cfg(feature = "amqp")]
+                if let Some(ack) = message.ack {
+                    let _ = tokio::time::timeout(
+                        config.operation_timeout(),
+                        ack.ack(lapin::options::BasicAckOptions::default()),
+                    )
+                    .await;
+                }
+                continue;
+            }
+            if workers.len() >= worker_limit {
+                // Do not queue application work or stop reading the shared
+                // route: lifecycle traffic and lease sweeps must remain live.
+                #[cfg(feature = "amqp")]
+                if let Some(ack) = message.ack {
+                    let _ = tokio::time::timeout(
+                        config.operation_timeout(),
+                        ack.nack(lapin::options::BasicNackOptions {
+                            requeue: false,
+                            multiple: false,
+                        }),
+                    )
+                    .await;
+                }
+                json_rpc_2_transport::log_transport_error(
+                    "broker",
+                    "external",
+                    "admission",
+                    &TransportError::new(
+                        "broker request concurrency limit exceeded; request not dispatched",
+                    ),
+                );
+                continue;
+            }
+            // An admitted long-running handler retains its session until it
+            // completes or reaches the configured response timeout.
+            let activity = message
+                .metadata
+                .session
+                .as_ref()
+                .and_then(|identity| sessions.get(&identity.id))
+                .map(|session| {
+                    session.activity.requests.fetch_add(1, Ordering::Relaxed);
+                    ActiveRequest(session.activity.clone())
+                });
             let session = session.clone();
             let protocol = protocol.clone();
             let config = config.clone();
             workers.spawn(async move {
+                let _activity = activity;
+                let mut close_session = false;
                 let result = bounded(config.response_timeout(), async {
                     let transport = match &config {
                         #[cfg(feature = "mqtt")]
@@ -425,12 +785,33 @@ pub(crate) async fn serve(
                         json_rpc_2_transport::log_control(transport, "external", "ping", "pong");
                         Some(Bytes::from_static(b"pong"))
                     } else {
-                        let response = json_rpc_2_transport::dispatch_stateless(
-                            protocol.as_ref(),
-                            message.payload.clone(),
-                            &transport.to_ascii_lowercase(),
-                        )
-                        .await;
+                        let context = context.unwrap_or_else(|| {
+                            json_rpc_2_transport::TransportSession::stateless(
+                                transport.to_ascii_lowercase(),
+                            )
+                        });
+                        let response = protocol
+                            .handle_owned_message(message.payload.clone(), &context)
+                            .await
+                            .map(json_rpc_2_transport::TransportMessage::into_bytes);
+                        close_session = protocol.session_close_requested(&context);
+                        if close_session && let Some(identity) = &message.metadata.session {
+                            bounded(
+                                config.operation_timeout(),
+                                session.publish(
+                                    &identity.push_to,
+                                    Bytes::new(),
+                                    None,
+                                    String::new(),
+                                    false,
+                                    Metadata {
+                                        session: None,
+                                        kind: MessageKind::Close,
+                                    },
+                                ),
+                            )
+                            .await?;
+                        }
                         json_rpc_2_transport::log_json_rpc(
                             transport,
                             "external",
@@ -454,6 +835,7 @@ pub(crate) async fn serve(
                                 None,
                                 message.correlation_id,
                                 message.control,
+                                Metadata::default(),
                             ),
                         )
                         .await?;
@@ -490,6 +872,11 @@ pub(crate) async fn serve(
                         "broker", "external", "handle", &error,
                     );
                 }
+                if close_session {
+                    message.metadata.session.map(|identity| identity.id)
+                } else {
+                    None
+                }
             });
         }
         if shutdown.is_cancelled() {
@@ -505,6 +892,7 @@ pub(crate) async fn serve(
             workers.abort_all();
             while workers.join_next().await.is_some() {}
         }
+        drop(sessions);
         let _ = bounded(
             config
                 .operation_timeout()

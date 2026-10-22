@@ -9,6 +9,11 @@ pub struct AmqpClientTransport {
     inner: Client,
 }
 impl AmqpClientTransport {
+    /// Receive an unsolicited server push without allocating an RPC correlation ID.
+    /// Calls may run concurrently with requests. Reconnect resets the receive queue.
+    pub async fn receive_push(&self) -> Result<Bytes, TransportError> {
+        self.inner.receive_push().await
+    }
     pub async fn connect(address: SocketAddr) -> Result<Self, TransportError> {
         Self::connect_with_config(AmqpConfig::for_address(address)).await
     }

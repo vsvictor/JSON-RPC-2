@@ -2,10 +2,9 @@
 
 use std::{io, net::SocketAddr, sync::Arc};
 
-use bytes::Bytes;
-use json_rpc_2_core::{SrtConfig, decode_websocket_message, encode_websocket_message};
+use json_rpc_2_core::SrtConfig;
 use json_rpc_2_datagram::server::transports::srt::SrtTransport;
-use json_rpc_2_transport::{JsonRpcProtocol, ProtocolFuture, Transport, TransportRuntime};
+use json_rpc_2_transport::{Transport, TransportRuntime};
 
 use super::{CancellationToken, WebSocketProtocol, WebSocketTransport, WebSocketTransportFuture};
 
@@ -30,26 +29,16 @@ impl SrtWebSocketTransport {
     }
 }
 
-struct Adapter(Arc<dyn WebSocketProtocol>);
-
-impl JsonRpcProtocol for Adapter {
-    fn handle_message<'a>(&'a self, input: &'a [u8]) -> ProtocolFuture<'a> {
-        Box::pin(async move {
-            let message = decode_websocket_message(input).ok()??;
-            let response =
-                super::handle_stateless_message(self.0.as_ref(), message, "ws-srt").await?;
-            encode_websocket_message(&response).ok().map(Bytes::from)
-        })
-    }
-}
-
 impl WebSocketTransport for SrtWebSocketTransport {
     fn run(
         self,
         protocol: Arc<dyn WebSocketProtocol>,
         shutdown: CancellationToken,
     ) -> WebSocketTransportFuture {
-        self.inner.run(Arc::new(Adapter(protocol)), shutdown)
+        self.inner.run(
+            super::protocol_adapter_with_kind(protocol, "ws-srt"),
+            shutdown,
+        )
     }
 }
 
@@ -57,6 +46,7 @@ impl WebSocketTransport for SrtWebSocketTransport {
 mod tests {
     use super::*;
     use crate::client::transports::srt::SrtWebSocketClientTransport;
+    use bytes::Bytes;
     use json_rpc_2_core::{WebSocketFuture, WebSocketMessage};
     use json_rpc_2_transport::RpcClientTransport;
 

@@ -90,20 +90,46 @@ async fn serve_connection(
     shutdown: CancellationToken,
     runtime: Arc<TransportRuntime>,
 ) {
+    let mut session = json_rpc_2_transport::TransportSession::new("quic", true);
+    let guard =
+        json_rpc_2_transport::ProtocolSessionGuard::new(protocol.clone(), session.context.clone());
     let multiplexor =
         StreamMultiplexor::with_limit(runtime.limits.max_connections, runtime.metrics.clone());
     let streams = multiplexor.handle();
     loop {
         let accepted = tokio::select! {
             accepted = connection.accept_bi() => accepted,
+            Some(push) = session.push_receiver.recv() => {
+                let connection = connection.clone();
+                let stopping = shutdown.clone();
+                if streams.spawn(async move {
+                    let result = async {
+                        let mut send = connection.open_uni().await.map_err(io::Error::other)?;
+                        send.write_all(&push).await.map_err(io::Error::other)?;
+                        send.finish().map_err(io::Error::other)?;
+                        Ok::<_, io::Error>(())
+                    };
+                    tokio::select! {
+                        result = result => if let Err(error) = result {
+                            log_transport_error("QUIC", connection.remote_address(), "push stream", &error);
+                        },
+                        _ = stopping.cancelled() => {},
+                        _ = connection.closed() => {},
+                    }
+                }).await.is_err() {
+                    break;
+                }
+                continue;
+            }
             _ = shutdown.cancelled() => break,
         };
         // An error means the client closed the connection.
         let Ok((send, recv)) = accepted else { break };
         let protocol = protocol.clone();
+        let context = session.context.clone();
         if streams
             .spawn(async move {
-                if let Err(error) = handle_stream(send, recv, peer, protocol).await {
+                if let Err(error) = handle_stream(send, recv, peer, protocol, context).await {
                     log_transport_error("QUIC", peer, "stream", error.as_ref());
                 }
             })
@@ -113,6 +139,8 @@ async fn serve_connection(
             break;
         }
     }
+    drop(guard);
+    drop(session.push_receiver);
     multiplexor.close().await;
     connection.close(QUIC_NO_ERROR.into(), b"server shutdown");
 }
@@ -122,6 +150,7 @@ async fn handle_stream(
     mut recv: quinn::RecvStream,
     peer: std::net::SocketAddr,
     protocol: Arc<dyn JsonRpcProtocol>,
+    context: json_rpc_2_transport::TransportContext,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let request = recv.read_to_end(MAX_MESSAGE_BYTES).await?;
     if request == CONTROL_PING {
@@ -132,7 +161,6 @@ async fn handle_stream(
         return Ok(());
     }
     let started = Instant::now();
-    let context = json_rpc_2_transport::TransportSession::stateless("quic");
     let request = bytes::Bytes::from(request);
     let request_log = request.clone();
     let response = protocol.handle_owned_message(request, &context).await;
