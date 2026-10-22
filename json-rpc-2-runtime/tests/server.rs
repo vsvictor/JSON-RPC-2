@@ -622,6 +622,19 @@ async fn connect(
                 async move { Http1WebSocketClientTransport::connect(&format!("ws://{to}/ws")).await },
             )
         }
+        #[cfg(feature = "websocket_tls")]
+        TransportKind::WebSocketTls => {
+            let certificate = certificate.clone();
+            boxed(async move {
+                Http1WebSocketClientTransport::connect_with_certificates_to_addr(
+                    &format!("wss://{to}/ws"),
+                    to,
+                    &[certificate],
+                    json_rpc_2_transport::TcpTuningConfig::default(),
+                )
+                .await
+            })
+        }
         TransportKind::WebSocketHttp3 => {
             let endpoint = client_endpoint(to.ip(), certificate, H3_ALPN);
             boxed(async move {
@@ -652,6 +665,8 @@ async fn serves_every_transport_on_every_bind_address() {
         .set_ws_quic_port(0)
         .set_ws_http1_port(0)
         .set_ws_http3_port(0);
+    #[cfg(feature = "websocket_tls")]
+    let builder = builder.set_ws_tls_port(0);
     #[cfg(feature = "tls")]
     let builder = builder.set_tls_port(0);
     #[cfg(feature = "rtp")]

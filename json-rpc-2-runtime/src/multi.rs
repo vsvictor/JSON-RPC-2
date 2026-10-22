@@ -157,6 +157,8 @@ use json_rpc_2_websockets::server::transports::coap::CoapWebSocketTransport;
 use json_rpc_2_websockets::server::transports::dccp::DccpWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "http1"))]
 use json_rpc_2_websockets::server::transports::http1::Http1WebSocketTransport;
+#[cfg(feature = "websocket_tls")]
+use json_rpc_2_websockets::server::transports::http1::TlsWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "http3"))]
 use json_rpc_2_websockets::server::transports::http3::Http3WebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "mqtt"))]
@@ -265,6 +267,8 @@ pub enum TransportKind {
     WebSocketQuic,
     #[cfg(all(feature = "websocket", feature = "http1"))]
     WebSocketHttp1,
+    #[cfg(feature = "websocket_tls")]
+    WebSocketTls,
     #[cfg(all(feature = "websocket", feature = "http3"))]
     WebSocketHttp3,
 }
@@ -355,11 +359,13 @@ impl TransportKind {
         TransportKind::WebSocketQuic,
         #[cfg(all(feature = "websocket", feature = "http1"))]
         TransportKind::WebSocketHttp1,
+        #[cfg(feature = "websocket_tls")]
+        TransportKind::WebSocketTls,
         #[cfg(all(feature = "websocket", feature = "http3"))]
         TransportKind::WebSocketHttp3,
     ];
 
-    /// Short identifier: tcp, udp, rtp, rudp, srt, udplite, dccp, sctp, quic, http1, http3, ws-tcp, ws-udp, ws-rtp, ws-rudp, ws-srt, ws-udplite, ws-dccp, ws-sctp, ws-quic, ws-http1, ws-http3.
+    /// Short identifier: tcp, udp, rtp, rudp, srt, udplite, dccp, sctp, quic, http1, http3, ws-tcp, ws-udp, ws-rtp, ws-rudp, ws-srt, ws-udplite, ws-dccp, ws-sctp, ws-quic, ws-http1, ws-tls, ws-http3.
     pub fn id(self) -> &'static str {
         match self {
             #[cfg(feature = "tcp")]
@@ -430,6 +436,8 @@ impl TransportKind {
             TransportKind::WebSocketQuic => "ws-quic",
             #[cfg(all(feature = "websocket", feature = "http1"))]
             TransportKind::WebSocketHttp1 => "ws-http1",
+            #[cfg(feature = "websocket_tls")]
+            TransportKind::WebSocketTls => "ws-tls",
             #[cfg(all(feature = "websocket", feature = "http3"))]
             TransportKind::WebSocketHttp3 => "ws-http3",
         }
@@ -506,6 +514,8 @@ impl TransportKind {
             TransportKind::WebSocketQuic => "WebSocket/QUIC",
             #[cfg(all(feature = "websocket", feature = "http1"))]
             TransportKind::WebSocketHttp1 => "WebSocket/HTTP/1.1",
+            #[cfg(feature = "websocket_tls")]
+            TransportKind::WebSocketTls => "WebSocket/TLS (HTTP/1.1)",
             #[cfg(all(feature = "websocket", feature = "http3"))]
             TransportKind::WebSocketHttp3 => "WebSocket/HTTP/3",
         }
@@ -734,6 +744,13 @@ impl TransportCapabilities for TransportKind {
             TransportKind::WebSocketHttp1 => TransportCapabilitySet {
                 multiplexing: TransportMultiplexing::Serialized,
                 security: TransportSecurity::Plain,
+                socket: TransportSocket::Tcp,
+                supports_ping: true,
+            },
+            #[cfg(feature = "websocket_tls")]
+            TransportKind::WebSocketTls => TransportCapabilitySet {
+                multiplexing: TransportMultiplexing::Serialized,
+                security: TransportSecurity::Tls,
                 socket: TransportSocket::Tcp,
                 supports_ping: true,
             },
@@ -1043,6 +1060,12 @@ impl MultiTransportServer {
         self.set_port(TransportKind::WebSocketHttp1, port)
     }
 
+    /// TLS port of the WebSocket over HTTP/1.1 transport (`wss://`).
+    #[cfg(feature = "websocket_tls")]
+    pub fn set_ws_tls_port(&mut self, port: u16) -> &mut Self {
+        self.set_port(TransportKind::WebSocketTls, port)
+    }
+
     /// TCP port of the dedicated WebSocket over TCP transport.
     #[cfg(all(feature = "websocket", feature = "tcp"))]
     pub fn set_ws_tcp_port(&mut self, port: u16) -> &mut Self {
@@ -1135,8 +1158,8 @@ impl MultiTransportServer {
         self.set_port(TransportKind::WebSocketHttp3, port)
     }
 
-    /// TLS certificate chain and private key of QUIC, HTTP/3 and WebSocket
-    /// over HTTP/3. Required when one of them has a port.
+    /// TLS certificate chain and private key for TLS/TCP, WSS, QUIC, HTTP/3
+    /// and WebSocket over HTTP/3. Required when one of them has a port.
     pub fn set_tls(
         &mut self,
         certificates: Vec<CertificateDer<'static>>,
@@ -1668,6 +1691,17 @@ impl MultiTransportServer {
                         .start(websocket.clone()),
                 )
             }
+            #[cfg(feature = "websocket_tls")]
+            TransportKind::WebSocketTls => {
+                let listener = bind_tcp(address, &runtime.tcp_tuning)?;
+                let tls = self.tls_server_config(&[])?;
+                (
+                    listener.local_addr()?,
+                    TlsWebSocketTransport::new(listener, tls)
+                        .with_runtime(Arc::clone(runtime))
+                        .start(websocket.clone()),
+                )
+            }
             #[cfg(feature = "udp")]
             TransportKind::Udp => {
                 let socket = bind_udp(address)?;
@@ -1771,7 +1805,7 @@ impl MultiTransportServer {
         })
     }
 
-    /// QUIC server endpoint (TLS 1.3) bound to `address`.
+    /// Build a server TLS configuration using the configured identity.
     #[cfg(feature = "tls")]
     fn tls_server_config(&self, alpn: &[u8]) -> io::Result<Arc<rustls::ServerConfig>> {
         let identity = self
@@ -1786,7 +1820,9 @@ impl MultiTransportServer {
         .with_no_client_auth()
         .with_single_cert(identity.certificates.clone(), identity.key.clone_key())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        config.alpn_protocols = vec![alpn.to_vec()];
+        if !alpn.is_empty() {
+            config.alpn_protocols = vec![alpn.to_vec()];
+        }
         Ok(Arc::new(config))
     }
 
@@ -2355,6 +2391,11 @@ mod builder {
             self.set_port(TransportKind::WebSocketHttp1, port)
         }
 
+        #[cfg(feature = "websocket_tls")]
+        pub fn set_ws_tls_port(self, port: u16) -> Builder<BindState, HasTransport> {
+            self.set_port(TransportKind::WebSocketTls, port)
+        }
+
         #[cfg(all(feature = "websocket", feature = "http3"))]
         pub fn set_ws_http3_port(self, port: u16) -> Builder<BindState, HasTransport> {
             self.set_port(TransportKind::WebSocketHttp3, port)
@@ -2517,6 +2558,11 @@ mod builder {
         #[cfg(all(feature = "websocket", feature = "http1"))]
         pub fn set_ws_http1_port(self, port: u16) -> Self {
             self.set_port(TransportKind::WebSocketHttp1, port)
+        }
+
+        #[cfg(feature = "websocket_tls")]
+        pub fn set_ws_tls_port(self, port: u16) -> Self {
+            self.set_port(TransportKind::WebSocketTls, port)
         }
 
         #[cfg(all(feature = "websocket", feature = "http3"))]

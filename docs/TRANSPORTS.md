@@ -39,7 +39,8 @@ for delivery and deduplication limits.
 | WebSocket/CoAP | one WebSocket-style text or binary message per CoAP request/response pair over UDP |
 | WebSocket/AMQP | one WebSocket-style text or binary message per AMQP content frame on a persistent TCP connection |
 | WebSocket/QUIC | one JSON document per WebSocket data frame over a dedicated QUIC stream bridge |
-| WebSocket/HTTP/1.1 | one JSON document per WebSocket data frame after Upgrade (`ws://` or `wss://` on the client) |
+| WebSocket/HTTP/1.1 | one JSON document per WebSocket data frame after Upgrade on `ws-http1`; use `ws-tls` for `wss://` |
+| WebSocket/TLS | one JSON document per WebSocket data frame after HTTP/1.1 Upgrade inside TLS; the runtime exposes a dedicated `ws-tls` listener |
 | WebSocket/HTTP/3 | one JSON document per WebSocket data frame after extended CONNECT |
 
 ## Keepalive behavior
@@ -89,6 +90,17 @@ Keepalive traffic never enters the JSON-RPC method dispatcher.
   with a different application protocol on the same endpoint.
 - Calls on one connection are serialized; reconnect creates a new verified
   TLS session, and an interrupted request is never replayed.
+
+## WebSocket over TLS semantics
+
+- `ws-tls` is an RFC 6455 WebSocket connection established with the ordinary
+  HTTP/1.1 Upgrade handshake inside TLS; it uses the `/ws` endpoint.
+- The server uses the configured TLS certificate and private key and leaves
+  ALPN unset for broad HTTP/1.1 client compatibility.
+- Clients using an explicit CA bundle verify both the certificate chain and
+  the URL hostname; no certificate-validation bypass is provided.
+- The dedicated `ws-tls` listener has its own TCP port, so plain `ws-http1`
+  and TLS-protected WSS can run simultaneously.
 
 ## Reliable UDP semantics
 
