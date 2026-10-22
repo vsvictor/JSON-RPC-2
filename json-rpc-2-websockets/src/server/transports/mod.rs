@@ -301,6 +301,24 @@ impl JsonRpcProtocol for BrokerWebSocketAdapter {
     }
 }
 
+#[cfg(any(
+    feature = "mqtt",
+    feature = "amqp",
+    all(
+        feature = "websocket",
+        any(
+            feature = "tcp",
+            feature = "http1",
+            feature = "http3",
+            feature = "quic",
+            feature = "udp",
+            feature = "rtp",
+            feature = "rudp",
+            feature = "coap",
+            all(feature = "udplite", any(target_os = "linux", target_os = "android"),),
+        ),
+    ),
+))]
 fn message_bytes_for_log(message: &WebSocketMessage) -> Bytes {
     // Retain binary payloads without copying while the protocol owns the message.
     match message {
