@@ -101,7 +101,10 @@ async fn handle_connection(
             continue;
         }
         let started = Instant::now();
-        let response = protocol.handle_message(&message).await;
+        let message = bytes::Bytes::from(message);
+        let response =
+            json_rpc_2_transport::dispatch_stateless(protocol.as_ref(), message.clone(), "sctp")
+                .await;
         log_json_rpc(
             "SCTP",
             peer,

@@ -2021,8 +2021,8 @@ dependencies = [
 name = "json-rpc-2-transport"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "bytes",
+ "http-body",
  "json-rpc-2-core",
  "libc",
  "serde",

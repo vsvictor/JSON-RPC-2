@@ -159,21 +159,41 @@ where
             (
                 StatusCode::OK,
                 Some("text/plain; charset=utf-8"),
-                Some(bytes::Bytes::from_static(b"pong")),
+                Some(json_rpc_2_transport::TransportMessage::from(
+                    bytes::Bytes::from_static(b"pong"),
+                )),
             )
         } else if request.method() != Method::POST {
             (StatusCode::METHOD_NOT_ALLOWED, None, None)
         } else {
-            let response = protocol.handle_message(&body).await;
+            let binary = json_rpc_2_transport::gateway::is_gateway_frame(&body);
+            let context = json_rpc_2_transport::TransportSession::stateless("http3");
+            let body = bytes::Bytes::from(body);
+            let request_log = body.clone();
+            let response = protocol.handle_owned_message(body, &context).await;
             log_json_rpc(
                 "HTTP/3",
                 peer,
-                &body,
-                response.as_deref(),
+                &request_log,
+                response.as_ref().map(|message| {
+                    if message.header.is_empty() {
+                        message.payload.as_ref()
+                    } else {
+                        message.header.as_ref()
+                    }
+                }),
                 started.elapsed(),
             );
             match response {
-                Some(response) => (StatusCode::OK, Some("application/json"), Some(response)),
+                Some(response) => (
+                    StatusCode::OK,
+                    Some(if binary {
+                        "application/octet-stream"
+                    } else {
+                        "application/json"
+                    }),
+                    Some(response),
+                ),
                 None => (StatusCode::NO_CONTENT, None, None),
             }
         };
@@ -184,7 +204,12 @@ where
     }
     stream.send_response(builder.body(())?).await?;
     if let Some(response) = response_body {
-        stream.send_data(response).await?;
+        if !response.header.is_empty() {
+            stream.send_data(response.header).await?;
+        }
+        if !response.payload.is_empty() {
+            stream.send_data(response.payload).await?;
+        }
     }
     stream.finish().await?;
     Ok(())

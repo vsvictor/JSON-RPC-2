@@ -1,9 +1,8 @@
-//! Newline-delimited JSON over a verified TLS 1.2/1.3 TCP connection.
+//! JSON lines and binary gateway frames over verified TLS 1.2/1.3.
 
 use std::{net::SocketAddr, sync::Arc};
 
-use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
+use bytes::{Bytes, BytesMut};
 use rustls::{
     RootCertStore,
     pki_types::{CertificateDer, ServerName, pem::PemObject},
@@ -14,25 +13,32 @@ use tokio::{
     sync::Mutex,
 };
 use tokio_rustls::{TlsConnector, client::TlsStream};
-use tokio_util::codec::{Framed, LinesCodec};
 
-use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_transport::TcpTuningConfig;
 use json_rpc_2_transport::{
     CONTROL_PING, CONTROL_PONG, ClientCloseFuture, ClientPingFuture, ClientRecoverFuture,
-    ClientTransportFuture, RpcClientTransport, TLS_ALPN, TransportError, expects_response,
-    transport_error,
+    ClientTransportFuture, RpcClientTransport, TLS_ALPN, TransportError, TransportMessage,
+    expects_response, transport_error,
 };
 
-type Connection = Framed<TlsStream<TcpStream>, LinesCodec>;
+// Keep the mixed-stream helpers available for TLS-only feature builds too.
+#[cfg(not(feature = "tcp"))]
+#[allow(dead_code)]
+#[path = "tcp.rs"]
+mod tcp;
+#[cfg(feature = "tcp")]
+use super::tcp;
+pub(crate) use tcp::{read_frame, validate_message, write_message};
+
+type Connection = (TlsStream<TcpStream>, BytesMut);
 
 enum ConnectionState {
-    Ready(Connection),
+    Ready(Box<Connection>),
     Invalidated,
     Closed,
 }
 
-/// TLS client for newline-delimited JSON-RPC over TCP.
+/// TLS client for JSON lines and binary gateway frames over TCP.
 ///
 /// The supplied CA bundle is required; certificates and hostnames are always
 /// verified. An interrupted exchange discards its connection and is not replayed.
@@ -108,7 +114,7 @@ impl TlsClientTransport {
             connection: Mutex::new(ConnectionState::Invalidated),
         };
         let connection = client.open().await?;
-        *client.connection.lock().await = ConnectionState::Ready(connection);
+        *client.connection.lock().await = ConnectionState::Ready(Box::new(connection));
         Ok(client)
     }
 
@@ -126,10 +132,7 @@ impl TlsClientTransport {
                 "TLS server did not negotiate the JSON-RPC TLS ALPN",
             ));
         }
-        Ok(Framed::new(
-            stream,
-            LinesCodec::new_with_max_length(MAX_MESSAGE_BYTES),
-        ))
+        Ok((stream, BytesMut::new()))
     }
 }
 
@@ -147,6 +150,14 @@ impl RpcClientTransport for TlsClientTransport {
         expects_response: bool,
     ) -> ClientTransportFuture<'a> {
         Box::pin(async move { self.send_line(message, expects_response).await })
+    }
+
+    fn send_message<'a>(
+        &'a self,
+        message: TransportMessage,
+        expects_response: bool,
+    ) -> ClientTransportFuture<'a> {
+        Box::pin(async move { self.exchange(message, expects_response).await })
     }
 
     fn transport_ping<'a>(&'a self) -> ClientPingFuture<'a> {
@@ -177,7 +188,7 @@ impl RpcClientTransport for TlsClientTransport {
         Box::pin(async move {
             let mut connection = self.connection.lock().await;
             let replacement = self.open().await?;
-            *connection = ConnectionState::Ready(replacement);
+            *connection = ConnectionState::Ready(Box::new(replacement));
             Ok(())
         })
     }
@@ -190,7 +201,7 @@ impl RpcClientTransport for TlsClientTransport {
             else {
                 return Ok(());
             };
-            let mut stream = framed.into_inner();
+            let (mut stream, _) = *framed;
             stream.shutdown().await.map_err(transport_error)?;
             stream
                 .read_to_end(&mut Vec::new())
@@ -207,20 +218,33 @@ impl TlsClientTransport {
         message: Bytes,
         expects_response: bool,
     ) -> Result<Option<Bytes>, TransportError> {
-        let message = std::str::from_utf8(&message)
-            .map(str::to_owned)
-            .map_err(transport_error)?;
+        self.exchange(message.into(), expects_response).await
+    }
+
+    async fn exchange(
+        &self,
+        message: TransportMessage,
+        expects_response: bool,
+    ) -> Result<Option<Bytes>, TransportError> {
+        validate_message(&message).map_err(transport_error)?;
         let mut connection = self.connection.lock().await;
+        if matches!(*connection, ConnectionState::Closed) {
+            return Err(json_rpc_2_transport::closed());
+        }
         let mut framed = match std::mem::replace(&mut *connection, ConnectionState::Invalidated) {
             ConnectionState::Ready(framed) => framed,
-            ConnectionState::Invalidated => self.open().await?,
+            ConnectionState::Invalidated => Box::new(self.open().await?),
             ConnectionState::Closed => return Err(json_rpc_2_transport::closed()),
         };
-        framed.send(message).await.map_err(transport_error)?;
+        write_message(&mut framed.0, &message)
+            .await
+            .map_err(transport_error)?;
         let response = if expects_response {
-            match framed.next().await {
-                Some(Ok(response)) => Some(Bytes::from(response)),
-                Some(Err(error)) => return Err(transport_error(error)),
+            match read_frame(&mut framed.0, &mut framed.1)
+                .await
+                .map_err(transport_error)?
+            {
+                Some(response) => Some(response),
                 None => return Err(TransportError::new("TLS connection closed by server")),
             }
         } else {

@@ -33,6 +33,8 @@ pub const H3_NO_ERROR: u32 = 0x100;
 
 /// Future returned by the abstract JSON-RPC protocol contract.
 pub type ProtocolFuture<'a> = Pin<Box<dyn Future<Output = Option<Bytes>> + Send + 'a>>;
+pub type ProtocolMessageFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<crate::TransportMessage>> + Send + 'a>>;
 
 /// Transport-independent JSON-RPC message processing contract.
 ///
@@ -52,6 +54,28 @@ pub trait JsonRpcProtocol: Send + Sync + 'static {
     fn session_opened(&self, _context: &TransportContext) {}
 
     fn session_closed(&self, _context: &TransportContext) {}
+
+    /// Retain separate response envelope/payload buffers on supporting carriers.
+    fn handle_transport_message<'a>(
+        &'a self,
+        input: &'a [u8],
+        context: &'a TransportContext,
+    ) -> ProtocolMessageFuture<'a> {
+        Box::pin(async move {
+            self.handle_message_with_context(input, context)
+                .await
+                .map(crate::TransportMessage::from)
+        })
+    }
+
+    /// Transfer receive-buffer ownership, avoiding a copy into an async bus.
+    fn handle_owned_message<'a>(
+        &'a self,
+        input: Bytes,
+        context: &'a TransportContext,
+    ) -> ProtocolMessageFuture<'a> {
+        Box::pin(async move { self.handle_transport_message(&input, context).await })
+    }
 }
 
 #[derive(Clone)]
@@ -59,6 +83,19 @@ pub struct TransportContext {
     pub transport: String,
     pub connection_id: String,
     pub push_sender: Option<mpsc::UnboundedSender<Bytes>>,
+}
+
+/// Dispatch an owned packet on carriers whose encoder requires contiguous bytes.
+pub async fn dispatch_stateless(
+    protocol: &dyn JsonRpcProtocol,
+    payload: Bytes,
+    transport: &str,
+) -> Option<Bytes> {
+    let context = TransportSession::stateless(transport);
+    protocol
+        .handle_owned_message(payload, &context)
+        .await
+        .map(crate::TransportMessage::into_bytes)
 }
 
 pub struct GatewayRequestMetadata {

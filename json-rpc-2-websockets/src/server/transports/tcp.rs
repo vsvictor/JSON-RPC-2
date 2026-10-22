@@ -140,9 +140,13 @@ async fn run_websocket_session(
                     .await;
                     return;
                 }
-                let message = match String::from_utf8(payload.to_vec()) {
-                    Ok(text) => Message::Text(text.into()),
-                    Err(_) => Message::Binary(payload),
+                let message = if json_rpc_2_transport::gateway::is_gateway_frame(&payload) {
+                    Message::Binary(payload)
+                } else {
+                    match std::str::from_utf8(&payload) {
+                        Ok(text) => Message::Text(text.to_owned().into()),
+                        Err(_) => Message::Binary(payload),
+                    }
                 };
                 if websocket.send(message).await.is_err() {
                     return;
@@ -186,7 +190,7 @@ async fn run_websocket_session(
                     .await;
                     return;
                 }
-                WebSocketMessage::Binary(Bytes::from(data.to_vec()))
+                WebSocketMessage::Binary(data)
             }
             Message::Ping(payload) => {
                 log_control("WebSocket/TCP", peer, "ping", "pong");
@@ -198,10 +202,7 @@ async fn run_websocket_session(
             Message::Pong(_) | Message::Close(_) | Message::Frame(_) => continue,
         };
 
-        let request_bytes = match &request {
-            WebSocketMessage::Text(text) => text.as_bytes().to_vec(),
-            WebSocketMessage::Binary(data) => data.to_vec(),
-        };
+        let request_bytes = super::message_bytes_for_log(&request);
         let started = Instant::now();
         if let Some(response) = protocol
             .handle_message_with_context(request, &session.context)
@@ -209,12 +210,11 @@ async fn run_websocket_session(
         {
             let response = match response {
                 WebSocketMessage::Text(text) => {
-                    let response_bytes = text.as_bytes().to_vec();
                     log_json_rpc(
                         "WebSocket/TCP",
                         peer,
                         &request_bytes,
-                        Some(&response_bytes),
+                        Some(text.as_bytes()),
                         started.elapsed(),
                     );
                     Message::Text(text.into())

@@ -11,7 +11,7 @@ use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::TcpCongestionControl;
+use crate::{TcpCongestionControl, TransportMessage};
 
 /// Future returned by a client transport.
 pub type ClientTransportFuture<'a> =
@@ -32,6 +32,16 @@ pub type ClientRecoverFuture<'a> =
 /// `None` represents a transport-level empty response, such as HTTP 204.
 pub trait RpcClientTransport: Send + Sync + 'static {
     fn send<'a>(&'a self, message: Bytes) -> ClientTransportFuture<'a>;
+
+    /// Send separate envelope/payload segments. Adapters with scatter/gather
+    /// support override this; contiguous-only carriers coalesce here explicitly.
+    fn send_message<'a>(
+        &'a self,
+        message: TransportMessage,
+        expects_response: bool,
+    ) -> ClientTransportFuture<'a> {
+        self.send_with_expectation(message.into_bytes(), expects_response)
+    }
 
     /// Send a serialized JSON-RPC message when the caller already knows
     /// whether a response is expected. Stream transports override this to
@@ -103,6 +113,14 @@ where
 {
     fn send<'a>(&'a self, message: Bytes) -> ClientTransportFuture<'a> {
         (**self).send(message)
+    }
+
+    fn send_message<'a>(
+        &'a self,
+        message: TransportMessage,
+        expects_response: bool,
+    ) -> ClientTransportFuture<'a> {
+        (**self).send_message(message, expects_response)
     }
 
     fn send_with_expectation<'a>(
@@ -302,8 +320,7 @@ fn apply_tcp_congestion_sockref(
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn apply_tcp_congestion_raw(socket: &Socket, congestion: TcpCongestionControl) -> io::Result<()>
-{
+fn apply_tcp_congestion_raw(socket: &Socket, congestion: TcpCongestionControl) -> io::Result<()> {
     let Some(name) = congestion.as_socket_name() else {
         return Ok(());
     };

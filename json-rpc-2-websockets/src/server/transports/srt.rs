@@ -36,7 +36,8 @@ impl JsonRpcProtocol for Adapter {
     fn handle_message<'a>(&'a self, input: &'a [u8]) -> ProtocolFuture<'a> {
         Box::pin(async move {
             let message = decode_websocket_message(input).ok()??;
-            let response = self.0.handle_message(message).await?;
+            let response =
+                super::handle_stateless_message(self.0.as_ref(), message, "ws-srt").await?;
             encode_websocket_message(&response).ok().map(Bytes::from)
         })
     }

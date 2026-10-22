@@ -1,77 +1,119 @@
-//! Opt-in, opaque gateway framing usable over any message transport.
+//! Opt-in binary gateway framing. Payload bytes are never encoded or parsed here.
 
 use std::sync::Arc;
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::{
-    GatewayRequestMetadata, JsonRpcProtocol, ProtocolFuture, TransportContext, TransportError,
+    JsonRpcProtocol, ProtocolFuture, ProtocolMessageFuture, TransportContext, TransportError,
+    TransportMessage,
 };
 
-const PREFIX: &str = "JRPC-GW/2 ";
-const NONE: &[u8] = b"JRPC-GW/2 NONE";
-const ERROR: &[u8] = b"JRPC-GW/2 ERROR";
-const RESPONSE: &str = "JRPC-GW/2 RESPONSE ";
-pub const GATEWAY_PING: &[u8] = b"JRPC-GW/2 PING";
-pub const GATEWAY_PONG: &[u8] = b"JRPC-GW/2 PONG";
+pub const MAGIC: &[u8; 8] = b"JRPC-GW\x03";
+pub const HEADER_LEN: usize = 17;
+const REQUEST: u8 = 1;
+const RESPONSE: u8 = 2;
+const NONE: u8 = 3;
+const ERROR: u8 = 4;
+const PING: u8 = 5;
+const PONG: u8 = 6;
+pub const GATEWAY_PING: &[u8] = b"JRPC-GW\x03\x05\0\0\0\0\0\0\0\0";
+pub const GATEWAY_PONG: &[u8] = b"JRPC-GW\x03\x06\0\0\0\0\0\0\0\0";
+const GATEWAY_NONE: &[u8] = b"JRPC-GW\x03\x03\0\0\0\0\0\0\0\0";
+const GATEWAY_ERROR: &[u8] = b"JRPC-GW\x03\x04\0\0\0\0\0\0\0\0";
 
-/// Maximum opaque payload, allowing space for base64 and metadata in a carrier frame.
-pub const MAX_GATEWAY_PAYLOAD_BYTES: usize = (json_rpc_2_core::MAX_MESSAGE_BYTES - 512) / 4 * 3;
+/// Leaves space for the fixed header and both maximum-size metadata fields.
+pub const MAX_GATEWAY_PAYLOAD_BYTES: usize = json_rpc_2_core::MAX_MESSAGE_BYTES - HEADER_LEN - 256;
+
+pub fn is_gateway_frame(frame: &[u8]) -> bool {
+    frame.starts_with(MAGIC)
+}
+
+fn invalid(message: &str) -> TransportError {
+    TransportError::new(message)
+}
+
+fn valid_token(value: &[u8]) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+}
+
+fn lengths(header: &[u8]) -> (usize, usize, usize) {
+    (
+        u16::from_be_bytes([header[9], header[10]]) as usize,
+        u16::from_be_bytes([header[11], header[12]]) as usize,
+        u32::from_be_bytes([header[13], header[14], header[15], header[16]]) as usize,
+    )
+}
+
+/// Validate before allocating or reading the rest of a binary stream frame.
+pub fn frame_length(header: &[u8]) -> Result<usize, TransportError> {
+    if header.len() < HEADER_LEN || !is_gateway_frame(header) {
+        return Err(invalid("invalid binary gateway header"));
+    }
+    let (id, transport, payload) = lengths(header);
+    if id > 128 || transport > 128 || payload > MAX_GATEWAY_PAYLOAD_BYTES {
+        return Err(invalid("gateway frame exceeds field or payload limit"));
+    }
+    match header[8] {
+        REQUEST if id > 0 && transport > 0 => {}
+        RESPONSE if id == 0 && transport == 0 => {}
+        NONE | ERROR | PING | PONG if id == 0 && transport == 0 && payload == 0 => {}
+        _ => return Err(invalid("invalid gateway frame kind or lengths")),
+    }
+    Ok(HEADER_LEN + id + transport + payload)
+}
+
+fn header(kind: u8, connection_id: &str, transport: &str, payload: usize) -> Bytes {
+    let mut header = BytesMut::with_capacity(HEADER_LEN + connection_id.len() + transport.len());
+    header.extend_from_slice(MAGIC);
+    header.put_u8(kind);
+    header.put_u16(connection_id.len() as u16);
+    header.put_u16(transport.len() as u16);
+    header.put_u32(payload as u32);
+    header.extend_from_slice(connection_id.as_bytes());
+    header.extend_from_slice(transport.as_bytes());
+    header.freeze()
+}
 
 pub fn encode_request(
-    payload: &[u8],
+    payload: &Bytes,
     connection_id: &str,
     source_transport: &str,
-) -> Result<Bytes, TransportError> {
-    if connection_id.len() > 128 || source_transport.len() > 128 {
-        return Err(TransportError::new("gateway metadata exceeds field limit"));
+) -> Result<TransportMessage, TransportError> {
+    if !valid_token(connection_id.as_bytes()) || !valid_token(source_transport.as_bytes()) {
+        return Err(invalid("invalid gateway metadata token"));
     }
     if payload.len() > MAX_GATEWAY_PAYLOAD_BYTES {
-        return Err(TransportError::new("gateway payload exceeds frame limit"));
+        return Err(invalid("gateway payload exceeds frame limit"));
     }
-    let metadata = format!("JRPC-GW/1 {connection_id} {source_transport}");
-    let parsed = GatewayRequestMetadata::parse(&metadata)
-        .map_err(|error| TransportError::new(error.to_string()))?
-        .ok_or_else(|| TransportError::new("missing gateway metadata"))?;
-    if parsed.connection_id != connection_id
-        || parsed.transport != source_transport
-        || parsed.payload_length.is_some()
-    {
-        return Err(TransportError::new(
-            "gateway metadata must contain single tokens",
-        ));
-    }
-    Ok(Bytes::from(format!(
-        "{PREFIX}{connection_id} {source_transport} {}",
-        STANDARD.encode(payload)
-    )))
+    Ok(TransportMessage {
+        header: header(REQUEST, connection_id, source_transport, payload.len()),
+        payload: payload.clone(),
+    })
 }
 
-pub fn decode_response(frame: &[u8]) -> Result<Option<Bytes>, TransportError> {
-    if frame == NONE {
-        return Ok(None);
+fn validate_frame(frame: &[u8]) -> Result<(), TransportError> {
+    if frame_length(frame)? != frame.len() {
+        return Err(invalid("gateway frame length mismatch"));
     }
-    let encoded = frame.strip_prefix(RESPONSE.as_bytes()).ok_or_else(|| {
-        TransportError::new("invalid gateway response; enable gateway framing on backend")
-    })?;
-    decode_payload(encoded).map(Some)
+    Ok(())
 }
 
-fn decode_payload(encoded: &[u8]) -> Result<Bytes, TransportError> {
-    if encoded.len() > MAX_GATEWAY_PAYLOAD_BYTES.div_ceil(3) * 4 {
-        return Err(TransportError::new("gateway payload exceeds frame limit"));
+/// Consume the carrier buffer and retain the response as a shared slice.
+pub fn decode_response(frame: Bytes) -> Result<Option<Bytes>, TransportError> {
+    validate_frame(&frame)?;
+    match frame[8] {
+        RESPONSE => Ok(Some(frame.slice(HEADER_LEN..))),
+        NONE => Ok(None),
+        ERROR => Err(invalid("backend rejected gateway frame or response size")),
+        _ => Err(invalid("unexpected gateway response kind")),
     }
-    let decoded = STANDARD
-        .decode(encoded)
-        .map_err(|error| TransportError::new(format!("invalid gateway base64 payload: {error}")))?;
-    if decoded.len() > MAX_GATEWAY_PAYLOAD_BYTES {
-        return Err(TransportError::new("gateway payload exceeds frame limit"));
-    }
-    Ok(Bytes::from(decoded))
 }
 
-/// Wrap a backend protocol explicitly; ordinary JSON-RPC messages are unchanged.
 pub struct GatewayBackendProtocol {
     inner: Arc<dyn JsonRpcProtocol>,
 }
@@ -81,50 +123,74 @@ impl GatewayBackendProtocol {
         Self { inner }
     }
 
-    async fn dispatch(&self, input: &[u8], context: Option<&TransportContext>) -> Option<Bytes> {
-        if input == GATEWAY_PING {
-            return Some(Bytes::from_static(GATEWAY_PONG));
-        }
-        let Some(rest) = input.strip_prefix(PREFIX.as_bytes()) else {
+    async fn dispatch(
+        &self,
+        input: &[u8],
+        context: Option<&TransportContext>,
+    ) -> Option<TransportMessage> {
+        if !is_gateway_frame(input) {
+            // Reject the retired ASCII protocol instead of interpreting it as JSON.
+            if input.starts_with(b"JRPC-GW/2") {
+                tracing::warn!(
+                    "retired gateway framing version; upgrade gateway and backend together"
+                );
+                return Some(Bytes::from_static(GATEWAY_ERROR).into());
+            }
             return match context {
                 Some(context) => self.inner.handle_message_with_context(input, context).await,
                 None => self.inner.handle_message(input).await,
-            };
-        };
+            }
+            .map(TransportMessage::from);
+        }
         let decoded = (|| {
-            let text = std::str::from_utf8(rest)
-                .map_err(|error| TransportError::new(error.to_string()))?;
-            let mut fields = text.splitn(3, ' ');
-            let connection_id = fields.next().unwrap_or_default();
-            let transport = fields.next().unwrap_or_default();
-            let payload = fields
-                .next()
-                .ok_or_else(|| TransportError::new("missing gateway payload"))?;
-            let metadata =
-                GatewayRequestMetadata::parse(&format!("JRPC-GW/1 {connection_id} {transport}"))
-                    .map_err(|error| TransportError::new(error.to_string()))?
-                    .ok_or_else(|| TransportError::new("missing gateway metadata"))?;
-            Ok::<_, TransportError>((metadata.context(None), decode_payload(payload.as_bytes())?))
+            validate_frame(input)?;
+            if input[8] == PING {
+                return Ok(None);
+            }
+            if input[8] != REQUEST {
+                return Err(invalid("expected gateway request"));
+            }
+            let (id_len, transport_len, _) = lengths(input);
+            let id = &input[HEADER_LEN..HEADER_LEN + id_len];
+            let transport = &input[HEADER_LEN + id_len..HEADER_LEN + id_len + transport_len];
+            if !valid_token(id) || !valid_token(transport) {
+                return Err(invalid("invalid gateway metadata token"));
+            }
+            let context = TransportContext {
+                connection_id: std::str::from_utf8(id)
+                    .map_err(|_| invalid("invalid gateway connection ID"))?
+                    .to_owned(),
+                transport: std::str::from_utf8(transport)
+                    .map_err(|_| invalid("invalid gateway source transport"))?
+                    .to_owned(),
+                push_sender: None,
+            };
+            Ok(Some((
+                context,
+                &input[HEADER_LEN + id_len + transport_len..],
+            )))
         })();
         let (context, payload) = match decoded {
-            Ok(decoded) => decoded,
+            Ok(None) => return Some(Bytes::from_static(GATEWAY_PONG).into()),
+            Ok(Some(decoded)) => decoded,
             Err(error) => {
                 tracing::warn!(%error, "invalid gateway backend frame");
-                return Some(Bytes::from_static(ERROR));
+                return Some(Bytes::from_static(GATEWAY_ERROR).into());
             }
         };
         match self
             .inner
-            .handle_message_with_context(&payload, &context)
+            .handle_message_with_context(payload, &context)
             .await
         {
-            None => Some(Bytes::from_static(NONE)),
-            Some(response) if response.len() <= MAX_GATEWAY_PAYLOAD_BYTES => Some(Bytes::from(
-                format!("{RESPONSE}{}", STANDARD.encode(response)),
-            )),
+            None => Some(Bytes::from_static(GATEWAY_NONE).into()),
+            Some(payload) if payload.len() <= MAX_GATEWAY_PAYLOAD_BYTES => Some(TransportMessage {
+                header: header(RESPONSE, "", "", payload.len()),
+                payload,
+            }),
             Some(_) => {
                 tracing::error!("backend response exceeds gateway frame limit");
-                Some(Bytes::from_static(ERROR))
+                Some(Bytes::from_static(GATEWAY_ERROR).into())
             }
         }
     }
@@ -132,7 +198,11 @@ impl GatewayBackendProtocol {
 
 impl JsonRpcProtocol for GatewayBackendProtocol {
     fn handle_message<'a>(&'a self, input: &'a [u8]) -> ProtocolFuture<'a> {
-        Box::pin(self.dispatch(input, None))
+        Box::pin(async move {
+            self.dispatch(input, None)
+                .await
+                .map(TransportMessage::into_bytes)
+        })
     }
 
     fn handle_message_with_context<'a>(
@@ -140,6 +210,18 @@ impl JsonRpcProtocol for GatewayBackendProtocol {
         input: &'a [u8],
         context: &'a TransportContext,
     ) -> ProtocolFuture<'a> {
+        Box::pin(async move {
+            self.dispatch(input, Some(context))
+                .await
+                .map(TransportMessage::into_bytes)
+        })
+    }
+
+    fn handle_transport_message<'a>(
+        &'a self,
+        input: &'a [u8],
+        context: &'a TransportContext,
+    ) -> ProtocolMessageFuture<'a> {
         Box::pin(self.dispatch(input, Some(context)))
     }
 
@@ -169,29 +251,36 @@ mod tests {
         ) -> ProtocolFuture<'a> {
             assert_eq!(context.connection_id, "client-1");
             assert_eq!(context.transport, "ws-tcp");
+            assert!(context.push_sender.is_none());
             self.handle_message(input)
         }
     }
 
     #[tokio::test]
-    async fn preserves_opaque_binary_and_multiline_payload_and_metadata() {
+    async fn preserves_binary_multiline_and_metadata() {
         let protocol = GatewayBackendProtocol::new(Arc::new(Echo));
-        let payload = b"\x00\xff\nunchanged";
-        let request = encode_request(payload, "client-1", "ws-tcp").unwrap();
-        assert!(!request.contains(&b'\n'));
-        let response = protocol.handle_message(&request).await.unwrap();
-        assert_eq!(
-            decode_response(&response).unwrap().unwrap(),
-            payload.as_slice()
-        );
+        let payload = Bytes::from_static(b"\x00\xff\nunchanged");
+        let request = encode_request(&payload, "client-1", "ws-tcp").unwrap();
+        assert_eq!(request.payload.as_ptr(), payload.as_ptr());
+        assert_eq!(request.len(), HEADER_LEN + 8 + 6 + payload.len());
+        let response = protocol
+            .handle_message(&request.into_bytes())
+            .await
+            .unwrap();
+        let pointer = response.as_ptr();
+        let decoded = decode_response(response).unwrap().unwrap();
+        assert_eq!(decoded.as_ptr(), pointer.wrapping_add(HEADER_LEN));
+        assert_eq!(decoded, payload);
     }
 
     #[tokio::test]
-    async fn acknowledges_no_response_and_preserves_direct_clients() {
+    async fn acknowledges_notifications_and_preserves_direct_clients() {
         let protocol = GatewayBackendProtocol::new(Arc::new(Echo));
-        let request = encode_request(b"", "client-1", "ws-tcp").unwrap();
+        let request = encode_request(&Bytes::new(), "client-1", "ws-tcp")
+            .unwrap()
+            .into_bytes();
         let response = protocol.handle_message(&request).await.unwrap();
-        assert_eq!(decode_response(&response).unwrap(), None);
+        assert_eq!(decode_response(response).unwrap(), None);
         assert_eq!(
             protocol.handle_message(b"direct").await.unwrap(),
             b"direct".as_slice()
@@ -199,21 +288,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_frames_fail_explicitly() {
-        let protocol = GatewayBackendProtocol::new(Arc::new(Echo));
-        for request in [b"JRPC-GW/2 a".as_slice(), b"JRPC-GW/2 a tcp !!!"] {
-            let response = protocol.handle_message(request).await.unwrap();
-            assert!(decode_response(&response).is_err());
+    async fn response_envelope_does_not_copy_backend_payload() {
+        struct Fixed(Bytes);
+        impl JsonRpcProtocol for Fixed {
+            fn handle_message<'a>(&'a self, _: &'a [u8]) -> ProtocolFuture<'a> {
+                Box::pin(async move { Some(self.0.clone()) })
+            }
         }
-        assert!(encode_request(b"x", "bad\nid", "tcp").is_err());
+        let payload = Bytes::from_static(b"backend-response");
+        let protocol = GatewayBackendProtocol::new(Arc::new(Fixed(payload.clone())));
+        let request = encode_request(&Bytes::new(), "client-1", "ws-tcp")
+            .unwrap()
+            .into_bytes();
+        let context = TransportContext {
+            connection_id: "physical".into(),
+            transport: "tcp".into(),
+            push_sender: None,
+        };
+        let response = protocol
+            .handle_transport_message(&request, &context)
+            .await
+            .unwrap();
+        assert_eq!(response.payload.as_ptr(), payload.as_ptr());
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_lengths_kinds_and_metadata() {
+        let protocol = GatewayBackendProtocol::new(Arc::new(Echo));
+        let valid = encode_request(&Bytes::from_static(b"x"), "client-1", "ws-tcp")
+            .unwrap()
+            .into_bytes();
+        let mut cases = vec![valid.slice(..valid.len() - 1), Bytes::from_static(MAGIC)];
+        for (index, value) in [(8, 99), (9, 1), (13, 255), (HEADER_LEN, b'\n')] {
+            let mut bytes = valid.to_vec();
+            bytes[index] = value;
+            cases.push(bytes.into());
+        }
+        for request in cases {
+            let response = protocol.handle_message(&request).await.unwrap();
+            assert!(decode_response(response).is_err());
+        }
+        for token in ["", "bad\nid", "bad id", &"a".repeat(129)] {
+            assert!(encode_request(&Bytes::new(), token, "tcp").is_err());
+        }
+        assert!(decode_response(Bytes::from_static(GATEWAY_PONG)).is_err());
+        assert!(decode_response(Bytes::from_static(GATEWAY_NONE).slice(..16)).is_err());
+        assert_eq!(frame_length(GATEWAY_PING).unwrap(), HEADER_LEN);
     }
 
     #[test]
-    fn frame_limit_includes_base64_and_metadata() {
-        let payload = vec![0; MAX_GATEWAY_PAYLOAD_BYTES];
+    fn full_size_payload_has_only_header_overhead() {
+        let payload = Bytes::from(vec![0; MAX_GATEWAY_PAYLOAD_BYTES]);
         let frame = encode_request(&payload, &"a".repeat(128), &"b".repeat(128)).unwrap();
-        assert!(frame.len() <= json_rpc_2_core::MAX_MESSAGE_BYTES);
-        assert!(encode_request(&vec![0; MAX_GATEWAY_PAYLOAD_BYTES + 1], "a", "tcp").is_err());
-        assert!(decode_response(b"JRPC-GW/2 RESPONSE !").is_err());
+        assert_eq!(frame.len(), json_rpc_2_core::MAX_MESSAGE_BYTES);
+        assert_eq!(frame.payload.as_ptr(), payload.as_ptr());
+        assert!(
+            encode_request(
+                &Bytes::from(vec![0; MAX_GATEWAY_PAYLOAD_BYTES + 1]),
+                "a",
+                "tcp"
+            )
+            .is_err()
+        );
     }
 }

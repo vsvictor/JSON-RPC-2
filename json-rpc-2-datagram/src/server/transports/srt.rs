@@ -134,7 +134,9 @@ async fn serve_session(
                         }
                         let _metric = RequestMetric(metrics);
                         let started = std::time::Instant::now();
-                        let response = protocol.handle_message(&frame.payload).await;
+                        let response = json_rpc_2_transport::dispatch_stateless(
+                            protocol.as_ref(), frame.payload.clone(), "srt",
+                        ).await;
                         log_json_rpc("SRT", "peer", &frame.payload, response.as_deref(), started.elapsed());
                         let (kind, payload) = match response {
                             Some(payload) => (Kind::Response, payload),
