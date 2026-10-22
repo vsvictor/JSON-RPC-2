@@ -1,6 +1,7 @@
 //! Transport contracts and runtime primitives shared by clients and servers.
 
 mod client_transport;
+pub mod gateway;
 mod server_transport;
 mod udplite;
 
