@@ -251,15 +251,18 @@ async fn close_after_cancellation_is_idempotent_and_does_not_reopen() {
 
 #[tokio::test]
 async fn cancelled_partial_notification_is_not_flushed_on_the_next_connection() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(64 * 1024).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = socket.listen(1).unwrap();
     let transport = TcpClientTransport::connect(listener.local_addr().unwrap())
         .await
         .unwrap();
     let (mut peer, _) = listener.accept().await.unwrap();
-    // Larger than the socket buffers: with no reader, the send must stop mid-frame.
+    // Legal frame larger than the socket buffers; no reader drains the peer.
     let payload = format!(
         "{{\"jsonrpc\":\"2.0\",\"method\":\"notify\",\"params\":[\"{}\"]}}",
-        "x".repeat(32 * 1024 * 1024)
+        "x".repeat(8 * 1024 * 1024)
     );
     assert!(
         tokio::time::timeout(
@@ -294,4 +297,31 @@ async fn cancelled_partial_notification_is_not_flushed_on_the_next_connection() 
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn oversized_notification_is_rejected_before_writing() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let transport = TcpClientTransport::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (mut peer, _) = listener.accept().await.unwrap();
+    let payload = vec![b'x'; json_rpc_2_core::MAX_MESSAGE_BYTES + 1].into();
+    let result = tokio::time::timeout(BOUND, transport.send_with_expectation(payload, false))
+        .await
+        .expect("size validation must be bounded");
+    assert!(result.unwrap_err().to_string().contains("maximum"));
+    let mut byte = [0];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), peer.read(&mut byte))
+            .await
+            .is_err()
+    );
+    transport
+        .send_with_expectation("{}".into(), false)
+        .await
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(peer).read_line(&mut line).await.unwrap();
+    assert_eq!(line, "{}\n");
 }

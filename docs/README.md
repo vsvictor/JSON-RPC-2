@@ -391,7 +391,8 @@ datagrams on Linux/Android:
   control, but the current implementation keeps one in-flight exchange per
   connected session, so completion order is still serialized per session.
 - **SCTP / WebSocket over SCTP** preserve message boundaries on one connected
-  association. The current adapter uses `SOCK_SEQPACKET` and keeps the door
+  association. The current adapter uses one-to-one `SOCK_STREAM` with `MSG_EOR`
+  reassembly and keeps the door
   open for explicit stream-selection policy later; capability-wise these
   transports are modeled as multiplexed because the carrier supports
   multi-streaming.

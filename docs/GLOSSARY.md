@@ -69,7 +69,8 @@ transport on Linux/Android platforms.
 Stream Control Transmission Protocol. It preserves message boundaries like a
 packet transport, supports multiple logical streams inside one association, and
 can support multi-homing. In this workspace it is exposed as a connected
-`SOCK_SEQPACKET` transport on Linux/Android platforms.
+one-to-one `SOCK_STREAM` transport on Linux/Android platforms, preserving user
+records through `MSG_EOR` rather than treating the association as a byte stream.
 
 ## Deduplication cache
 

@@ -87,6 +87,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
+mod support;
+
 const CLOSE_LIMIT: Duration = Duration::from_secs(3);
 
 fn make_server() -> Arc<dyn JsonRpcProtocol> {
@@ -375,9 +377,14 @@ const TRANSPORTS: &[&str] = &[
 ];
 
 fn every_transport() -> impl Iterator<Item = (IpAddr, &'static str)> {
-    ADDRESS_FAMILIES
-        .into_iter()
-        .flat_map(|ip| TRANSPORTS.iter().copied().map(move |kind| (ip, kind)))
+    ADDRESS_FAMILIES.into_iter().flat_map(|ip| {
+        let dccp = support::dccp_available(ip);
+        TRANSPORTS
+            .iter()
+            .copied()
+            .filter(move |kind| !matches!(*kind, "dccp" | "websocket-dccp") || dccp)
+            .map(move |kind| (ip, kind))
+    })
 }
 
 #[tokio::test]
@@ -652,6 +659,7 @@ async fn serves_every_transport_on_every_bind_address() {
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         IpAddr::V6(Ipv6Addr::LOCALHOST),
     ];
+    let dccp = ips.into_iter().all(support::dccp_available);
     let builder = MultiTransportServer::builder(make_server())
         .set_bind(ips)
         .set_tcp_port(0)
@@ -687,7 +695,11 @@ async fn serves_every_transport_on_every_bind_address() {
     #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
     let builder = builder.set_udplite_port(0).set_ws_udplite_port(0);
     #[cfg(all(feature = "dccp", any(target_os = "linux", target_os = "android")))]
-    let builder = builder.set_dccp_port(0);
+    let builder = if dccp {
+        builder.set_dccp_port(0)
+    } else {
+        builder
+    };
     #[cfg(all(feature = "sctp", any(target_os = "linux", target_os = "android")))]
     let builder = builder.set_sctp_port(0);
     #[cfg(all(
@@ -695,7 +707,11 @@ async fn serves_every_transport_on_every_bind_address() {
         feature = "dccp",
         any(target_os = "linux", target_os = "android")
     ))]
-    let builder = builder.set_ws_dccp_port(0);
+    let builder = if dccp {
+        builder.set_ws_dccp_port(0)
+    } else {
+        builder
+    };
     #[cfg(all(
         feature = "websocket",
         feature = "sctp",
@@ -710,6 +726,7 @@ async fn serves_every_transport_on_every_bind_address() {
             * TransportKind::ALL
                 .iter()
                 .filter(|kind| !kind.is_broker())
+                .filter(|kind| dccp || !matches!(kind.id(), "dccp" | "ws-dccp"))
                 .count()
     );
 
@@ -718,6 +735,7 @@ async fn serves_every_transport_on_every_bind_address() {
             .iter()
             .copied()
             .filter(|kind| !kind.is_broker())
+            .filter(|kind| dccp || !matches!(kind.id(), "dccp" | "ws-dccp"))
         {
             let to = running.address(kind, ip).unwrap();
             assert_ne!(to.port(), 0, "listener must use an assigned port: {to}");

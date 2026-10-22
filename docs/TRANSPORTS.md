@@ -20,7 +20,7 @@ for delivery and deduplication limits.
 | SRT | one JSON-RPC message per encrypted reliable SRT-style packet |
 | UDP-Lite | one JSON-RPC message per reliable UDP-Lite datagram |
 | DCCP | one JSON-RPC message per connected DCCP datagram session |
-| SCTP | one JSON-RPC message per connected SCTP packet session |
+| SCTP | one JSON-RPC message per SCTP user record on a one-to-one association |
 | MQTT-like | one JSON-RPC message per private PUBLISH-like packet on a persistent TCP connection; not a standard broker connection |
 | CoAP subset | one JSON-RPC message per POST (0.02) / Content (2.05) pair over UDP, without general option support |
 | AMQP-like | one JSON-RPC message per private body-frame envelope on a persistent TCP connection; no AMQP connection/channel lifecycle |
@@ -34,7 +34,7 @@ for delivery and deduplication limits.
 | WebSocket/SRT | one WebSocket-style text or binary message per encrypted reliable SRT-style packet |
 | WebSocket/UDP-Lite | one WebSocket-style text or binary message per reliable UDP-Lite datagram |
 | WebSocket/DCCP | one WebSocket-style text or binary message per connected DCCP datagram session |
-| WebSocket/SCTP | one WebSocket-style text or binary message per connected SCTP packet session |
+| WebSocket/SCTP | one WebSocket-style text or binary message per SCTP user record |
 | WebSocket/MQTT | one WebSocket-style text or binary message per MQTT `PUBLISH` packet on a persistent TCP connection |
 | WebSocket/CoAP | one WebSocket-style text or binary message per CoAP request/response pair over UDP |
 | WebSocket/AMQP | one WebSocket-style text or binary message per AMQP content frame on a persistent TCP connection |
@@ -42,6 +42,23 @@ for delivery and deduplication limits.
 | WebSocket/HTTP/1.1 | one JSON document per WebSocket data frame after Upgrade on `ws-http1`; use `ws-tls` for `wss://` |
 | WebSocket/TLS | one JSON document per WebSocket data frame after HTTP/1.1 Upgrade inside TLS; the runtime exposes a dedicated `ws-tls` listener |
 | WebSocket/HTTP/3 | one JSON document per WebSocket data frame after extended CONNECT |
+
+## Kernel transport semantics
+
+SCTP uses the one-to-one `SOCK_STREAM` socket API so the listener can accept
+independent associations. This does not turn SCTP into a TCP byte stream:
+receivers reassemble partial deliveries until `MSG_EOR`, preserving user-record
+boundaries. Truncated and oversized records fail explicitly.
+
+Linux/Android build support does not guarantee that the running kernel supports
+DCCP. Runtime matrix tests probe the protocol before enabling DCCP/WS-DCCP and
+print an explicit exclusion when the kernel reports an unsupported socket or
+protocol. Other socket failures still fail the tests; production startup remains
+strict and never silently disables a requested listener. To require DCCP coverage
+on a suitably configured CI host, run
+`JSON_RPC_REQUIRE_DCCP=1 cargo test -p json-rpc-2-runtime --all-features --test server --test e2e_matrix -- --test-threads=1 --nocapture`.
+The SCTP partial-delivery regression requires kernel support and is run with
+`cargo test -p json-rpc-2-datagram --no-default-features --features sctp partial_delivery -- --ignored`.
 
 ## Keepalive behavior
 
@@ -242,8 +259,9 @@ Keepalive traffic never enters the JSON-RPC method dispatcher.
 
 - SCTP preserves message boundaries and supports multi-streaming plus
   multi-homing at the carrier level.
-- In this workspace, one JSON-RPC request or response maps to one SCTP packet
-  on a connected `SOCK_SEQPACKET` association.
+- In this workspace, one JSON-RPC request or response maps to one SCTP user record
+  on a one-to-one `SOCK_STREAM` association; partial deliveries are reassembled
+  through `MSG_EOR`.
 - The current adapter does not yet expose explicit stream-id or multi-home
   selection policy through the public API, but it keeps the carrier semantics
   isolated below the transport-agnostic JSON-RPC core.
