@@ -1956,8 +1956,6 @@ dependencies = [
  "h3",
  "h3-quinn",
  "http",
- "hyper",
- "hyper-util",
  "json-rpc-2-client",
  "json-rpc-2-core",
  "json-rpc-2-datagram",
@@ -1975,9 +1973,7 @@ dependencies = [
  "serde_json",
  "socket2",
  "tokio",
- "tokio-rustls",
  "tokio-tungstenite",
- "tower 0.5.3",
  "tracing",
 ]
 

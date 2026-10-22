@@ -40,15 +40,6 @@
 //! [`RunningServer::listeners`] lists only local endpoints, while
 //! [`RunningServer::broker_transports`] lists outbound service consumers.
 //!
-//! To share local ports, opt in with
-//! [`MultiTransportServer::enable_port_multiplexing`]. Equal configured ports
-//! (including zero) are grouped by IP protocol namespace. Logical aliases in
-//! `listeners()` report the same bound address; each physical listener closes
-//! once. TCP-family groups require the `shared_tcp` feature. Native SRT shares
-//! ordinary UDP through a bounded internal loopback relay; all other groups use
-//! direct accepted streams or owned packet lanes. HTTP method prefixes, WSU2
-//! envelopes and server QUIC CID prefixes are reserved technical discriminators.
-//!
 //! ```no_run
 //! # async fn example(
 //! #     certificates: Vec<rustls::pki_types::CertificateDer<'static>>,
@@ -149,12 +140,10 @@ use json_rpc_2_tcp::server::transports::http1::Http1Transport;
 use json_rpc_2_tcp::server::transports::tcp::TcpTransport;
 #[cfg(feature = "tls")]
 use json_rpc_2_tcp::server::transports::tls::TlsTransport;
-#[cfg(feature = "tls")]
-use json_rpc_2_transport::TLS_ALPN;
 use json_rpc_2_transport::TcpTuningConfig;
 use json_rpc_2_transport::{
-    RunningTransport, RuntimeMetricsSnapshot, ServerLimits, ServerShutdownPolicy, Transport,
-    TransportRuntime,
+    RunningTransport, RuntimeMetricsSnapshot, ServerLimits, ServerShutdownPolicy, TLS_ALPN,
+    Transport, TransportRuntime,
 };
 #[cfg(all(feature = "websocket", feature = "amqp"))]
 use json_rpc_2_websockets::server::transports::amqp::AmqpWebSocketTransport;
@@ -807,7 +796,6 @@ pub struct MultiTransportServer {
     protocol: Arc<dyn JsonRpcProtocol>,
     bind: Vec<IpAddr>,
     ports: [Option<u16>; TRANSPORT_SLOT_COUNT],
-    port_multiplexing: bool,
     #[cfg(any(feature = "tls", feature = "quic", feature = "http3"))]
     identity: Option<Identity>,
     limits: ServerLimits,
@@ -827,20 +815,12 @@ pub struct MultiTransportServer {
 }
 
 impl MultiTransportServer {
-    /// Share local sockets by IP protocol and configured port. Dispatch uses
-    /// carrier framing, never JSON-RPC parsing. TCP groups require `shared_tcp`.
-    /// Native SRT uses a bounded internal UDP relay to its libsrt listener.
-    pub fn enable_port_multiplexing(&mut self) -> &mut Self {
-        self.port_multiplexing = true;
-        self
-    }
-
     /// Accept opaque gateway frames and propagate client metadata to handlers.
     /// Enable only on trusted backend listeners, never on public gateway ingress.
     pub fn enable_gateway_framing(&mut self) -> &mut Self {
-        self.protocol = Arc::new(json_rpc_2_transport::gateway::GatewayBackendProtocol::new(
-            self.protocol.clone(),
-        ));
+        self.protocol = Arc::new(
+            json_rpc_2_transport::gateway::GatewayBackendProtocol::new(self.protocol.clone()),
+        );
         self
     }
 
@@ -855,7 +835,6 @@ impl MultiTransportServer {
             protocol,
             bind: Vec::new(),
             ports: [None; TRANSPORT_SLOT_COUNT],
-            port_multiplexing: false,
             #[cfg(any(feature = "tls", feature = "quic", feature = "http3"))]
             identity: None,
             limits: ServerLimits::default(),
@@ -1371,7 +1350,6 @@ impl MultiTransportServer {
                 if first.socket() == second.socket()
                     && port != Some(0)
                     && port == self.port(*second)
-                    && !self.port_multiplexing
                 {
                     return invalid(format!(
                         "{} and {} use the same {} port {}",
@@ -1437,25 +1415,10 @@ impl MultiTransportServer {
             running.brokers.push((kind, transport));
         }
         for &ip in &self.bind {
-            let mut groups: Vec<Vec<TransportKind>> = Vec::new();
             for kind in self.transports().filter(|kind| !kind.is_broker()) {
-                if self.port_multiplexing
-                    && let Some(group) = groups.iter_mut().find(|group| {
-                        group[0].socket() == kind.socket() && self.port(group[0]) == self.port(kind)
-                    })
-                {
-                    group.push(kind);
-                } else {
-                    groups.push(vec![kind]);
-                }
-            }
-            for kinds in groups {
-                let kind = kinds[0];
                 let address = SocketAddr::new(ip, self.port(kind).unwrap_or_default());
-                let started = if kinds.len() > 1 {
-                    self.listen_shared(kinds, address, &runtime).await
-                } else {
-                    self.listen(
+                match self
+                    .listen(
                         kind,
                         address,
                         #[cfg(feature = "websocket")]
@@ -1463,8 +1426,7 @@ impl MultiTransportServer {
                         &runtime,
                     )
                     .await
-                };
-                match started {
+                {
                     Ok(listener) => running.listeners.push(listener),
                     Err(error) => {
                         if let Err(close_error) = running.close().await {
@@ -1524,406 +1486,6 @@ impl MultiTransportServer {
                 "not a broker transport",
             )),
         }
-    }
-
-    #[allow(unused_variables)]
-    async fn listen_shared(
-        &self,
-        kinds: Vec<TransportKind>,
-        address: SocketAddr,
-        runtime: &Arc<TransportRuntime>,
-    ) -> io::Result<Listener> {
-        let socket = kinds[0].socket();
-        match socket {
-            TransportSocket::Tcp => {
-                #[cfg(feature = "shared_tcp")]
-                {
-                    let listener = bind_tcp(address, &runtime.tcp_tuning)?;
-                    let address = listener.local_addr()?;
-                    let tls = if kinds.iter().any(|kind| kind.security().is_tls()) {
-                        let mut config = self.tls_server_config(TLS_ALPN)?;
-                        Arc::make_mut(&mut config)
-                            .alpn_protocols
-                            .push(b"http/1.1".to_vec());
-                        Some(config)
-                    } else {
-                        None
-                    };
-                    let protocol = self.protocol.clone();
-                    let runtime = runtime.clone();
-                    let aliases = kinds.clone();
-                    Ok(Listener {
-                        kinds: aliases,
-                        address,
-                        transport: RunningTransport::spawn(move |shutdown| {
-                            Box::pin(crate::shared_tcp::serve(
-                                listener, kinds, protocol, tls, runtime, shutdown,
-                            ))
-                        }),
-                    })
-                }
-                #[cfg(not(feature = "shared_tcp"))]
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "shared TCP listeners require the shared_tcp feature",
-                ));
-            }
-            #[cfg(all(
-                feature = "websocket",
-                feature = "sctp",
-                any(target_os = "linux", target_os = "android")
-            ))]
-            TransportSocket::Sctp => {
-                let websocket = Arc::new(JsonRpcWebSocket::new(self.protocol.clone()));
-                let protocol = crate::shared_association::protocol_adapter(
-                    Some(self.protocol.clone()),
-                    Some(
-                        json_rpc_2_websockets::server::transports::protocol_adapter_with_kind(
-                            websocket, "ws-sctp",
-                        ),
-                    ),
-                );
-                let transport = SctpTransport::bind(address)?.with_runtime(runtime.clone());
-                Ok(Listener {
-                    kinds,
-                    address: transport.local_addr(),
-                    transport: transport.start(protocol),
-                })
-            }
-            #[cfg(all(
-                feature = "websocket",
-                feature = "dccp",
-                any(target_os = "linux", target_os = "android")
-            ))]
-            TransportSocket::Dccp => {
-                let websocket = Arc::new(JsonRpcWebSocket::new(self.protocol.clone()));
-                let protocol = crate::shared_association::protocol_adapter(
-                    Some(self.protocol.clone()),
-                    Some(
-                        json_rpc_2_websockets::server::transports::protocol_adapter_with_kind(
-                            websocket, "ws-dccp",
-                        ),
-                    ),
-                );
-                let transport = DccpTransport::bind(address)?.with_runtime(runtime.clone());
-                Ok(Listener {
-                    kinds,
-                    address: transport.local_addr(),
-                    transport: transport.start(protocol),
-                })
-            }
-            TransportSocket::Udp | TransportSocket::UdpLite => {
-                #[cfg(any(
-                    feature = "udp",
-                    feature = "rtp",
-                    feature = "rudp",
-                    feature = "coap",
-                    feature = "srt",
-                    feature = "udplite",
-                    feature = "quic",
-                    feature = "http3"
-                ))]
-                {
-                    self.listen_shared_udp(kinds, address, runtime).await
-                }
-                #[cfg(not(any(
-                    feature = "udp",
-                    feature = "rtp",
-                    feature = "rudp",
-                    feature = "coap",
-                    feature = "srt",
-                    feature = "udplite",
-                    feature = "quic",
-                    feature = "http3"
-                )))]
-                {
-                    Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "shared datagram ingress unavailable",
-                    ))
-                }
-            }
-            #[cfg(not(all(
-                feature = "websocket",
-                feature = "sctp",
-                feature = "dccp",
-                any(target_os = "linux", target_os = "android")
-            )))]
-            _ => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "unsupported shared socket namespace",
-            )),
-        }
-    }
-
-    #[cfg(any(
-        feature = "udp",
-        feature = "rtp",
-        feature = "rudp",
-        feature = "coap",
-        feature = "srt",
-        feature = "udplite",
-        feature = "quic",
-        feature = "http3"
-    ))]
-    async fn listen_shared_udp(
-        &self,
-        kinds: Vec<TransportKind>,
-        address: SocketAddr,
-        runtime: &Arc<TransportRuntime>,
-    ) -> io::Result<Listener> {
-        use json_rpc_2_transport::DatagramReceiver;
-        let udplite = kinds[0].socket() == TransportSocket::UdpLite;
-        let socket = if udplite {
-            #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
-            {
-                bind_udplite(address, &self.udp_lite_config)?
-            }
-            #[cfg(not(all(feature = "udplite", any(target_os = "linux", target_os = "android"))))]
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "UDP-Lite unavailable",
-                ));
-            }
-        } else {
-            bind_udp(address)?
-        };
-        let address = socket.local_addr()?;
-        let capacity = runtime.limits.max_concurrent_requests.clamp(1, 256);
-        #[cfg(any(feature = "quic", feature = "http3"))]
-        let (quic, endpoint) = if kinds
-            .iter()
-            .any(|kind| matches!(kind.id(), "quic" | "ws-quic" | "http3" | "ws-http3"))
-        {
-            let runtime =
-                quinn::default_runtime().ok_or_else(|| io::Error::other("no QUIC runtime"))?;
-            let native = runtime.wrap_udp_socket(socket.try_clone()?)?;
-            let (ingress, lane) = crate::shared_udp::quic::lane(native, capacity);
-            let mut config = quinn::EndpointConfig::default();
-            // Keep the fixed bit mandatory for disjoint long-header/RTP/SRT
-            // classification. Otherwise negotiated greasing clears it at random.
-            config.grease_quic_bit(false);
-            config.cid_generator(|| Box::new(crate::shared_udp::quic::CidGenerator));
-            let mut alpn = Vec::new();
-            if kinds.iter().any(|kind| kind.id() == "quic") {
-                alpn.push(QUIC_ALPN.to_vec());
-            }
-            if kinds.iter().any(|kind| kind.id() == "ws-quic") {
-                alpn.push(WS_QUIC_ALPN.to_vec());
-            }
-            if kinds
-                .iter()
-                .any(|kind| matches!(kind.id(), "http3" | "ws-http3"))
-            {
-                alpn.push(H3_ALPN.to_vec());
-            }
-            let endpoint = quinn::Endpoint::new_with_abstract_socket(
-                config,
-                Some(self.quic_server_config(alpn)?),
-                lane,
-                runtime,
-            )?;
-            (Some(ingress), Some(endpoint))
-        } else {
-            (None, None)
-        };
-        let socket = Arc::new(tokio::net::UdpSocket::from_std(socket)?);
-        #[cfg(feature = "srt")]
-        let srt = if kinds
-            .iter()
-            .any(|kind| matches!(kind.id(), "srt" | "ws-srt"))
-        {
-            let ip = if address.is_ipv4() {
-                IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-            } else {
-                IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
-            };
-            Some(
-                SrtTransport::bind(
-                    SocketAddr::new(ip, 0),
-                    self.srt_config.clone().ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidInput, "missing SRT configuration")
-                    })?,
-                )
-                .await?
-                .with_runtime(runtime.clone()),
-            )
-        } else {
-            None
-        };
-        let mut lanes = Vec::new();
-        let mut receivers = Vec::new();
-        for kind in &kinds {
-            if matches!(
-                kind.id().strip_prefix("ws-").unwrap_or(kind.id()),
-                "udp" | "rtp" | "rudp" | "coap" | "udplite"
-            ) {
-                let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
-                lanes.push((*kind, sender));
-                receivers.push((*kind, DatagramReceiver::shared(socket.clone(), receiver)));
-            }
-        }
-        let reader_stop = crate::CancellationToken::new();
-        #[cfg(feature = "srt")]
-        let relay = srt
-            .as_ref()
-            .map(|srt| {
-                crate::shared_srt::SrtUdpRelay::new(
-                    socket.clone(),
-                    srt.local_addr()?,
-                    runtime.clone(),
-                    reader_stop.clone(),
-                )
-                .map(Arc::new)
-            })
-            .transpose()?;
-        let protocol = self.protocol.clone();
-        #[allow(unused_variables)]
-        let runtime = runtime.clone();
-        let aliases = kinds.clone();
-        Ok(Listener {
-            kinds: aliases,
-            address,
-            transport: RunningTransport::spawn(move |shutdown| {
-                Box::pin(async move {
-                    let router = crate::shared_udp::Router {
-                        socket,
-                        lanes,
-                        #[cfg(any(feature = "quic", feature = "http3"))]
-                        quic,
-                        #[cfg(feature = "srt")]
-                        srt: relay.clone(),
-                        udplite,
-                    };
-                    let mut children = Vec::new();
-                    #[cfg(feature = "websocket")]
-                    let websocket: Arc<dyn WebSocketProtocol> =
-                        Arc::new(JsonRpcWebSocket::new(protocol.clone()));
-                    #[allow(unreachable_code, unreachable_patterns, unused_variables)]
-                    for (kind, source) in receivers {
-                        let child = match kind {
-                            #[cfg(feature = "udp")]
-                            TransportKind::Udp => UdpTransport::new(source)
-                                .with_runtime(runtime.clone())
-                                .start(protocol.clone()),
-                            #[cfg(feature = "rtp")]
-                            TransportKind::Rtp => RtpTransport::new(source)
-                                .with_runtime(runtime.clone())
-                                .start(protocol.clone()),
-                            #[cfg(feature = "rudp")]
-                            TransportKind::Rudp => RudpTransport::new(source)
-                                .with_runtime(runtime.clone())
-                                .start(protocol.clone()),
-                            #[cfg(feature = "coap")]
-                            TransportKind::Coap => CoapTransport::new(source)
-                                .with_runtime(runtime.clone())
-                                .start(protocol.clone()),
-                            #[cfg(all(
-                                feature = "udplite",
-                                any(target_os = "linux", target_os = "android")
-                            ))]
-                            TransportKind::UdpLite => UdpLiteTransport::new(source)
-                                .with_runtime(runtime.clone())
-                                .start(protocol.clone()),
-                            #[cfg(all(feature = "websocket", feature = "udp"))]
-                            TransportKind::WebSocketUdp => UdpWebSocketTransport::new(source)
-                                .with_runtime(runtime.clone())
-                                .start(websocket.clone()),
-                            #[cfg(all(feature = "websocket", feature = "rtp"))]
-                            TransportKind::WebSocketRtp => RtpWebSocketTransport::new(source)
-                                .with_runtime(runtime.clone())
-                                .start(websocket.clone()),
-                            #[cfg(all(feature = "websocket", feature = "rudp"))]
-                            TransportKind::WebSocketRudp => RudpWebSocketTransport::new(source)
-                                .with_runtime(runtime.clone())
-                                .start(websocket.clone()),
-                            #[cfg(all(feature = "websocket", feature = "coap"))]
-                            TransportKind::WebSocketCoap => CoapWebSocketTransport::new(source)
-                                .with_runtime(runtime.clone())
-                                .start(websocket.clone()),
-                            #[cfg(all(
-                                feature = "websocket",
-                                feature = "udplite",
-                                any(target_os = "linux", target_os = "android")
-                            ))]
-                            TransportKind::WebSocketUdpLite => {
-                                UdpLiteWebSocketTransport::new(source)
-                                    .with_runtime(runtime.clone())
-                                    .start(websocket.clone())
-                            }
-                            _ => unreachable!("only datagram lane kinds create receivers"),
-                        };
-                        children.push(child);
-                    }
-                    #[cfg(any(feature = "quic", feature = "http3"))]
-                    if let Some(endpoint) = endpoint {
-                        let protocol = protocol.clone();
-                        let runtime = runtime.clone();
-                        let kinds = kinds.clone();
-                        children.push(RunningTransport::spawn(move |stop| {
-                            Box::pin(crate::shared_quic::serve(
-                                endpoint, kinds, protocol, runtime, stop,
-                            ))
-                        }));
-                    }
-                    #[cfg(feature = "srt")]
-                    if let Some(srt) = srt {
-                        let raw = kinds.iter().any(|kind| kind.id() == "srt");
-                        let raw_protocol = protocol.clone();
-                        #[cfg(feature = "websocket")]
-                        let ws_protocol =
-                            json_rpc_2_websockets::server::transports::protocol_adapter_with_kind(
-                                websocket, "ws-srt",
-                            );
-                        #[cfg(feature = "websocket")]
-                        let ws = kinds.iter().any(|kind| kind.id() == "ws-srt");
-                        let srt = srt.with_protocol_selector(move |id| {
-                            if raw && matches!(id, "" | "json-rpc-2/srt/1") {
-                                return Ok(raw_protocol.clone());
-                            }
-                            #[cfg(feature = "websocket")]
-                            if ws && id == "json-rpc-2/ws-srt/1" {
-                                return Ok(ws_protocol.clone());
-                            }
-                            Err(io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "disabled SRT stream ID",
-                            ))
-                        });
-                        children.push(srt.start(protocol));
-                    }
-                    let reader_token = reader_stop.clone();
-                    let mut reader = tokio::spawn(async move { router.run(reader_token).await });
-                    let (mut result, reader_consumed) = tokio::select! {
-                        _ = shutdown.cancelled() => (Ok(()), false),
-                        result = &mut reader => (result.map_err(io::Error::other).and_then(|result| result), true),
-                    };
-                    // Keep public I/O alive while native sessions perform close.
-                    for child in children {
-                        if let Err(error) = child.close().await {
-                            Self::log_shared_close_error(&mut result, error);
-                        }
-                    }
-                    #[cfg(feature = "srt")]
-                    if let Some(relay) = relay
-                        && let Err(error) = relay.close().await
-                    {
-                        Self::log_shared_close_error(&mut result, error);
-                    }
-                    reader_stop.cancel();
-                    if !reader_consumed
-                        && let Err(error) = reader
-                            .await
-                            .map_err(io::Error::other)
-                            .and_then(|result| result)
-                    {
-                        Self::log_shared_close_error(&mut result, error);
-                    }
-                    result
-                })
-            }),
-        })
     }
 
     async fn listen(
@@ -2237,7 +1799,7 @@ impl MultiTransportServer {
             }
         };
         Ok(Listener {
-            kinds: vec![kind],
+            kind,
             address,
             transport,
         })
@@ -2267,19 +1829,6 @@ impl MultiTransportServer {
     /// QUIC server endpoint (TLS 1.3) bound to `address`.
     #[cfg(any(feature = "quic", feature = "http3"))]
     fn quic_endpoint(&self, address: SocketAddr, alpn: &[u8]) -> io::Result<quinn::Endpoint> {
-        let config = self.quic_server_config(vec![alpn.to_vec()])?;
-        let runtime = quinn::default_runtime()
-            .ok_or_else(|| io::Error::other("no async runtime for QUIC"))?;
-        quinn::Endpoint::new(
-            quinn::EndpointConfig::default(),
-            Some(config),
-            bind_udp(address)?,
-            runtime,
-        )
-    }
-
-    #[cfg(any(feature = "quic", feature = "http3"))]
-    fn quic_server_config(&self, alpn: Vec<Vec<u8>>) -> io::Result<quinn::ServerConfig> {
         let identity = self
             .identity
             .as_ref()
@@ -2292,32 +1841,23 @@ impl MultiTransportServer {
         .with_no_client_auth()
         .with_single_cert(identity.certificates.clone(), identity.key.clone_key())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        tls.alpn_protocols = alpn;
+        tls.alpn_protocols = vec![alpn.to_vec()];
         let crypto = QuicServerConfig::try_from(tls).map_err(io::Error::other)?;
-        Ok(quinn::ServerConfig::with_crypto(Arc::new(crypto)))
-    }
-
-    #[cfg(any(
-        feature = "udp",
-        feature = "rtp",
-        feature = "rudp",
-        feature = "coap",
-        feature = "srt",
-        feature = "udplite",
-        feature = "quic",
-        feature = "http3"
-    ))]
-    fn log_shared_close_error(result: &mut io::Result<()>, error: io::Error) {
-        tracing::error!(%error, "shared listener shutdown failed");
-        if result.is_ok() {
-            *result = Err(error);
-        }
+        let config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+        let runtime = quinn::default_runtime()
+            .ok_or_else(|| io::Error::other("no async runtime for QUIC"))?;
+        quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(config),
+            bind_udp(address)?,
+            runtime,
+        )
     }
 }
 
 /// A transport of a running server.
 struct Listener {
-    kinds: Vec<TransportKind>,
+    kind: TransportKind,
     address: SocketAddr,
     transport: RunningTransport,
 }
@@ -2352,7 +1892,7 @@ impl RunningServer {
     pub fn listeners(&self) -> impl Iterator<Item = (TransportKind, SocketAddr)> + '_ {
         self.listeners
             .iter()
-            .flat_map(|listener| listener.kinds.iter().map(|kind| (*kind, listener.address)))
+            .map(|listener| (listener.kind, listener.address))
     }
 
     /// Local address of `kind` on the bind address `ip`.
@@ -2479,8 +2019,6 @@ async fn metrics_prometheus(
     feature = "udp",
     feature = "rtp",
     feature = "rudp",
-    feature = "srt",
-    feature = "udplite",
     feature = "quic",
     feature = "http3",
     feature = "websocket",
@@ -2530,8 +2068,6 @@ fn bind_tcp(address: SocketAddr, tcp_tuning: &TcpTuningConfig) -> io::Result<Tcp
     feature = "udp",
     feature = "rtp",
     feature = "rudp",
-    feature = "srt",
-    feature = "udplite",
     feature = "quic",
     feature = "http3",
     feature = "websocket",
@@ -2675,11 +2211,6 @@ mod builder {
 
         pub fn set_shutdown_policy(mut self, shutdown: ServerShutdownPolicy) -> Self {
             self.inner.set_shutdown_policy(shutdown);
-            self
-        }
-
-        pub fn enable_port_multiplexing(mut self) -> Self {
-            self.inner.enable_port_multiplexing();
             self
         }
 
