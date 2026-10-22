@@ -1,4 +1,4 @@
-//! JSON lines and self-delimited binary gateway frames over persistent TCP.
+//! JSON lines and self-delimited application-defined binary frames over persistent TCP.
 
 use std::net::SocketAddr;
 
@@ -25,7 +25,7 @@ enum ConnectionState {
     Closed,
 }
 
-/// TCP client transport supporting JSON lines and binary gateway frames.
+/// TCP client transport supporting JSON lines and application-defined binary frames.
 ///
 /// An interrupted exchange discards its socket, including any partially written
 /// frame or outstanding reply. The next exchange opens a new connection; the
@@ -33,6 +33,7 @@ enum ConnectionState {
 pub struct TcpClientTransport {
     address: SocketAddr,
     tuning: TcpTuningConfig,
+    framing: Option<std::sync::Arc<dyn json_rpc_2_transport::StreamFraming>>,
     connection: Mutex<ConnectionState>,
 }
 
@@ -49,7 +50,16 @@ impl TcpClientTransport {
             address,
             connection: Mutex::new(ConnectionState::Ready(Self::open(address, &tuning).await?)),
             tuning,
+            framing: None,
         })
+    }
+
+    pub fn with_stream_framing(
+        mut self,
+        framing: std::sync::Arc<dyn json_rpc_2_transport::StreamFraming>,
+    ) -> Self {
+        self.framing = Some(framing);
+        self
     }
 
     async fn open(
@@ -154,7 +164,7 @@ impl TcpClientTransport {
         message: TransportMessage,
         expects_response: bool,
     ) -> Result<Option<Bytes>, TransportError> {
-        validate_message(&message).map_err(transport_error)?;
+        validate_message(&message, self.framing.as_deref()).map_err(transport_error)?;
         let mut connection = self.connection.lock().await;
         if matches!(*connection, ConnectionState::Closed) {
             return Err(closed());
@@ -168,11 +178,11 @@ impl TcpClientTransport {
             ConnectionState::Invalidated => Self::open(self.address, &self.tuning).await?,
             ConnectionState::Closed => unreachable!(),
         };
-        write_message(&mut framed.0, &message)
+        write_message(&mut framed.0, &message, self.framing.as_deref())
             .await
             .map_err(transport_error)?;
         let response = if expects_response {
-            match read_frame(&mut framed.0, &mut framed.1)
+            match read_frame(&mut framed.0, &mut framed.1, self.framing.as_deref())
                 .await
                 .map_err(transport_error)?
             {
@@ -187,27 +197,53 @@ impl TcpClientTransport {
     }
 }
 
-pub(crate) fn validate_message(message: &TransportMessage) -> std::io::Result<bool> {
-    use json_rpc_2_transport::gateway;
+pub fn validate_message(
+    message: &TransportMessage,
+    framing: Option<&dyn json_rpc_2_transport::StreamFraming>,
+) -> std::io::Result<bool> {
+    use json_rpc_2_transport::FrameBoundary;
+    if message.len() > MAX_MESSAGE_BYTES {
+        return Err(invalid_frame("message exceeds maximum size"));
+    }
+    // Normally the small header is sufficient. Coalescing is needed only when
+    // a custom codec's header spans both segments.
+    let combined;
     let first = if message.header.is_empty() {
         &message.payload
     } else {
         &message.header
     };
-    let binary = gateway::is_gateway_frame(first);
-    if message.len() > MAX_MESSAGE_BYTES {
-        return Err(invalid_frame("message exceeds maximum size"));
-    }
-    if binary {
-        let length = gateway::frame_length(first).map_err(invalid_frame)?;
-        if length != message.len() {
-            return Err(invalid_frame("gateway frame length does not match message"));
+    let boundary = match framing {
+        Some(codec) => {
+            let boundary = codec.boundary(first)?;
+            if matches!(boundary, FrameBoundary::Need(_)) && !message.header.is_empty() {
+                combined = message.clone().into_bytes();
+                codec.boundary(&combined)?
+            } else {
+                boundary
+            }
         }
-    } else {
-        std::str::from_utf8(&message.header).map_err(invalid_frame)?;
-        std::str::from_utf8(&message.payload).map_err(invalid_frame)?;
+        None => FrameBoundary::Line,
+    };
+    match boundary {
+        FrameBoundary::Frame(length) if length > 0 && length == message.len() => Ok(true),
+        FrameBoundary::Frame(_) | FrameBoundary::Need(_) => {
+            Err(invalid_frame("invalid or incomplete custom frame"))
+        }
+        FrameBoundary::Line => {
+            if message.binary {
+                return Err(invalid_frame(
+                    "binary stream message requires a matching frame codec",
+                ));
+            }
+            std::str::from_utf8(&message.header).map_err(invalid_frame)?;
+            std::str::from_utf8(&message.payload).map_err(invalid_frame)?;
+            if message.header.contains(&b'\n') || message.payload.contains(&b'\n') {
+                return Err(invalid_frame("line payload contains a newline"));
+            }
+            Ok(false)
+        }
     }
-    Ok(binary)
 }
 
 fn invalid_frame(error: impl std::fmt::Display) -> std::io::Error {
@@ -215,46 +251,56 @@ fn invalid_frame(error: impl std::fmt::Display) -> std::io::Error {
 }
 
 /// The caller owns the buffer so cancellation never discards a partial frame.
-pub(crate) async fn read_frame<R>(
+pub async fn read_frame<R>(
     reader: &mut R,
     buffer: &mut BytesMut,
+    framing: Option<&dyn json_rpc_2_transport::StreamFraming>,
 ) -> std::io::Result<Option<Bytes>>
 where
     R: AsyncRead + Unpin,
 {
-    use json_rpc_2_transport::gateway;
+    use json_rpc_2_transport::FrameBoundary;
     loop {
-        let prefix_length = buffer.len().min(gateway::MAGIC.len());
-        let possible_binary = buffer[..prefix_length] == gateway::MAGIC[..prefix_length];
-        let read_limit = if possible_binary {
-            if buffer.len() < gateway::HEADER_LEN {
-                gateway::HEADER_LEN - buffer.len()
-            } else {
-                let length =
-                    gateway::frame_length(&buffer[..gateway::HEADER_LEN]).map_err(invalid_frame)?;
-                if length > MAX_MESSAGE_BYTES {
-                    return Err(invalid_frame("gateway frame exceeds maximum size"));
+        let boundary = match framing {
+            Some(codec) => codec.boundary(buffer)?,
+            None => FrameBoundary::Line,
+        };
+        let read_limit = match boundary {
+            FrameBoundary::Need(length) | FrameBoundary::Frame(length)
+                if length == 0 || length > MAX_MESSAGE_BYTES =>
+            {
+                return Err(invalid_frame(
+                    "custom frame exceeds maximum size or is empty",
+                ));
+            }
+            FrameBoundary::Need(length) => {
+                if length <= buffer.len() {
+                    return Err(invalid_frame("codec requested no additional bytes"));
                 }
+                length - buffer.len()
+            }
+            FrameBoundary::Frame(length) => {
                 if buffer.len() >= length {
                     return Ok(Some(buffer.split_to(length).freeze()));
                 }
                 length - buffer.len()
             }
-        } else {
-            if let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
-                let length = end - usize::from(end > 0 && buffer[end - 1] == b'\r');
-                if length > MAX_MESSAGE_BYTES {
+            FrameBoundary::Line => {
+                if let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
+                    let length = end - usize::from(end > 0 && buffer[end - 1] == b'\r');
+                    if length > MAX_MESSAGE_BYTES {
+                        return Err(invalid_frame("line exceeds maximum message size"));
+                    }
+                    let mut line = buffer.split_to(end + 1).freeze();
+                    line.truncate(length);
+                    std::str::from_utf8(&line).map_err(invalid_frame)?;
+                    return Ok(Some(line));
+                }
+                if buffer.len() > MAX_MESSAGE_BYTES + 1 {
                     return Err(invalid_frame("line exceeds maximum message size"));
                 }
-                let mut line = buffer.split_to(end + 1).freeze();
-                line.truncate(length);
-                std::str::from_utf8(&line).map_err(invalid_frame)?;
-                return Ok(Some(line));
+                MAX_MESSAGE_BYTES + 2 - buffer.len()
             }
-            if buffer.len() > MAX_MESSAGE_BYTES + 1 {
-                return Err(invalid_frame("line exceeds maximum message size"));
-            }
-            MAX_MESSAGE_BYTES + 2 - buffer.len()
         };
         let count = (&mut *reader)
             .take(read_limit.min(8192) as u64)
@@ -270,14 +316,15 @@ where
 }
 
 /// Write both regions without coalescing, advancing correctly after short writes.
-pub(crate) async fn write_message<W>(
+pub async fn write_message<W>(
     writer: &mut W,
     message: &TransportMessage,
+    framing: Option<&dyn json_rpc_2_transport::StreamFraming>,
 ) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let binary = validate_message(message)?;
+    let binary = validate_message(message, framing)?;
     let mut header = message.header.as_ref();
     let mut payload = message.payload.as_ref();
     while !header.is_empty() || !payload.is_empty() {
@@ -301,157 +348,4 @@ where
         writer.write_all(b"\n").await?;
     }
     writer.flush().await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use json_rpc_2_transport::gateway::{GATEWAY_PING, GATEWAY_PONG};
-    use std::{
-        pin::Pin,
-        task::{Context, Poll},
-    };
-
-    #[tokio::test]
-    async fn coalesced_binary_and_line_reads_preserve_buffer_pointer() {
-        let mut buffer = BytesMut::with_capacity(256);
-        buffer.extend_from_slice(GATEWAY_PING);
-        buffer.extend_from_slice(GATEWAY_PONG);
-        buffer.extend_from_slice(b"pong\r\n");
-        let pointer = buffer.as_ptr();
-        let mut reader = tokio::io::empty();
-        let ping = read_frame(&mut reader, &mut buffer).await.unwrap().unwrap();
-        assert_eq!(ping.as_ptr(), pointer);
-        assert_eq!(ping, GATEWAY_PING);
-        assert_eq!(
-            read_frame(&mut reader, &mut buffer).await.unwrap().unwrap(),
-            GATEWAY_PONG
-        );
-        assert_eq!(
-            read_frame(&mut reader, &mut buffer).await.unwrap().unwrap(),
-            b"pong".as_slice()
-        );
-        assert!(
-            read_frame(&mut reader, &mut buffer)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn partial_binary_read_survives_cancellation() {
-        let (mut writer, mut reader) = tokio::io::duplex(64);
-        let mut buffer = BytesMut::new();
-        for byte in &GATEWAY_PING[..GATEWAY_PING.len() - 1] {
-            writer.write_all(&[*byte]).await.unwrap();
-            tokio::select! {
-                result = read_frame(&mut reader, &mut buffer) => {
-                    panic!("incomplete frame was accepted: {result:?}");
-                }
-                _ = tokio::task::yield_now() => {}
-            }
-        }
-        writer
-            .write_all(&GATEWAY_PING[GATEWAY_PING.len() - 1..])
-            .await
-            .unwrap();
-        assert_eq!(
-            read_frame(&mut reader, &mut buffer).await.unwrap().unwrap(),
-            GATEWAY_PING
-        );
-    }
-
-    #[tokio::test]
-    async fn opaque_payload_is_not_treated_as_lines_or_utf8() {
-        let payload = Bytes::from_static(b"\xfffirst\nsecond\r\n\0\xfe");
-        let message =
-            json_rpc_2_transport::gateway::encode_request(&payload, "client-1", "tcp").unwrap();
-        assert_eq!(message.payload.as_ptr(), payload.as_ptr());
-        let mut writer = ShortWriter(Vec::new());
-        write_message(&mut writer, &message).await.unwrap();
-        assert_eq!(writer.0.len(), message.len());
-        assert_eq!(&writer.0[message.header.len()..], payload.as_ref());
-        let mut reader = writer.0.as_slice();
-        let mut buffer = BytesMut::new();
-        let response = read_frame(&mut reader, &mut buffer).await.unwrap().unwrap();
-        assert_eq!(&response[message.header.len()..], payload.as_ref());
-        assert!(
-            read_frame(&mut reader, &mut buffer)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn oversized_header_is_rejected_before_payload_reads() {
-        let payload = Bytes::from_static(b"test");
-        let message =
-            json_rpc_2_transport::gateway::encode_request(&payload, "client-1", "tcp").unwrap();
-        let mut buffer = BytesMut::from(message.header.as_ref());
-        buffer[13..17].copy_from_slice(&u32::MAX.to_be_bytes());
-        let length = buffer.len();
-        let error = read_frame(&mut tokio::io::empty(), &mut buffer)
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert_eq!(buffer.len(), length);
-    }
-
-    struct ShortWriter(Vec<u8>);
-
-    impl AsyncWrite for ShortWriter {
-        fn poll_write(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            input: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            let count = input.len().min(3);
-            self.0.extend_from_slice(&input[..count]);
-            Poll::Ready(Ok(count))
-        }
-
-        fn poll_write_vectored(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            input: &[std::io::IoSlice<'_>],
-        ) -> Poll<std::io::Result<usize>> {
-            let mut count = 0;
-            for slice in input {
-                let length = slice.len().min(3 - count);
-                self.0.extend_from_slice(&slice[..length]);
-                count += length;
-                if count == 3 {
-                    break;
-                }
-            }
-            Poll::Ready(Ok(count))
-        }
-
-        fn is_write_vectored(&self) -> bool {
-            true
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    #[tokio::test]
-    async fn short_vectored_writes_do_not_append_binary_newlines() {
-        let mut writer = ShortWriter(Vec::new());
-        write_message(&mut writer, &Bytes::from_static(GATEWAY_PING).into())
-            .await
-            .unwrap();
-        assert_eq!(writer.0, GATEWAY_PING);
-        write_message(&mut writer, &Bytes::from_static(b"{}").into())
-            .await
-            .unwrap();
-        assert_eq!(&writer.0[GATEWAY_PING.len()..], b"{}\n");
-    }
 }

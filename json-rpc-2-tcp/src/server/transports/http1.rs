@@ -119,7 +119,6 @@ async fn http_rpc(
 ) -> Response {
     let started = Instant::now();
     let context = TransportSession::stateless(if tls.is_some() { "tls" } else { "http1" });
-    let binary = json_rpc_2_transport::gateway::is_gateway_frame(&body);
     let request_log = body.clone();
     let response = protocol.handle_owned_message(body, &context).await;
     log_json_rpc(
@@ -144,7 +143,7 @@ async fn http_rpc(
             StatusCode::OK,
             [(
                 header::CONTENT_TYPE,
-                if binary {
+                if response.binary {
                     "application/octet-stream"
                 } else {
                     "application/json"

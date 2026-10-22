@@ -14,8 +14,37 @@ use std::{
 };
 use tokio::sync::{RwLock, mpsc, oneshot};
 
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
-const SESSION_LEASE: Duration = Duration::from_secs(45);
+#[derive(Clone, Copy, Debug)]
+pub struct BrokerSessionConfig {
+    pub heartbeat_interval: Duration,
+    pub session_lease: Duration,
+}
+
+impl Default for BrokerSessionConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval: Duration::from_secs(10),
+            session_lease: Duration::from_secs(45),
+        }
+    }
+}
+
+impl BrokerSessionConfig {
+    pub fn validate(&self) -> Result<(), TransportError> {
+        if self.heartbeat_interval.is_zero()
+            || self.session_lease <= self.heartbeat_interval
+            || self
+                .session_lease
+                .checked_add(self.heartbeat_interval)
+                .is_none()
+        {
+            return Err(TransportError::new(
+                "broker session lease must exceed a nonzero heartbeat interval",
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +86,7 @@ pub struct MqttConfig {
     pub operation_timeout: Duration,
     pub response_timeout: Duration,
     pub max_payload_bytes: usize,
+    pub sessions: BrokerSessionConfig,
     /// PEM CA bundle; None uses the system trust store.
     pub ca_certificate: Option<Vec<u8>>,
 }
@@ -69,6 +99,7 @@ impl Default for MqttConfig {
             operation_timeout: Duration::from_secs(10),
             response_timeout: Duration::from_secs(30),
             max_payload_bytes: 1024 * 1024,
+            sessions: BrokerSessionConfig::default(),
             ca_certificate: None,
         }
     }
@@ -105,6 +136,7 @@ pub struct AmqpConfig {
     pub operation_timeout: Duration,
     pub response_timeout: Duration,
     pub max_payload_bytes: usize,
+    pub sessions: BrokerSessionConfig,
     pub prefetch: u16,
 }
 #[cfg(feature = "amqp")]
@@ -116,6 +148,7 @@ impl Default for AmqpConfig {
             operation_timeout: Duration::from_secs(10),
             response_timeout: Duration::from_secs(30),
             max_payload_bytes: 1024 * 1024,
+            sessions: BrokerSessionConfig::default(),
             prefetch: 64,
         }
     }
@@ -151,6 +184,15 @@ pub(crate) enum Config {
     Amqp(AmqpConfig),
 }
 impl Config {
+    fn sessions(&self) -> BrokerSessionConfig {
+        match self {
+            #[cfg(feature = "mqtt")]
+            Self::Mqtt(config) => config.sessions,
+            #[cfg(feature = "amqp")]
+            Self::Amqp(config) => config.sessions,
+        }
+    }
+
     fn operation_timeout(&self) -> Duration {
         match self {
             #[cfg(feature = "mqtt")]
@@ -187,6 +229,7 @@ impl Config {
         &self,
         server: bool,
     ) -> Result<(Session, mpsc::Receiver<Message>), TransportError> {
+        self.sessions().validate()?;
         if self.operation_timeout().is_zero()
             || self.response_timeout().is_zero()
             || self.max_payload() == 0
@@ -390,7 +433,7 @@ impl Client {
         let heartbeat_identity = identity.clone();
         let config = self.config.clone();
         let heartbeat = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+            let mut interval = tokio::time::interval(config.sessions().heartbeat_interval);
             interval.tick().await;
             loop {
                 tokio::select! {
@@ -656,7 +699,8 @@ pub(crate) async fn serve(
         let session = Arc::new(session);
         let mut sessions: HashMap<String, IngressSession> = HashMap::new();
         let mut retired: HashMap<String, Instant> = HashMap::new();
-        let mut leases = tokio::time::interval(HEARTBEAT_INTERVAL);
+        let policy = config.sessions();
+        let mut leases = tokio::time::interval(policy.heartbeat_interval);
         let worker_limit = runtime
             .limits
             .max_connections
@@ -666,10 +710,10 @@ pub(crate) async fn serve(
             let message = tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = leases.tick() => {
-                    retired.retain(|_, closed| closed.elapsed() < SESSION_LEASE + HEARTBEAT_INTERVAL);
+                    retired.retain(|_, closed| closed.elapsed() < policy.session_lease + policy.heartbeat_interval);
                     sessions.retain(|_, session| !session.push.is_finished() && (
                         session.activity.requests.load(Ordering::Relaxed) > 0
-                        || session.activity.last_seen.lock().unwrap().elapsed() < SESSION_LEASE
+                        || session.activity.last_seen.lock().unwrap().elapsed() < policy.session_lease
                     ));
                     continue;
                 },

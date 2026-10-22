@@ -32,6 +32,14 @@ impl RpcClientTransport for DccpWebSocketClientTransport {
         self.inner.send(message)
     }
 
+    fn send_message<'a>(
+        &'a self,
+        message: json_rpc_2_transport::TransportMessage,
+        expects_response: bool,
+    ) -> json_rpc_2_transport::ClientTransportFuture<'a> {
+        self.inner.send_message(message, expects_response)
+    }
+
     fn send_with_expectation<'a>(
         &'a self,
         message: bytes::Bytes,

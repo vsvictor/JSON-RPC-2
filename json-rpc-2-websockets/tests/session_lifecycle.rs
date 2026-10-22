@@ -122,7 +122,7 @@ async fn exercise<S: AsyncRead + AsyncWrite + Unpin>(
     }
     for payload in [
         Bytes::from_static(b"\xff\0arbitrary binary"),
-        Bytes::from_static(b"JRPC-GW\x03ASCII gateway frame"),
+        Bytes::from_static(b"APP\xffopaque application frame"),
     ] {
         bounded(socket.send(Message::Binary(payload.clone())))
             .await

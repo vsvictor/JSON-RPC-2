@@ -69,12 +69,7 @@ impl RpcClientTransport for Http1ClientTransport {
         _expects_response: bool,
     ) -> ClientTransportFuture<'a> {
         Box::pin(async move {
-            let binary =
-                json_rpc_2_transport::gateway::is_gateway_frame(if message.header.is_empty() {
-                    &message.payload
-                } else {
-                    &message.header
-                });
+            let binary = message.binary;
             let request = Request::builder()
                 .method(Method::POST)
                 .uri(&self.uri)

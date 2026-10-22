@@ -178,13 +178,9 @@ async fn run_websocket_session<S>(
                     .await;
                     return;
                 }
-                let message = if json_rpc_2_transport::gateway::is_gateway_frame(&payload) {
-                    Message::Binary(payload)
-                } else {
-                    match std::str::from_utf8(&payload) {
-                        Ok(text) => Message::Text(text.to_owned().into()),
-                        Err(_) => Message::Binary(payload),
-                    }
+                let message = match std::str::from_utf8(&payload) {
+                    Ok(text) => Message::Text(text.to_owned().into()),
+                    Err(_) => Message::Binary(payload),
                 };
                 if websocket.send(message).await.is_err() {
                     return;

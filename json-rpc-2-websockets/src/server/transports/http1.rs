@@ -355,14 +355,10 @@ async fn websocket_session(
                     close_session(socket, close_code::SIZE, "push message too large", runtime.close_timeout()).await;
                     return;
                 }
-                let message = if json_rpc_2_transport::gateway::is_gateway_frame(&payload) {
-                    Message::Binary(payload)
-                } else {
-                    match std::str::from_utf8(&payload) {
+                let message = match std::str::from_utf8(&payload) {
                         Ok(text) => Message::Text(text.to_owned().into()),
                         Err(_) => Message::Binary(payload),
-                    }
-                };
+                    };
                 if let Err(error) = socket.send(message).await {
                     log_transport_error("WebSocket/HTTP/1.1", peer, "push", &error);
                     return;

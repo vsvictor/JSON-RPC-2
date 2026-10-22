@@ -209,14 +209,10 @@ async fn run_websocket_session(
                     close_session(websocket, CloseCode::Size, "push message too large", runtime.close_timeout()).await;
                     return;
                 }
-                let message = if json_rpc_2_transport::gateway::is_gateway_frame(&payload) {
-                    Message::Binary(payload)
-                } else {
-                    match std::str::from_utf8(&payload) {
+                let message = match std::str::from_utf8(&payload) {
                         Ok(text) => Message::Text(text.to_owned().into()),
                         Err(_) => Message::Binary(payload),
-                    }
-                };
+                    };
                 if let Err(error) = websocket.send(message).await {
                     log_transport_error("WebSocket/QUIC", peer, "push", &error);
                     return;

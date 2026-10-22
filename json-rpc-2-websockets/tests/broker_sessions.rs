@@ -138,8 +138,8 @@ async fn exercise(
 ) {
     assert_eq!(a.push().await.unwrap().as_ref(), PUSH);
     assert_eq!(b.push().await.unwrap().as_ref(), PUSH);
-    // This gateway envelope is binary and deliberately not business JSON.
-    let request = Bytes::from_static(b"JRPC-GW\x03\0\xffopaque\nrequest");
+    // This application envelope is binary and deliberately not business JSON.
+    let request = Bytes::from_static(b"APP\xff\0\xffopaque\nrequest");
     let first = a
         .send_with_expectation(request.clone(), true)
         .await

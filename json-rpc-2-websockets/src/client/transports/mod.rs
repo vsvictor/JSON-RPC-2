@@ -20,7 +20,7 @@ use json_rpc_2_core::{
 };
 use json_rpc_2_transport::{
     ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
-    RpcClientTransport, TransportError, expects_response,
+    RpcClientTransport, TransportError, TransportMessage, expects_response,
 };
 use json_rpc_2_transport::{closed, transport_error};
 
@@ -76,11 +76,11 @@ type WebSocketConnectFuture<C> = Pin<
     >,
 >;
 
-/// JSON-RPC over a WebSocket: direct JSON uses text messages, while gateway
-/// envelopes use binary messages.
+/// JSON-RPC over a WebSocket: direct JSON uses text messages; callers can
+/// explicitly select binary encoding for arbitrary application envelopes.
 ///
 /// WebSocket libraries require a contiguous frame, so the default
-/// `RpcClientTransport::send_message` coalesces split gateway headers and payloads
+/// `RpcClientTransport::send_message` coalesces split application headers and payloads
 /// at this library boundary.
 pub struct WebSocketClientTransport<C: WebSocketCarrier> {
     session: Mutex<Option<(WebSocketStream<C::Io>, C)>>,
@@ -123,10 +123,14 @@ impl<T> DatagramWebSocketClientTransport<T> {
     }
 
     fn encode_outbound(message: Bytes) -> Result<Bytes, TransportError> {
+        Self::encode_message(message.into())
+    }
+
+    fn encode_message(message: TransportMessage) -> Result<Bytes, TransportError> {
+        let binary = message.binary;
+        let message = message.into_bytes();
         let message = match std::str::from_utf8(&message) {
-            Ok(text) if !json_rpc_2_transport::gateway::is_gateway_frame(&message) => {
-                WebSocketMessage::Text(text.to_owned())
-            }
+            Ok(text) if !binary => WebSocketMessage::Text(text.to_owned()),
             _ => WebSocketMessage::Binary(message),
         };
         // The codec builds a contiguous frame, copying its payload at this boundary.
@@ -150,13 +154,25 @@ impl<C: WebSocketCarrier> RpcClientTransport for WebSocketClientTransport<C> {
             let mut session = self.session.lock().await;
             let (socket, _) = session.as_mut().ok_or_else(closed)?;
             let expects = expects_response(&message);
-            exchange(socket, message, expects).await
+            exchange(socket, message.into(), expects).await
         })
     }
 
     fn send_with_expectation<'a>(
         &'a self,
         message: Bytes,
+        expects_response: bool,
+    ) -> ClientTransportFuture<'a> {
+        Box::pin(async move {
+            let mut session = self.session.lock().await;
+            let (socket, _) = session.as_mut().ok_or_else(closed)?;
+            exchange(socket, message.into(), expects_response).await
+        })
+    }
+
+    fn send_message<'a>(
+        &'a self,
+        message: TransportMessage,
         expects_response: bool,
     ) -> ClientTransportFuture<'a> {
         Box::pin(async move {
@@ -216,6 +232,24 @@ where
     ) -> ClientTransportFuture<'a> {
         Box::pin(async move {
             let payload = Self::encode_outbound(message)?;
+            let response = self
+                .inner
+                .send_with_expectation(payload, expects_response)
+                .await?;
+            response
+                .map(|message| self.decode_inbound(message))
+                .transpose()
+                .map(Option::flatten)
+        })
+    }
+
+    fn send_message<'a>(
+        &'a self,
+        message: TransportMessage,
+        expects_response: bool,
+    ) -> ClientTransportFuture<'a> {
+        Box::pin(async move {
+            let payload = Self::encode_message(message)?;
             let response = self
                 .inner
                 .send_with_expectation(payload, expects_response)
@@ -309,16 +343,16 @@ where
 
 async fn exchange<S>(
     socket: &mut WebSocketStream<S>,
-    message: Bytes,
+    message: TransportMessage,
     expects: bool,
 ) -> Result<Option<Bytes>, TransportError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let binary = message.binary;
+    let message = message.into_bytes();
     let message = match std::str::from_utf8(&message) {
-        Ok(text) if !json_rpc_2_transport::gateway::is_gateway_frame(&message) => {
-            Message::Text(text.to_owned().into())
-        }
+        Ok(text) if !binary => Message::Text(text.to_owned().into()),
         _ => Message::Binary(message),
     };
     socket.send(message).await.map_err(transport_error)?;
@@ -366,8 +400,8 @@ mod tests {
     use super::*;
     use tokio_tungstenite::tungstenite::protocol::Role;
 
-    fn gateway_message(payload: &[u8]) -> Bytes {
-        let mut message = b"JRPC-GW\x03".to_vec();
+    fn opaque_message(payload: &[u8]) -> Bytes {
+        let mut message = b"APP\xff".to_vec();
         message.extend_from_slice(&[0; 17]);
         message.extend_from_slice(payload);
         Bytes::from(message)
@@ -405,11 +439,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrapped_transports_preserve_binary_gateway_and_direct_text() {
+    async fn wrapped_transports_preserve_binary_messages_and_direct_text() {
         for (request, response, binary) in [
             (
-                gateway_message(b"\xffrequest\n\0"),
-                gateway_message(b"\xferesponse\n\n"),
+                opaque_message(b"\xffrequest\n\0"),
+                opaque_message(b"\xferesponse\n\n"),
                 true,
             ),
             (
@@ -451,11 +485,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_websockets_preserve_binary_gateway_and_direct_text() {
+    async fn native_websockets_preserve_binary_messages_and_direct_text() {
         for (request, response, binary) in [
             (
-                gateway_message(b"\xffrequest\n\0"),
-                gateway_message(b"\xferesponse\n\n"),
+                opaque_message(b"\xffrequest\n\0"),
+                opaque_message(b"\xferesponse\n\n"),
                 true,
             ),
             (
@@ -485,13 +519,13 @@ mod tests {
                 };
                 server.send(outbound).await.unwrap();
             };
-            let (result, ()) = tokio::join!(exchange(&mut client, request, true), peer);
+            let (result, ()) = tokio::join!(exchange(&mut client, request.into(), true), peer);
             assert_eq!(result.unwrap(), Some(response));
         }
     }
 
     #[test]
-    fn non_utf8_application_payload_uses_binary_without_gateway_magic() {
+    fn non_utf8_application_payload_uses_binary_without_application_detection() {
         let payload = Bytes::from_static(b"\xffnot-a-gateway-frame");
         let frame =
             DatagramWebSocketClientTransport::<FramedPeer>::encode_outbound(payload.clone())

@@ -109,12 +109,7 @@ impl RpcClientTransport for Http3ClientTransport {
         _expects_response: bool,
     ) -> ClientTransportFuture<'a> {
         Box::pin(async move {
-            let binary =
-                json_rpc_2_transport::gateway::is_gateway_frame(if message.header.is_empty() {
-                    &message.payload
-                } else {
-                    &message.header
-                });
+            let binary = message.binary;
             let request = rpc_request(&self.uri, binary)?;
             let mut stream = self.request_stream(request).await?;
             receive_http3_response(&mut stream, message, None).await
@@ -128,10 +123,7 @@ impl RpcClientTransport for Http3ClientTransport {
         cancel: CancellationToken,
     ) -> ClientTransportFuture<'a> {
         Box::pin(async move {
-            let request = rpc_request(
-                &self.uri,
-                json_rpc_2_transport::gateway::is_gateway_frame(&message),
-            )?;
+            let request = rpc_request(&self.uri, false)?;
             let mut stream = self.request_stream(request).await?;
             receive_http3_response(&mut stream, message.into(), Some(&cancel)).await
         })

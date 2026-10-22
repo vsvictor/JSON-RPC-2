@@ -6,10 +6,12 @@ pub mod server;
 
 #[cfg(any(feature = "mqtt", feature = "amqp"))]
 pub mod broker;
-#[cfg(feature = "mqtt")]
-pub use broker::MqttConfig;
 #[cfg(feature = "amqp")]
 pub use broker::AmqpConfig;
+#[cfg(any(feature = "mqtt", feature = "amqp"))]
+pub use broker::BrokerSessionConfig;
+#[cfg(feature = "mqtt")]
+pub use broker::MqttConfig;
 
 pub mod transports {
     pub use json_rpc_2_transport::{

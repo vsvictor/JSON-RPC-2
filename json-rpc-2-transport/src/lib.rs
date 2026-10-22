@@ -2,12 +2,13 @@
 
 mod client_transport;
 mod datagram_receiver;
-pub mod gateway;
+mod framing;
 mod message;
 mod server_transport;
 mod udplite;
 
 pub use datagram_receiver::{DatagramReceiver, OwnedDatagram, ReceivedDatagram};
+pub use framing::{FrameBoundary, StreamFraming};
 pub use message::TransportMessage;
 pub use udplite::apply_udp_lite_coverage;
 
@@ -17,12 +18,12 @@ pub use client_transport::{
     transport_error,
 };
 pub use server_transport::{
-    CancellationToken, GatewayRequestMetadata, H3_NO_ERROR, JsonRpcProtocol, ProtocolFuture,
-    ProtocolMessageFuture, ProtocolSessionGuard, QUIC_NO_ERROR, RunningTransport, RuntimeMetrics,
-    RuntimeMetricsSnapshot, ServerLimits, ServerShutdownPolicy, Transport, TransportContext,
-    TransportFuture, TransportLimits, TransportRuntime, TransportSession,
-    apply_tcp_listener_tuning, apply_tcp_stream_tuning, dispatch_stateless, log_control,
-    log_json_rpc, log_transport_error, multiplex,
+    CancellationToken, H3_NO_ERROR, JsonRpcProtocol, ProtocolFuture, ProtocolMessageFuture,
+    ProtocolSessionGuard, QUIC_NO_ERROR, RunningTransport, RuntimeMetrics, RuntimeMetricsSnapshot,
+    ServerLimits, ServerShutdownPolicy, Transport, TransportContext, TransportFuture,
+    TransportLimits, TransportRuntime, TransportSession, apply_tcp_listener_tuning,
+    apply_tcp_stream_tuning, dispatch_stateless, log_control, log_json_rpc, log_transport_error,
+    multiplex,
 };
 
 /// TCP congestion control profile used by TCP-based transports.

@@ -1,4 +1,4 @@
-//! JSON lines and binary gateway frames over verified TLS 1.2/1.3.
+//! JSON lines and application-defined binary frames over verified TLS 1.2/1.3.
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -38,7 +38,7 @@ enum ConnectionState {
     Closed,
 }
 
-/// TLS client for JSON lines and binary gateway frames over TCP.
+/// TLS client for JSON lines and application-defined binary frames over TCP.
 ///
 /// The supplied CA bundle is required; certificates and hostnames are always
 /// verified. An interrupted exchange discards its connection and is not replayed.
@@ -47,6 +47,7 @@ pub struct TlsClientTransport {
     server_name: String,
     connector: TlsConnector,
     tuning: TcpTuningConfig,
+    framing: Option<Arc<dyn json_rpc_2_transport::StreamFraming>>,
     connection: Mutex<ConnectionState>,
 }
 
@@ -111,11 +112,20 @@ impl TlsClientTransport {
             server_name: server_name.to_owned(),
             connector: TlsConnector::from(Arc::new(config)),
             tuning,
+            framing: None,
             connection: Mutex::new(ConnectionState::Invalidated),
         };
         let connection = client.open().await?;
         *client.connection.lock().await = ConnectionState::Ready(Box::new(connection));
         Ok(client)
+    }
+
+    pub fn with_stream_framing(
+        mut self,
+        framing: Arc<dyn json_rpc_2_transport::StreamFraming>,
+    ) -> Self {
+        self.framing = Some(framing);
+        self
     }
 
     async fn open(&self) -> Result<Connection, TransportError> {
@@ -226,7 +236,7 @@ impl TlsClientTransport {
         message: TransportMessage,
         expects_response: bool,
     ) -> Result<Option<Bytes>, TransportError> {
-        validate_message(&message).map_err(transport_error)?;
+        validate_message(&message, self.framing.as_deref()).map_err(transport_error)?;
         let mut connection = self.connection.lock().await;
         if matches!(*connection, ConnectionState::Closed) {
             return Err(json_rpc_2_transport::closed());
@@ -236,11 +246,11 @@ impl TlsClientTransport {
             ConnectionState::Invalidated => Box::new(self.open().await?),
             ConnectionState::Closed => return Err(json_rpc_2_transport::closed()),
         };
-        write_message(&mut framed.0, &message)
+        write_message(&mut framed.0, &message, self.framing.as_deref())
             .await
             .map_err(transport_error)?;
         let response = if expects_response {
-            match read_frame(&mut framed.0, &mut framed.1)
+            match read_frame(&mut framed.0, &mut framed.1, self.framing.as_deref())
                 .await
                 .map_err(transport_error)?
             {

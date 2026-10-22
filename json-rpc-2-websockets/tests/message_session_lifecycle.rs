@@ -120,19 +120,13 @@ fn opaque_messages() -> [WebSocketMessage; 3] {
     [
         WebSocketMessage::Text("opaque text, not JSON".into()),
         WebSocketMessage::Binary(Bytes::from_static(b"\0\xff\nopaque binary\r\n")),
-        WebSocketMessage::Binary(gateway_payload()),
+        WebSocketMessage::Binary(opaque_payload()),
     ]
 }
 
-fn gateway_payload() -> Bytes {
-    // Valid UTF-8 on purpose: gateway frames must still use Binary, not Text.
-    json_rpc_2_transport::gateway::encode_request(
-        &Bytes::from_static(b"opaque ASCII payload"),
-        "test-connection",
-        "ws-srt",
-    )
-    .unwrap()
-    .into_bytes()
+fn opaque_payload() -> Bytes {
+    // Opaque binary bytes are independent of JSON-RPC syntax.
+    Bytes::from_static(b"\0\xffopaque binary fixture")
 }
 
 #[cfg(feature = "srt")]
@@ -172,7 +166,7 @@ mod srt {
         let context = events.opened("ws-srt").await;
         for payload in [
             Bytes::from_static(br#"{"jsonrpc":"2.0","method":"echo","id":1}"#),
-            gateway_payload(),
+            opaque_payload(),
         ] {
             assert_eq!(
                 bounded(client.send_with_expectation(payload.clone(), true))
@@ -196,7 +190,7 @@ mod srt {
         events.closed(&context).await;
         let next = events.opened("ws-srt").await;
         assert_ne!(next.connection_id, context.connection_id);
-        let payload = gateway_payload();
+        let payload = opaque_payload();
         assert_eq!(
             bounded(client.send_with_expectation(payload.clone(), true))
                 .await

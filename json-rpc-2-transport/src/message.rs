@@ -17,7 +17,11 @@ mod tests {
             (header.as_ptr(), header.len()),
             (payload.as_ptr(), payload.len()),
         ];
-        let mut message = TransportMessage { header, payload };
+        let mut message = TransportMessage {
+            header,
+            payload,
+            binary: false,
+        };
         assert_eq!(message.size_hint().exact(), Some(1041));
         let mut context = Context::from_waker(Waker::noop());
         for (pointer, len) in expected {
@@ -56,9 +60,19 @@ mod tests {
 pub struct TransportMessage {
     pub header: Bytes,
     pub payload: Bytes,
+    /// Request binary carrier encoding even when the bytes happen to be UTF-8.
+    pub binary: bool,
 }
 
 impl TransportMessage {
+    pub fn binary(payload: Bytes) -> Self {
+        Self {
+            header: Bytes::new(),
+            payload,
+            binary: true,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.header.len() + self.payload.len()
     }
@@ -86,6 +100,7 @@ impl From<Bytes> for TransportMessage {
         Self {
             header: Bytes::new(),
             payload,
+            binary: false,
         }
     }
 }

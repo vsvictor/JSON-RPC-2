@@ -43,6 +43,10 @@ pub type ProtocolMessageFuture<'a> =
 pub trait JsonRpcProtocol: Send + Sync + 'static {
     fn handle_message<'a>(&'a self, input: &'a [u8]) -> ProtocolFuture<'a>;
 
+    fn stream_framing(&self) -> Option<&dyn crate::StreamFraming> {
+        None
+    }
+
     fn handle_message_with_context<'a>(
         &'a self,
         input: &'a [u8],
@@ -101,132 +105,6 @@ pub async fn dispatch_stateless(
         .handle_owned_message(payload, &context)
         .await
         .map(crate::TransportMessage::into_bytes)
-}
-
-pub struct GatewayRequestMetadata {
-    pub connection_id: String,
-    pub transport: String,
-    pub payload_length: Option<usize>,
-}
-
-impl GatewayRequestMetadata {
-    pub fn parse(line: &str) -> io::Result<Option<Self>> {
-        if line == "JRPC-GW/1" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "gateway metadata requires connection ID and transport",
-            ));
-        }
-        let Some(rest) = line.strip_prefix("JRPC-GW/1 ") else {
-            return Ok(None);
-        };
-        let mut fields = rest.split_ascii_whitespace();
-        let connection_id = fields.next();
-        let transport = fields.next();
-        let payload_length = fields
-            .next()
-            .map(|value| {
-                value.parse::<usize>().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "gateway metadata payload length must be a non-negative integer",
-                    )
-                })
-            })
-            .transpose()?;
-        if fields.next().is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid gateway metadata fields",
-            ));
-        }
-        let (Some(connection_id), Some(transport)) = (connection_id, transport) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "gateway metadata requires connection ID and transport",
-            ));
-        };
-        if connection_id.len() > 128
-            || connection_id.is_empty()
-            || !connection_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            || transport.is_empty()
-            || !transport
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid gateway metadata value",
-            ));
-        }
-        if payload_length.is_some_and(|length| length > json_rpc_2_core::MAX_MESSAGE_BYTES) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "gateway metadata payload exceeds the maximum message size",
-            ));
-        }
-        Ok(Some(Self {
-            connection_id: connection_id.to_owned(),
-            transport: transport.to_owned(),
-            payload_length,
-        }))
-    }
-
-    pub fn context(&self, push_sender: Option<mpsc::UnboundedSender<Bytes>>) -> TransportContext {
-        TransportContext {
-            transport: self.transport.clone(),
-            connection_id: self.connection_id.clone(),
-            push_sender,
-        }
-    }
-}
-
-#[cfg(test)]
-mod gateway_metadata_tests {
-    use super::GatewayRequestMetadata;
-
-    #[test]
-    fn parses_gateway_metadata_without_changing_the_payload_contract() {
-        let metadata = GatewayRequestMetadata::parse(
-            "JRPC-GW/1 550e8400-e29b-41d4-a716-446655440000 ws-tcp 25",
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(
-            metadata.connection_id,
-            "550e8400-e29b-41d4-a716-446655440000"
-        );
-        assert_eq!(metadata.transport, "ws-tcp");
-        assert_eq!(metadata.payload_length, Some(25));
-    }
-
-    #[test]
-    fn ignores_lines_without_the_gateway_metadata_prefix() {
-        assert!(
-            GatewayRequestMetadata::parse(r#"{"jsonrpc":"2.0","method":"echo","id":1}"#)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn rejects_malformed_gateway_metadata() {
-        for line in [
-            "JRPC-GW/1",
-            "JRPC-GW/1 connection-id",
-            "JRPC-GW/1 connection-id tcp extra",
-            "JRPC-GW/1 invalid_id tcp",
-            "JRPC-GW/1 connection-id tcp not-a-length",
-        ] {
-            assert!(
-                GatewayRequestMetadata::parse(line).is_err(),
-                "accepted malformed metadata: {line}"
-            );
-        }
-    }
 }
 
 pub struct TransportSession {

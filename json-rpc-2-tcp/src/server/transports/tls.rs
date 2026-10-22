@@ -1,4 +1,4 @@
-//! JSON lines and binary gateway frames over TLS-wrapped TCP.
+//! JSON lines and application-defined binary frames over TLS-wrapped TCP.
 
 use std::{io, sync::Arc};
 
@@ -20,7 +20,7 @@ mod tcp;
 #[cfg(feature = "tcp")]
 use super::tcp;
 
-/// TLS transport accepting JSON lines and binary gateway frames.
+/// TLS transport accepting JSON lines and application-defined binary frames.
 pub struct TlsTransport {
     listener: TcpListener,
     acceptor: TlsAcceptor,

@@ -180,7 +180,6 @@ where
         } else if request.method() != Method::POST {
             (StatusCode::METHOD_NOT_ALLOWED, None, None)
         } else {
-            let binary = json_rpc_2_transport::gateway::is_gateway_frame(&body);
             let context = json_rpc_2_transport::TransportSession::stateless("http3");
             let body = bytes::Bytes::from(body);
             let request_log = body.clone();
@@ -201,7 +200,7 @@ where
             match response {
                 Some(response) => (
                     StatusCode::OK,
-                    Some(if binary {
+                    Some(if response.binary {
                         "application/octet-stream"
                     } else {
                         "application/json"

@@ -472,9 +472,7 @@ impl JsonRpcProtocol for WebSocketJsonRpcAdapter {
     feature = "dccp",
 ))]
 fn push_message(payload: Bytes) -> WebSocketMessage {
-    if !json_rpc_2_transport::gateway::is_gateway_frame(&payload)
-        && let Ok(text) = std::str::from_utf8(&payload)
-    {
+    if let Ok(text) = std::str::from_utf8(&payload) {
         WebSocketMessage::Text(text.to_owned())
     } else {
         WebSocketMessage::Binary(payload)
@@ -523,18 +521,12 @@ impl JsonRpcWebSocket {
                 }
             };
             // The WebSocket codec requires one contiguous application frame.
-            let response = self
-                .protocol
-                .handle_owned_message(bytes, context)
-                .await?
-                .into_bytes();
-            Some(if is_text {
-                WebSocketMessage::Text(
-                    String::from_utf8(response.to_vec())
-                        .expect("serialized JSON-RPC responses are valid UTF-8"),
-                )
-            } else {
-                WebSocketMessage::Binary(response)
+            let response = self.protocol.handle_owned_message(bytes, context).await?;
+            let is_text = is_text && !response.binary;
+            let response = response.into_bytes();
+            Some(match std::str::from_utf8(&response) {
+                Ok(text) if is_text => WebSocketMessage::Text(text.to_owned()),
+                _ => WebSocketMessage::Binary(response),
             })
         })
     }
@@ -570,15 +562,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn push_preserves_text_binary_and_utf8_gateway_frames() {
+    fn push_preserves_text_binary_and_application_frames() {
         assert_eq!(
             push_message(Bytes::from_static(b"notification")),
             WebSocketMessage::Text("notification".to_owned())
         );
-        for payload in [
-            Bytes::from_static(b"\xff\0binary"),
-            Bytes::from_static(b"JRPC-GW\x03\0utf8"),
-        ] {
+        for payload in [Bytes::from_static(b"\xff\0binary")] {
             assert_eq!(
                 push_message(payload.clone()),
                 WebSocketMessage::Binary(payload)
@@ -607,8 +596,8 @@ mod tests {
     async fn protocol_preserves_binary_and_text_response_kinds() {
         for (request, response, binary) in [
             (
-                Bytes::from_static(b"JRPC-GW\x03\0\xff\nrequest"),
-                Bytes::from_static(b"JRPC-GW\x03\0\xfe\nresponse"),
+                Bytes::from_static(b"APP\xff\0\xff\nrequest"),
+                Bytes::from_static(b"APP\xff\0\xfe\nresponse"),
                 true,
             ),
             (
@@ -655,8 +644,9 @@ mod tests {
                 assert_eq!(input, self.request);
                 assert_eq!(context.transport, self.kind);
                 Some(json_rpc_2_transport::TransportMessage {
-                    header: Bytes::from_static(b"JRPC-GW\x03"),
+                    header: Bytes::from_static(b"APP\xff"),
                     payload: Bytes::from_static(b"\xff\nresponse"),
+                    binary: true,
                 })
             })
         }
@@ -665,7 +655,7 @@ mod tests {
     #[tokio::test]
     async fn protocol_transfers_owned_binary_and_coalesces_response_at_boundary() {
         for kind in ["ws-tcp", "ws-udp"] {
-            let request = Bytes::from_static(b"JRPC-GW\x03\xfe\nrequest");
+            let request = Bytes::from_static(b"APP\xff\xfe\nrequest");
             let protocol = JsonRpcWebSocket::new(Arc::new(OwnedReply {
                 request: request.clone(),
                 kind,
@@ -684,7 +674,7 @@ mod tests {
             assert_eq!(
                 response,
                 Some(WebSocketMessage::Binary(Bytes::from_static(
-                    b"JRPC-GW\x03\xff\nresponse"
+                    b"APP\xff\xff\nresponse"
                 )))
             );
         }
