@@ -173,7 +173,24 @@ where
     <C::BidiStream as h3::quic::BidiStream<Bytes>>::SendStream: Send + 'static,
     <C::BidiStream as h3::quic::BidiStream<Bytes>>::RecvStream: Send + 'static,
 {
-    let (request, mut stream) = resolver.resolve_request().await?;
+    let (request, stream) = resolver.resolve_request().await?;
+    handle_resolved_request(request, stream, peer, protocol, shutdown, runtime).await
+}
+
+/// Serve an already resolved extended CONNECT on a shared HTTP/3 connection.
+pub async fn handle_resolved_request<S>(
+    request: http::Request<()>,
+    mut stream: h3::server::RequestStream<S, Bytes>,
+    peer: std::net::SocketAddr,
+    protocol: Arc<dyn WebSocketProtocol>,
+    shutdown: CancellationToken,
+    runtime: Arc<TransportRuntime>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: h3::quic::BidiStream<Bytes> + Send + 'static,
+    S::SendStream: Send + 'static,
+    S::RecvStream: Send + 'static,
+{
     let is_websocket_connect = request.method() == Method::CONNECT
         && request
             .extensions()

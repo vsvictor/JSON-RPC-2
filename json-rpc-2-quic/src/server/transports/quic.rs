@@ -83,7 +83,8 @@ pub async fn serve(
     Ok(())
 }
 
-async fn serve_connection(
+/// Serve an accepted connection; the caller owns endpoint admission and shutdown.
+pub async fn serve_connection(
     connection: Connection,
     peer: std::net::SocketAddr,
     protocol: Arc<dyn JsonRpcProtocol>,

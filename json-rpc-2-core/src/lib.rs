@@ -14,18 +14,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use amqp::{AmqpFrame, AmqpMessageKind, decode_amqp_frame, encode_amqp_frame};
-pub use coap::{CoapMessage, CoapMessageType, decode_coap_message, encode_coap_message};
+pub use coap::{
+    CoapMessage, CoapMessageType, decode_coap_message, encode_coap_message, inspect_coap_message,
+};
 pub use mqtt::{MqttPacket, MqttPacketKind, decode_mqtt_packet, encode_mqtt_packet};
 pub use rtp::{
     RtcpControlPacket, RtcpControlPacketKind, RtpPacket, RtpPacketKind, decode_rtcp_control_packet,
-    decode_rtp_packet, encode_rtcp_control_packet, encode_rtp_packet,
+    decode_rtp_packet, encode_rtcp_control_packet, encode_rtp_packet, inspect_rtp_packet,
 };
-pub use rudp::{RudpPacket, RudpPacketKind, decode_rudp_packet, encode_rudp_packet};
+pub use rudp::{
+    RudpPacket, RudpPacketKind, decode_rudp_packet, encode_rudp_packet, inspect_rudp_packet,
+};
 pub use srt::{SrtConfig, SrtCrypto, SrtPacket, SrtPacketKind};
 pub use udp_lite::UdpLiteConfig;
 pub use udp_reliable::{
     ReliableUdpPacket, ReliableUdpPacketKind, UdpReliabilityConfig, decode_udp_packet,
-    encode_udp_packet,
+    encode_udp_packet, inspect_udp_packet,
 };
 pub use websocket::{
     WebSocketFrame, WebSocketFrameKind, WebSocketFuture, WebSocketMessage, WebSocketProtocol,

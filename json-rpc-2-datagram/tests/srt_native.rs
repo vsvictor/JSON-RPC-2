@@ -78,6 +78,110 @@ async fn client(address: SocketAddr) -> SrtClientTransport {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_id_selects_before_session_open_and_survives_reconnect() {
+    use json_rpc_2_datagram::client::transports::srt::{RAW_SRT_STREAM_ID, WS_SRT_STREAM_ID};
+    use json_rpc_2_transport::TransportContext;
+
+    struct Selected {
+        opened: tokio::sync::mpsc::UnboundedSender<&'static str>,
+        name: &'static str,
+    }
+    impl JsonRpcProtocol for Selected {
+        fn handle_message<'a>(&'a self, input: &'a [u8]) -> ProtocolFuture<'a> {
+            Box::pin(async move { Some(Bytes::copy_from_slice(input)) })
+        }
+        fn session_opened(&self, _context: &TransportContext) {
+            self.opened.send(self.name).unwrap();
+        }
+    }
+    let (opened, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let raw: Arc<dyn JsonRpcProtocol> = Arc::new(Selected {
+        opened: opened.clone(),
+        name: "raw",
+    });
+    let ws: Arc<dyn JsonRpcProtocol> = Arc::new(Selected { opened, name: "ws" });
+    let listener = SrtTransport::bind(localhost(), config())
+        .await
+        .unwrap()
+        .with_protocol_selector(move |id| match id {
+            "" | RAW_SRT_STREAM_ID => Ok(raw.clone()),
+            WS_SRT_STREAM_ID => Ok(ws.clone()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported SRT profile",
+            )),
+        });
+    let address = listener.local_addr().unwrap();
+    // This fallback must never receive session_opened or handle_message.
+    let fallback = Arc::new(Echo::default());
+    let running = listener.start(fallback.clone());
+    let mut clients = Vec::new();
+    for (id, name) in [
+        ("", "raw"),
+        (RAW_SRT_STREAM_ID, "raw"),
+        (WS_SRT_STREAM_ID, "ws"),
+    ] {
+        let client = SrtClientTransport::connect_with_stream_id(
+            address,
+            UdpReliabilityConfig {
+                retransmit_interval: Duration::from_secs(1),
+                ..Default::default()
+            },
+            config(),
+            id,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("SRT profile {id:?} failed: {error}"));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(name)
+        );
+        client.transport_ping().await.unwrap();
+        client.reconnect().await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(name)
+        );
+        client.transport_ping().await.unwrap();
+        clients.push(client);
+    }
+    // Selection rejects after native accept but before any protocol lifecycle callback.
+    if let Ok(client) = SrtClientTransport::connect_with_stream_id(
+        address,
+        UdpReliabilityConfig::default(),
+        config(),
+        "unknown-profile",
+    )
+    .await
+    {
+        assert!(client.transport_ping().await.is_err());
+        client.close().await.unwrap();
+    }
+    assert!(events.try_recv().is_err());
+    assert_eq!(fallback.0.load(Ordering::Relaxed), 0);
+    for invalid in ["x".repeat(513), "bad\0id".into()] {
+        assert!(
+            SrtClientTransport::connect_with_stream_id(
+                address,
+                UdpReliabilityConfig::default(),
+                config(),
+                invalid,
+            )
+            .await
+            .is_err()
+        );
+    }
+    for client in clients {
+        client.close().await.unwrap();
+    }
+    running.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn encrypted_rpc_notifications_batches_fragmentation_ping_and_reconnect() {
     let listener = SrtTransport::bind(localhost(), config()).await.unwrap();
     let address = listener.local_addr().unwrap();

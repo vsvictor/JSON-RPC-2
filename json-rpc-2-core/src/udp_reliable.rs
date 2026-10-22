@@ -131,7 +131,8 @@ pub fn encode_udp_packet(packet: &ReliableUdpPacket) -> Result<Vec<u8>, String> 
     Ok(bytes)
 }
 
-pub fn decode_udp_packet(packet: &[u8]) -> Result<ReliableUdpPacket, String> {
+/// Validate technical framing without allocating or inspecting business data.
+pub fn inspect_udp_packet(packet: &[u8]) -> Result<(ReliableUdpPacketKind, &[u8]), String> {
     if packet.len() < UDP_HEADER_LEN {
         return Err("UDP packet too short".to_owned());
     }
@@ -143,7 +144,6 @@ pub fn decode_udp_packet(packet: &[u8]) -> Result<ReliableUdpPacket, String> {
     }
     let kind = ReliableUdpPacketKind::from_byte(packet[5])
         .ok_or_else(|| format!("unknown UDP packet kind {}", packet[5]))?;
-    let packet_id = u64::from_be_bytes(packet[8..16].try_into().expect("slice len checked"));
     let payload_len =
         u32::from_be_bytes(packet[16..20].try_into().expect("slice len checked")) as usize;
     let remaining = packet.len() - UDP_HEADER_LEN;
@@ -152,9 +152,14 @@ pub fn decode_udp_packet(packet: &[u8]) -> Result<ReliableUdpPacket, String> {
             "UDP payload length mismatch (header {payload_len}, actual {remaining})"
         ));
     }
+    Ok((kind, &packet[UDP_HEADER_LEN..]))
+}
+
+pub fn decode_udp_packet(packet: &[u8]) -> Result<ReliableUdpPacket, String> {
+    let (kind, payload) = inspect_udp_packet(packet)?;
     Ok(ReliableUdpPacket {
-        packet_id,
+        packet_id: u64::from_be_bytes(packet[8..16].try_into().expect("validated header")),
         kind,
-        payload: packet[UDP_HEADER_LEN..].to_vec(),
+        payload: payload.to_vec(),
     })
 }

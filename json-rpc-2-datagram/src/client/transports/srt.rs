@@ -26,6 +26,11 @@ use native::{Frame, Kind, NativeSocket};
 
 type Pending = Arc<StdMutex<HashMap<u64, oneshot::Sender<Result<Frame, String>>>>>;
 
+/// Reserved native SRTO_STREAMID profile for WebSocket frames over SRT.
+pub const WS_SRT_STREAM_ID: &str = "json-rpc-2/ws-srt/1";
+/// Optional explicit raw profile. An empty stream ID remains the legacy raw profile.
+pub const RAW_SRT_STREAM_ID: &str = "json-rpc-2/srt/1";
+
 struct Connection {
     socket: Arc<NativeSocket>,
     pending: Pending,
@@ -56,6 +61,7 @@ impl Drop for Registration {
 pub struct SrtClientTransport {
     address: SocketAddr,
     config: SrtConfig,
+    stream_id: String,
     timeout: Duration,
     next_id: AtomicU64,
     state: Mutex<Option<Arc<Connection>>>,
@@ -88,6 +94,18 @@ impl SrtClientTransport {
         reliability: UdpReliabilityConfig,
         config: SrtConfig,
     ) -> Result<Self, TransportError> {
+        Self::connect_with_stream_id(address, reliability, config, "").await
+    }
+
+    /// Set native SRTO_STREAMID before the encrypted handshake, retaining it on
+    /// reconnect. Shared listeners use it to select a protocol before session_opened.
+    pub async fn connect_with_stream_id(
+        address: SocketAddr,
+        reliability: UdpReliabilityConfig,
+        config: SrtConfig,
+        stream_id: impl Into<String>,
+    ) -> Result<Self, TransportError> {
+        let stream_id = stream_id.into();
         let timeout = reliability
             .retransmit_interval
             .checked_mul(reliability.max_retransmits.saturating_add(1))
@@ -95,10 +113,11 @@ impl SrtClientTransport {
             .ok_or_else(|| {
                 TransportError::new("SRT operation timeout must be positive and finite")
             })?;
-        let connection = Self::open(address, &config).await?;
+        let connection = Self::open(address, &config, &stream_id).await?;
         Ok(Self {
             address,
             config,
+            stream_id,
             timeout,
             next_id: AtomicU64::new(1),
             state: Mutex::new(Some(connection)),
@@ -108,9 +127,10 @@ impl SrtClientTransport {
     async fn open(
         address: SocketAddr,
         config: &SrtConfig,
+        stream_id: &str,
     ) -> Result<Arc<Connection>, TransportError> {
         let socket = Arc::new(
-            NativeSocket::connect(address, config)
+            NativeSocket::connect(address, config, stream_id)
                 .await
                 .map_err(native::transport_error)?,
         );
@@ -281,7 +301,7 @@ impl RpcClientTransport for SrtClientTransport {
                 old.socket.close();
                 old.pending.lock().unwrap().clear();
             }
-            *state = Some(Self::open(self.address, &self.config).await?);
+            *state = Some(Self::open(self.address, &self.config, &self.stream_id).await?);
             Ok(())
         })
     }

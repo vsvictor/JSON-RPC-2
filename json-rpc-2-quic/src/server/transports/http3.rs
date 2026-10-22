@@ -135,8 +135,22 @@ async fn handle_request<C>(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     C: h3::quic::Connection<bytes::Bytes>,
+    C::BidiStream: h3::quic::BidiStream<bytes::Bytes>,
 {
-    let (request, mut stream) = resolver.resolve_request().await?;
+    let (request, stream) = resolver.resolve_request().await?;
+    handle_resolved_request(request, stream, peer, protocol).await
+}
+
+/// Serve an already resolved request on a caller-owned HTTP/3 connection.
+pub async fn handle_resolved_request<S>(
+    request: axum::http::Request<()>,
+    mut stream: h3::server::RequestStream<S, bytes::Bytes>,
+    peer: std::net::SocketAddr,
+    protocol: Arc<dyn JsonRpcProtocol>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: h3::quic::BidiStream<bytes::Bytes>,
+{
     let started = Instant::now();
     let mut body = Vec::new();
 

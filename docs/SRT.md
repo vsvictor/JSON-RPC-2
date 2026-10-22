@@ -92,6 +92,82 @@ framing below to exchange RPCs, just as a TCP peer must implement TCP RPC
 framing. WebSocket/SRT additionally encodes a WebSocket frame inside the
 application payload; it is not an HTTP WebSocket Upgrade endpoint.
 
+### Shared UDP ingress and protocol selection
+
+A shared-port server uses **one private native libsrt listener** for both raw
+SRT and WebSocket/SRT. `SrtTransport::with_protocol_selector(selector)` reads
+native `SRTO_STREAMID` from each accepted socket using `srt_getsockflag`, then
+calls `selector(&str) -> io::Result<Arc<dyn JsonRpcProtocol>>` **before**
+creating a transport context or calling `session_opened`. The selector must
+explicitly accept its supported profiles and return an error for unknown IDs;
+an error logs and closes only that peer, never falls back to the protocol
+passed to `run`. Standalone listeners without a selector are unchanged.
+
+`SrtClientTransport::connect_with_stream_id(address, reliability, config, id)`
+sets native `SRTO_STREAMID` before connecting and preserves it on reconnect.
+IDs are UTF-8, at most 512 bytes, with no NUL. No new `SrtConfig` field is
+required. Constants in `json_rpc_2_datagram::client::transports::srt` are:
+
+* `RAW_SRT_STREAM_ID = "json-rpc-2/srt/1"`; an empty ID is also legacy raw SRT.
+* `WS_SRT_STREAM_ID = "json-rpc-2/ws-srt/1"`; WebSocket/SRT clients now send this
+  reserved ID automatically, including when reconnecting.
+
+These IDs select application framing; they are not credentials or an
+authorization boundary. Encryption and authentication remain native libsrt.
+Existing standalone raw and WS listeners do not enforce IDs.
+
+`runtime::shared_srt::SrtUdpRelay::new(public_udp, private_listener, runtime,
+shutdown)` bridges shared ingress to that listener without replacing or
+forking libsrt. The listener must already be bound to a nonzero loopback port.
+The relay derives its loopback address family from the private listener and
+binds an ephemeral port for each external peer. The public ingress remains
+the **only public UDP reader** and calls `owns_peer(source)` first, then
+`SrtUdpRelay::is_handshake(packet)` for new peers, and
+`forward(Bytes, source).await` for packets assigned to SRT. The structural
+classifier recognizes native 64-byte version-4 caller inductions, including
+their control header and handshake fields; a shared control bit, RTP/QUIC
+prefix, legacy `JSRT` marker, or a conclusion alone cannot admit a new peer.
+Subsequent native version-5 negotiation, encryption and data packets pass
+through unchanged. There is no per-RPC handshake or application replay.
+
+The cost is one extra UDP hop in each direction, one socket/task per peer,
+and up to 64 queued packets per peer (each at most 65,507 bytes). Both task and
+socket admission follow `runtime.limits.max_connections`. Queue overflow
+returns/logs `WouldBlock` instead of blocking the sole public reader or
+allocating an unbounded queue; native SRT handles any resulting transport
+retransmission. Other forwarding/binding errors are also explicit and logged.
+
+The relay does not inspect encrypted/native session shutdown. Mappings expire
+after **30 seconds without packets in either direction**; ordinary native SRT
+keepalives retain idle-but-live sessions. Disconnected or failed handshakes
+can occupy a slot until expiry; reconnect normally has a new external UDP
+endpoint and may need another slot. The existing native peer-idle timeout is
+5 seconds, shorter than relay expiry. Peers that disable native keepalives or
+remain silent longer than 30 seconds lose their mapping and must reconnect;
+data without a fresh induction cannot recreate it. Endpoint migration is not
+supported. Eviction is atomic with inbound activity updates.
+
+For graceful shutdown, keep ingress and relay forwarding while the private
+listener drains its native sessions, then call `relay.close().await`, and only
+then stop public ingress. `close` cancels and joins relay tasks, bounded by
+`runtime.close_timeout()`; timeout aborts and joins remaining tasks and returns
+an error. Parent cancellation/drop stops forwarding immediately and is not a
+graceful native drain; explicit `close` is needed to await task cleanup.
+
+### External peer address behind the relay
+
+Behind the relay, libsrt accepts the relay's per-peer loopback socket, not the
+external client. The relay keeps a bounded map from each relay socket's local
+address to its external `SocketAddr` (`relay.external_peer(relay_peer)`),
+inserted before the induction reaches the private listener and removed on
+peer task exit, idle eviction and `close`. This optional lookup supports logging
+or future integration; it does not change protocol contexts.
+
+`TransportContext` has no peer-address field and gateway metadata has no
+client-address invariant. Native private-listener logs therefore continue to
+refer to the internal peer; the relay logs its own errors with the external
+peer. No address is fabricated or inserted into application metadata.
+
 ## Application message framing (version 1)
 
 Each frame starts with **one SRT message of exactly 18 bytes**:
@@ -157,3 +233,14 @@ is required. An additional interop test launches `srt-live-transmit` when it
 is installed (`SRT_LIVE_TRANSMIT` can select its executable), forwards native
 SRT messages to a local UDP capture socket, and verifies our application frame
 bytes. Missing external executable skips only that test, not native SRT.
+
+`cargo test -p json-rpc-2-websockets --no-default-features --features
+websocket,srt --test shared_srt` tests the relay directly: structural induction
+validation, independent IPv4/IPv6 relay families, bounded peers/queues,
+cancellation, real-time idle eviction/keepalive retention, and encrypted raw
+and WS RPC/reconnect through one native listener and one public UDP reader.
+The test compiles the runtime helper by path to avoid enabling unrelated
+runtime development transports. The native datagram suite also verifies
+stream-ID selection/rejection before session lifecycle callbacks and limits on
+caller stream IDs. `shared_srt` also checks external-peer lookup while admitted
+and cleanup on idle eviction and relay close.

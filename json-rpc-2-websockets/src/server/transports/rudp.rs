@@ -22,7 +22,9 @@ use json_rpc_2_core::{
     RudpPacket, RudpPacketKind, decode_rudp_packet, decode_websocket_message, encode_rudp_packet,
     encode_websocket_message,
 };
-use json_rpc_2_transport::{TransportRuntime, log_control, log_json_rpc, log_transport_error};
+use json_rpc_2_transport::{
+    DatagramReceiver, TransportRuntime, log_control, log_json_rpc, log_transport_error,
+};
 
 struct EndpointState {
     next_sequence: AtomicU32,
@@ -55,14 +57,14 @@ impl EndpointState {
 
 /// Dedicated WebSocket-style transport over reliable RUDP datagrams.
 pub struct RudpWebSocketTransport {
-    socket: UdpSocket,
+    socket: DatagramReceiver,
     runtime: Arc<TransportRuntime>,
 }
 
 impl RudpWebSocketTransport {
-    pub fn new(socket: UdpSocket) -> Self {
+    pub fn new(socket: impl Into<DatagramReceiver>) -> Self {
         Self {
-            socket,
+            socket: socket.into(),
             runtime: Arc::new(TransportRuntime::default()),
         }
     }
@@ -109,12 +111,13 @@ enum RequestAction {
 }
 
 pub async fn serve(
-    socket: UdpSocket,
+    socket: impl Into<DatagramReceiver>,
     protocol: Arc<dyn WebSocketProtocol>,
     shutdown: CancellationToken,
     runtime: Arc<TransportRuntime>,
 ) -> io::Result<()> {
-    let socket = Arc::new(socket);
+    let mut source = socket.into();
+    let socket = source.socket();
     let endpoint = Arc::new(EndpointState::new());
     let sessions = Arc::new(Mutex::new(HashMap::<SocketAddr, PeerSession>::new()));
     let mut tasks = JoinSet::new();
@@ -122,15 +125,16 @@ pub async fn serve(
 
     loop {
         let received = tokio::select! {
-            received = socket.recv_from(&mut buffer) => Some(received),
+            received = source.receive(&mut buffer) => Some(received),
             _ = shutdown.cancelled() => None,
         };
         let Some(received) = received else { break };
-        let (size, peer) = match received {
+        let received = match received {
             Ok(received) => received,
             Err(error) => return Err(error),
         };
-        let packet = match decode_rudp_packet(&buffer[..size]) {
+        let peer = received.peer();
+        let packet = match decode_rudp_packet(received.packet()) {
             Ok(packet) => packet,
             Err(error) => {
                 log_transport_error("WebSocket/RUDP", peer, "packet", &error);

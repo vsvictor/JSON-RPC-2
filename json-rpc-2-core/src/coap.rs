@@ -104,7 +104,8 @@ pub fn encode_coap_message(message: &CoapMessage) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-pub fn decode_coap_message(packet: &[u8]) -> Result<CoapMessage, String> {
+/// Validate technical framing, returning the type, token and borrowed payload.
+pub fn inspect_coap_message(packet: &[u8]) -> Result<(CoapMessageType, &[u8], &[u8]), String> {
     if packet.len() < 4 {
         return Err("CoAP packet too short".to_owned());
     }
@@ -118,23 +119,27 @@ pub fn decode_coap_message(packet: &[u8]) -> Result<CoapMessage, String> {
     if packet.len() < 4 + token_len {
         return Err("CoAP packet truncated before token".to_owned());
     }
-    let message_id = u16::from_be_bytes([packet[2], packet[3]]);
-    let token = packet[4..4 + token_len].to_vec();
+    let token = &packet[4..4 + token_len];
     let payload = if packet.len() == 4 + token_len {
-        Vec::new()
+        &packet[packet.len()..]
     } else {
         let marker_index = 4 + token_len;
         if packet[marker_index] != COAP_PAYLOAD_MARKER {
             return Err("CoAP payload marker missing".to_owned());
         }
-        packet[marker_index + 1..].to_vec()
+        &packet[marker_index + 1..]
     };
+    Ok((ty, token, payload))
+}
+
+pub fn decode_coap_message(packet: &[u8]) -> Result<CoapMessage, String> {
+    let (ty, token, payload) = inspect_coap_message(packet)?;
     Ok(CoapMessage {
         ty,
         code: packet[1],
-        message_id,
-        token,
-        payload,
+        message_id: u16::from_be_bytes([packet[2], packet[3]]),
+        token: token.to_vec(),
+        payload: payload.to_vec(),
     })
 }
 

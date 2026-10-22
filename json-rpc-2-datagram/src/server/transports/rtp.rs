@@ -18,11 +18,11 @@ use json_rpc_2_core::{
     RtcpControlPacket, RtcpControlPacketKind, RtpPacket, RtpPacketKind, decode_rtcp_control_packet,
     decode_rtp_packet, encode_rtcp_control_packet, encode_rtp_packet,
 };
-use json_rpc_2_transport::JsonRpcProtocol;
 use json_rpc_2_transport::{
     CancellationToken, Transport, TransportFuture, TransportRuntime, log_control, log_json_rpc,
     log_transport_error,
 };
+use json_rpc_2_transport::{DatagramReceiver, JsonRpcProtocol};
 
 struct EndpointState {
     ssrc: u32,
@@ -63,14 +63,14 @@ impl EndpointState {
 
 /// RTP/RTCP transport with application-level reliability and deduplication.
 pub struct RtpTransport {
-    socket: UdpSocket,
+    socket: DatagramReceiver,
     runtime: Arc<TransportRuntime>,
 }
 
 impl RtpTransport {
-    pub fn new(socket: UdpSocket) -> Self {
+    pub fn new(socket: impl Into<DatagramReceiver>) -> Self {
         Self {
-            socket,
+            socket: socket.into(),
             runtime: Arc::new(TransportRuntime::default()),
         }
     }
@@ -117,12 +117,13 @@ enum RequestAction {
 }
 
 pub async fn serve(
-    socket: UdpSocket,
+    socket: impl Into<DatagramReceiver>,
     protocol: Arc<dyn JsonRpcProtocol>,
     shutdown: CancellationToken,
     runtime: Arc<TransportRuntime>,
 ) -> io::Result<()> {
-    let socket = Arc::new(socket);
+    let mut source = socket.into();
+    let socket = source.socket();
     let endpoint = Arc::new(EndpointState::new());
     let sessions = Arc::new(Mutex::new(HashMap::<SocketAddr, PeerSession>::new()));
     let mut tasks = JoinSet::new();
@@ -130,15 +131,16 @@ pub async fn serve(
 
     loop {
         let received = tokio::select! {
-            received = socket.recv_from(&mut buffer) => Some(received),
+            received = source.receive(&mut buffer) => Some(received),
             _ = shutdown.cancelled() => None,
         };
         let Some(received) = received else { break };
-        let (size, peer) = match received {
+        let received = match received {
             Ok(received) => received,
             Err(error) => return Err(error),
         };
-        if let Ok(control) = decode_rtcp_control_packet(&buffer[..size]) {
+        let peer = received.peer();
+        if let Ok(control) = decode_rtcp_control_packet(received.packet()) {
             handle_control_packet(
                 Arc::clone(&socket),
                 Arc::clone(&endpoint),
@@ -149,7 +151,7 @@ pub async fn serve(
             .await;
             continue;
         }
-        let packet = match decode_rtp_packet(&buffer[..size]) {
+        let packet = match decode_rtp_packet(received.packet()) {
             Ok(packet) => packet,
             Err(error) => {
                 log_transport_error("RTP/RTCP", peer, "packet", &error);

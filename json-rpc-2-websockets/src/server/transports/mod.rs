@@ -95,7 +95,7 @@ pub fn protocol_adapter(protocol: Arc<dyn WebSocketProtocol>) -> Arc<dyn JsonRpc
 }
 
 #[cfg(any(feature = "dccp", feature = "sctp", feature = "srt"))]
-fn protocol_adapter_with_kind(
+pub fn protocol_adapter_with_kind(
     protocol: Arc<dyn WebSocketProtocol>,
     kind: &'static str,
 ) -> Arc<dyn JsonRpcProtocol> {

@@ -20,6 +20,25 @@ pub use json_rpc_2_transport::{
 pub type TransportLimits = ServerLimits;
 
 pub mod multi;
+#[cfg(all(feature = "websocket", any(feature = "sctp", feature = "dccp")))]
+mod shared_association;
+#[cfg(any(feature = "quic", feature = "http3"))]
+mod shared_quic;
+#[cfg(feature = "srt")]
+pub mod shared_srt;
+#[cfg(feature = "shared_tcp")]
+mod shared_tcp;
+#[cfg(any(
+    feature = "udp",
+    feature = "rtp",
+    feature = "rudp",
+    feature = "coap",
+    feature = "srt",
+    feature = "udplite",
+    feature = "quic",
+    feature = "http3"
+))]
+mod shared_udp;
 #[cfg(feature = "amqp")]
 pub use multi::AmqpConfig;
 #[cfg(feature = "mqtt")]

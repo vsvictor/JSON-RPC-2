@@ -1,11 +1,13 @@
 //! Transport contracts and runtime primitives shared by clients and servers.
 
 mod client_transport;
+mod datagram_receiver;
 pub mod gateway;
 mod message;
 mod server_transport;
 mod udplite;
 
+pub use datagram_receiver::{DatagramReceiver, OwnedDatagram, ReceivedDatagram};
 pub use message::TransportMessage;
 pub use udplite::apply_udp_lite_coverage;
 
@@ -102,6 +104,7 @@ impl TransportSecurity {
 pub enum TransportSocket {
     Tcp,
     Udp,
+    UdpLite,
     Dccp,
     Sctp,
 }
@@ -115,6 +118,7 @@ impl TransportSocket {
         match self {
             Self::Tcp => "TCP",
             Self::Udp => "UDP",
+            Self::UdpLite => "UDP-Lite",
             Self::Dccp => "DCCP",
             Self::Sctp => "SCTP",
         }

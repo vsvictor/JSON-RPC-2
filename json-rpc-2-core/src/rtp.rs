@@ -89,7 +89,8 @@ pub fn encode_rtp_packet(packet: &RtpPacket) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-pub fn decode_rtp_packet(packet: &[u8]) -> Result<RtpPacket, String> {
+/// Validate technical framing without allocating or inspecting business data.
+pub fn inspect_rtp_packet(packet: &[u8]) -> Result<(RtpPacketKind, &[u8]), String> {
     if packet.len() < RTP_HEADER_LEN + RTP_METADATA_LEN {
         return Err("RTP packet too short".to_owned());
     }
@@ -101,13 +102,18 @@ pub fn decode_rtp_packet(packet: &[u8]) -> Result<RtpPacket, String> {
     }
     let kind = RtpPacketKind::from_byte(packet[RTP_HEADER_LEN])
         .ok_or_else(|| format!("unknown RTP packet kind {}", packet[RTP_HEADER_LEN]))?;
+    Ok((kind, &packet[RTP_HEADER_LEN + RTP_METADATA_LEN..]))
+}
+
+pub fn decode_rtp_packet(packet: &[u8]) -> Result<RtpPacket, String> {
+    let (kind, payload) = inspect_rtp_packet(packet)?;
     Ok(RtpPacket {
         sequence_number: u16::from_be_bytes(packet[2..4].try_into().expect("slice len checked")),
         timestamp: u32::from_be_bytes(packet[4..8].try_into().expect("slice len checked")),
         ssrc: u32::from_be_bytes(packet[8..12].try_into().expect("slice len checked")),
         kind,
         message_id: u64::from_be_bytes(packet[13..21].try_into().expect("slice len checked")),
-        payload: packet[21..].to_vec(),
+        payload: payload.to_vec(),
     })
 }
 

@@ -12,11 +12,14 @@ use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::client::transports::srt::native::{Frame, Kind, NativeSocket};
 
+type ProtocolSelector = Arc<dyn Fn(&str) -> io::Result<Arc<dyn JsonRpcProtocol>> + Send + Sync>;
+
 /// Standard SRT listener. A Tokio UDP socket cannot be adopted: libsrt owns
 /// its UDP endpoint and performs the SRT handshake, encryption, ARQ and pacing.
 pub struct SrtTransport {
     listener: NativeSocket,
     runtime: Arc<TransportRuntime>,
+    selector: Option<ProtocolSelector>,
 }
 
 impl SrtTransport {
@@ -24,6 +27,7 @@ impl SrtTransport {
         Ok(Self {
             listener: NativeSocket::bind(address, &config)?,
             runtime: Arc::new(TransportRuntime::default()),
+            selector: None,
         })
     }
 
@@ -33,6 +37,18 @@ impl SrtTransport {
 
     pub fn with_runtime(mut self, runtime: Arc<TransportRuntime>) -> Self {
         self.runtime = runtime;
+        self
+    }
+
+    /// Select a protocol using the accepted socket's native SRTO_STREAMID,
+    /// before creating its context or calling session_opened. Returning an error
+    /// explicitly rejects this socket; no fallback protocol is used. Without a
+    /// selector, standalone listeners retain their existing behavior.
+    pub fn with_protocol_selector(
+        mut self,
+        selector: impl Fn(&str) -> io::Result<Arc<dyn JsonRpcProtocol>> + Send + Sync + 'static,
+    ) -> Self {
+        self.selector = Some(Arc::new(selector));
         self
     }
 }
@@ -58,7 +74,18 @@ impl Transport for SrtTransport {
                             socket.close();
                             continue;
                         };
-                        let protocol = protocol.clone();
+                        let protocol = if let Some(selector) = &self.selector {
+                            match socket.stream_id().and_then(|id| selector(&id)) {
+                                Ok(protocol) => protocol,
+                                Err(error) => {
+                                    log_transport_error("SRT", "peer", "stream ID selection", &error);
+                                    socket.close();
+                                    continue;
+                                }
+                            }
+                        } else {
+                            protocol.clone()
+                        };
                         let runtime = self.runtime.clone();
                         let shutdown = shutdown.child_token();
                         let requests = requests.clone();

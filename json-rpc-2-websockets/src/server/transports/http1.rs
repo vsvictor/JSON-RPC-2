@@ -8,9 +8,11 @@ use std::{io, sync::Arc, time::Instant};
 use axum::{
     Router,
     extract::{
-        ConnectInfo, State,
+        ConnectInfo, Extension, State,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
+    http::StatusCode,
+    response::IntoResponse,
     routing::get,
 };
 use futures_util::StreamExt;
@@ -100,6 +102,8 @@ impl Http1WebSocketTransport {
             multiplexor.handle(),
             shutdown.clone(),
             Arc::clone(&runtime),
+            true,
+            false,
         );
         let acceptor = TlsAcceptor::from(tls);
         let mut connections = JoinSet::new();
@@ -174,6 +178,8 @@ struct SessionState {
     sessions: StreamMultiplexorHandle,
     shutdown: CancellationToken,
     runtime: Arc<TransportRuntime>,
+    allow_plain_websocket: bool,
+    allow_tls_websocket: bool,
 }
 
 /// Build a WebSocket-over-HTTP/1.1 router, exposing `GET /ws`.
@@ -183,7 +189,64 @@ pub fn router(protocol: Arc<dyn WebSocketProtocol>, shutdown: CancellationToken)
     let runtime = Arc::new(TransportRuntime::default());
     let multiplexor =
         StreamMultiplexor::with_limit(runtime.limits.max_connections, runtime.metrics.clone());
-    router_with_sessions(protocol, multiplexor.handle(), shutdown, runtime)
+    router_with_sessions(
+        protocol,
+        multiplexor.handle(),
+        shutdown,
+        runtime,
+        true,
+        false,
+    )
+}
+
+/// Build an embeddable HTTP/1.1 WebSocket router using the supplied runtime.
+/// The router exposes `GET /ws`; upgraded sessions are bounded and tracked
+/// independently so the HTTP connection can release its admission permit.
+pub fn router_with_runtime(
+    protocol: Arc<dyn WebSocketProtocol>,
+    shutdown: CancellationToken,
+    runtime: Arc<TransportRuntime>,
+) -> Router {
+    router_with_runtime_options(protocol, shutdown, runtime, true, false)
+}
+
+/// Build an embeddable router with explicit plain/TLS WebSocket availability.
+pub fn router_with_runtime_options(
+    protocol: Arc<dyn WebSocketProtocol>,
+    shutdown: CancellationToken,
+    runtime: Arc<TransportRuntime>,
+    allow_plain_websocket: bool,
+    allow_tls_websocket: bool,
+) -> Router {
+    let multiplexor =
+        StreamMultiplexor::with_limit(runtime.limits.max_connections, runtime.metrics.clone());
+    router_with_session_handle(
+        protocol,
+        multiplexor.handle(),
+        shutdown,
+        runtime,
+        allow_plain_websocket,
+        allow_tls_websocket,
+    )
+}
+
+/// Build a WebSocket router using a caller-owned session tracker.
+pub fn router_with_session_handle(
+    protocol: Arc<dyn WebSocketProtocol>,
+    sessions: StreamMultiplexorHandle,
+    shutdown: CancellationToken,
+    runtime: Arc<TransportRuntime>,
+    allow_plain_websocket: bool,
+    allow_tls_websocket: bool,
+) -> Router {
+    router_with_sessions(
+        protocol,
+        sessions,
+        shutdown,
+        runtime,
+        allow_plain_websocket,
+        allow_tls_websocket,
+    )
 }
 
 fn router_with_sessions(
@@ -191,6 +254,8 @@ fn router_with_sessions(
     sessions: StreamMultiplexorHandle,
     shutdown: CancellationToken,
     runtime: Arc<TransportRuntime>,
+    allow_plain_websocket: bool,
+    allow_tls_websocket: bool,
 ) -> Router {
     Router::new()
         .route("/ws", get(websocket_upgrade))
@@ -199,6 +264,8 @@ fn router_with_sessions(
             sessions,
             shutdown,
             runtime,
+            allow_plain_websocket,
+            allow_tls_websocket,
         })
 }
 
@@ -214,7 +281,14 @@ pub async fn serve(
 ) -> io::Result<()> {
     let multiplexor =
         StreamMultiplexor::with_limit(runtime.limits.max_connections, runtime.metrics.clone());
-    let router = router_with_sessions(protocol, multiplexor.handle(), shutdown.clone(), runtime);
+    let router = router_with_sessions(
+        protocol,
+        multiplexor.handle(),
+        shutdown.clone(),
+        runtime,
+        true,
+        false,
+    );
     let result = axum::serve(
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -229,14 +303,27 @@ pub async fn serve(
 async fn websocket_upgrade(
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     State(state): State<SessionState>,
+    tls: Option<Extension<json_rpc_2_tcp::server::transports::http1::TlsIngress>>,
     upgrade: WebSocketUpgrade,
 ) -> axum::response::Response {
+    if tls.is_some() && !state.allow_tls_websocket || tls.is_none() && !state.allow_plain_websocket
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let sessions = state.sessions.clone();
+    let kind = if tls.is_some() { "ws-tls" } else { "ws-http1" };
     upgrade.on_upgrade(move |socket| async move {
         if let Err(error) = sessions
             .spawn(async move {
-                websocket_session(socket, peer, state.protocol, state.shutdown, state.runtime)
-                    .await;
+                websocket_session(
+                    socket,
+                    peer,
+                    state.protocol,
+                    state.shutdown,
+                    state.runtime,
+                    kind,
+                )
+                .await;
             })
             .await
         {
@@ -251,8 +338,9 @@ async fn websocket_session(
     protocol: Arc<dyn WebSocketProtocol>,
     shutdown: CancellationToken,
     runtime: Arc<TransportRuntime>,
+    kind: &'static str,
 ) {
-    let mut session = TransportSession::new("ws-http1", true);
+    let mut session = TransportSession::new(kind, true);
     let mut guard = Some(WebSocketSessionGuard::new(
         protocol.clone(),
         session.context.clone(),

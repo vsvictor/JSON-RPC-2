@@ -123,13 +123,11 @@ impl<T> DatagramWebSocketClientTransport<T> {
     }
 
     fn encode_outbound(message: Bytes) -> Result<Bytes, TransportError> {
-        let message = if json_rpc_2_transport::gateway::is_gateway_frame(&message) {
-            WebSocketMessage::Binary(message)
-        } else {
-            let text = std::str::from_utf8(&message).map_err(|error| {
-                TransportError::new(format!("invalid WebSocket text payload: {error}"))
-            })?;
-            WebSocketMessage::Text(text.to_owned())
+        let message = match std::str::from_utf8(&message) {
+            Ok(text) if !json_rpc_2_transport::gateway::is_gateway_frame(&message) => {
+                WebSocketMessage::Text(text.to_owned())
+            }
+            _ => WebSocketMessage::Binary(message),
         };
         // The codec builds a contiguous frame, copying its payload at this boundary.
         encode_websocket_message(&message)
@@ -317,13 +315,11 @@ async fn exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let message = if json_rpc_2_transport::gateway::is_gateway_frame(&message) {
-        Message::Binary(message)
-    } else {
-        let text = std::str::from_utf8(&message)
-            .map(str::to_owned)
-            .map_err(transport_error)?;
-        Message::Text(text.into())
+    let message = match std::str::from_utf8(&message) {
+        Ok(text) if !json_rpc_2_transport::gateway::is_gateway_frame(&message) => {
+            Message::Text(text.to_owned().into())
+        }
+        _ => Message::Binary(message),
     };
     socket.send(message).await.map_err(transport_error)?;
     if !expects {
@@ -495,12 +491,14 @@ mod tests {
     }
 
     #[test]
-    fn invalid_direct_text_still_fails() {
-        assert!(
-            DatagramWebSocketClientTransport::<FramedPeer>::encode_outbound(Bytes::from_static(
-                b"\xffnot-a-gateway-frame"
-            ))
-            .is_err()
+    fn non_utf8_application_payload_uses_binary_without_gateway_magic() {
+        let payload = Bytes::from_static(b"\xffnot-a-gateway-frame");
+        let frame =
+            DatagramWebSocketClientTransport::<FramedPeer>::encode_outbound(payload.clone())
+                .unwrap();
+        assert_eq!(
+            decode_websocket_message(&frame).unwrap(),
+            Some(WebSocketMessage::Binary(payload)),
         );
     }
 }

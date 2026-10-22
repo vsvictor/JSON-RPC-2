@@ -103,7 +103,8 @@ pub fn encode_rudp_packet(packet: &RudpPacket) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-pub fn decode_rudp_packet(packet: &[u8]) -> Result<RudpPacket, String> {
+/// Validate technical framing without allocating or inspecting business data.
+pub fn inspect_rudp_packet(packet: &[u8]) -> Result<(RudpPacketKind, &[u8]), String> {
     if packet.len() < RUDP_HEADER_LEN {
         return Err("RUDP packet too short".to_owned());
     }
@@ -115,8 +116,6 @@ pub fn decode_rudp_packet(packet: &[u8]) -> Result<RudpPacket, String> {
     }
     let kind = RudpPacketKind::from_byte(packet[5])
         .ok_or_else(|| format!("unknown RUDP packet kind {}", packet[5]))?;
-    let sequence_number = u32::from_be_bytes(packet[6..10].try_into().expect("slice len checked"));
-    let packet_id = u64::from_be_bytes(packet[10..18].try_into().expect("slice len checked"));
     let payload_len =
         u32::from_be_bytes(packet[18..22].try_into().expect("slice len checked")) as usize;
     let remaining = packet.len() - RUDP_HEADER_LEN;
@@ -125,11 +124,16 @@ pub fn decode_rudp_packet(packet: &[u8]) -> Result<RudpPacket, String> {
             "RUDP payload length mismatch (header {payload_len}, actual {remaining})"
         ));
     }
+    Ok((kind, &packet[RUDP_HEADER_LEN..]))
+}
+
+pub fn decode_rudp_packet(packet: &[u8]) -> Result<RudpPacket, String> {
+    let (kind, payload) = inspect_rudp_packet(packet)?;
     Ok(RudpPacket {
-        sequence_number,
-        packet_id,
+        sequence_number: u32::from_be_bytes(packet[6..10].try_into().expect("validated header")),
+        packet_id: u64::from_be_bytes(packet[10..18].try_into().expect("validated header")),
         kind,
-        payload: packet[RUDP_HEADER_LEN..].to_vec(),
+        payload: payload.to_vec(),
     })
 }
 

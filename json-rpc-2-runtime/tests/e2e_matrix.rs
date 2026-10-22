@@ -293,6 +293,137 @@ async fn start_all(
     (running, certificate, protocol)
 }
 
+#[cfg(feature = "shared_tcp")]
+async fn shared_port_matrix(kernel: bool) {
+    let protocol = Arc::new(RpcServer::new());
+    protocol
+        .register_with_context("context", |_, context| async move {
+            Ok(json!(context.unwrap().transport))
+        })
+        .unwrap();
+    let (certificate, key) = identity();
+    let probe = tokio::net::TcpListener::bind((LOCALHOST, 0)).await.unwrap();
+    let port = probe.local_addr().unwrap().port();
+    let udp_probe = tokio::net::UdpSocket::bind((LOCALHOST, port))
+        .await
+        .unwrap();
+    drop(probe);
+    drop(udp_probe);
+    let mut server = MultiTransportServer::new(protocol);
+    server
+        .enable_port_multiplexing()
+        .set_bind([LOCALHOST])
+        .set_tls(vec![certificate.clone()], key);
+    #[cfg(feature = "srt")]
+    server.set_srt_config(SrtConfig {
+        passphrase: "test-passphrase".into(),
+    });
+    for &kind in TransportKind::ALL {
+        if kind.is_broker() || kind.id().contains("dccp") {
+            continue;
+        }
+        let needs_kernel = kind.id().contains("sctp") || kind.id().contains("udplite");
+        if needs_kernel != kernel {
+            continue;
+        }
+        server.set_port(kind, port);
+    }
+    let running = server.start().await.unwrap();
+    let expected = server.transports().count();
+    assert_eq!(running.listeners().count(), expected);
+    assert!(
+        running
+            .listeners()
+            .all(|(_, address)| address.port() == port)
+    );
+    let calls = running.listeners().map(|(kind, address)| {
+        let certificate = certificate.clone();
+        async move {
+            let transport = tokio::time::timeout(
+                Duration::from_secs(15),
+                connect(kind, address, &certificate),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{} shared-port connect timeout", kind.id()));
+            transport
+                .transport_ping()
+                .await
+                .unwrap_or_else(|error| panic!("{} ping: {error}", kind.id()));
+            let client = DynClient::new(transport);
+            let value: String = tokio::time::timeout(
+                Duration::from_secs(15),
+                client.request("context", json!({})),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{} shared-port RPC timeout", kind.id()))
+            .unwrap_or_else(|error| panic!("{} shared-port RPC: {error}", kind.id()));
+            assert_eq!(value, kind.id());
+            client.close().await.unwrap();
+        }
+    });
+    futures_util::future::join_all(calls).await;
+    tokio::time::timeout(Duration::from_secs(15), running.close())
+        .await
+        .unwrap()
+        .unwrap();
+    // Every physical listener is released, not merely its logical aliases.
+    let restarted = server.start().await.unwrap();
+    restarted.close().await.unwrap();
+}
+
+#[cfg(feature = "shared_tcp")]
+#[tokio::test]
+async fn shared_port_parallel_wire_profiles_preserve_context_and_rebind() {
+    shared_port_matrix(false).await;
+}
+
+#[cfg(all(
+    feature = "shared_tcp",
+    any(target_os = "linux", target_os = "android")
+))]
+#[tokio::test]
+#[ignore = "requires SCTP and UDP-Lite kernel support"]
+async fn shared_port_kernel_wire_profiles_preserve_context_and_rebind() {
+    shared_port_matrix(true).await;
+}
+
+#[cfg(feature = "shared_tcp")]
+#[tokio::test]
+async fn shared_port_datagrams_keep_non_json_payloads_opaque() {
+    struct Echo;
+    impl JsonRpcProtocol for Echo {
+        fn handle_message<'a>(&'a self, input: &'a [u8]) -> json_rpc_2_server::ProtocolFuture<'a> {
+            Box::pin(async move { Some(bytes::Bytes::copy_from_slice(input)) })
+        }
+    }
+    let mut server = MultiTransportServer::new(Arc::new(Echo));
+    server.enable_port_multiplexing().set_bind([LOCALHOST]);
+    for &kind in TransportKind::ALL {
+        if matches!(
+            kind.id(),
+            "udp" | "ws-udp" | "rtp" | "ws-rtp" | "rudp" | "ws-rudp" | "coap" | "ws-coap"
+        ) {
+            server.set_port(kind, 0);
+        }
+    }
+    let running = server.start().await.unwrap();
+    let (certificate, _) = identity();
+    let address = running.listeners().next().unwrap().1;
+    assert!(running.listeners().all(|(_, bound)| bound == address));
+    for (kind, _) in running.listeners() {
+        let transport = connect(kind, address, &certificate).await;
+        let input = bytes::Bytes::from_static(b"\0\xffopaque-without-json");
+        let output = transport
+            .send_with_expectation(input.clone(), true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(output, input, "{}", kind.id());
+        transport.close().await.unwrap();
+    }
+    running.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn black_box_parallel_matrix_handles_all_transports() {
     let (running, certificate, protocol) = start_all(make_server()).await;

@@ -14,23 +14,23 @@ use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_core::{
     ReliableUdpPacket, ReliableUdpPacketKind, decode_udp_packet, encode_udp_packet,
 };
-use json_rpc_2_transport::JsonRpcProtocol;
 use json_rpc_2_transport::{
     CancellationToken, Transport, TransportFuture, TransportRuntime, log_control, log_json_rpc,
     log_transport_error,
 };
+use json_rpc_2_transport::{DatagramReceiver, JsonRpcProtocol};
 
 /// UDP-Lite transport with application-level reliability and request
 /// deduplication.
 pub struct UdpLiteTransport {
-    socket: UdpSocket,
+    socket: DatagramReceiver,
     runtime: Arc<TransportRuntime>,
 }
 
 impl UdpLiteTransport {
-    pub fn new(socket: UdpSocket) -> Self {
+    pub fn new(socket: impl Into<DatagramReceiver>) -> Self {
         Self {
-            socket,
+            socket: socket.into(),
             runtime: Arc::new(TransportRuntime::default()),
         }
     }
@@ -77,27 +77,29 @@ enum RequestAction {
 }
 
 pub async fn serve(
-    socket: UdpSocket,
+    socket: impl Into<DatagramReceiver>,
     protocol: Arc<dyn JsonRpcProtocol>,
     shutdown: CancellationToken,
     runtime: Arc<TransportRuntime>,
 ) -> io::Result<()> {
-    let socket = Arc::new(socket);
+    let mut source = socket.into();
+    let socket = source.socket();
     let sessions = Arc::new(Mutex::new(HashMap::<SocketAddr, PeerSession>::new()));
     let mut tasks = JoinSet::new();
     let mut buffer = vec![0u8; runtime.udp_reliability.max_packet_size];
 
     loop {
         let received = tokio::select! {
-            received = socket.recv_from(&mut buffer) => Some(received),
+            received = source.receive(&mut buffer) => Some(received),
             _ = shutdown.cancelled() => None,
         };
         let Some(received) = received else { break };
-        let (size, peer) = match received {
+        let received = match received {
             Ok(received) => received,
             Err(error) => return Err(error),
         };
-        let packet = match decode_udp_packet(&buffer[..size]) {
+        let peer = received.peer();
+        let packet = match decode_udp_packet(received.packet()) {
             Ok(packet) => packet,
             Err(error) => {
                 log_transport_error("UDP-Lite", peer, "packet", &error);

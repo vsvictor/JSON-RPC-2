@@ -182,8 +182,34 @@ impl NativeSocket {
         Ok(socket)
     }
 
-    pub async fn connect(address: SocketAddr, config: &SrtConfig) -> io::Result<Self> {
+    pub async fn connect(
+        address: SocketAddr,
+        config: &SrtConfig,
+        stream_id: &str,
+    ) -> io::Result<Self> {
+        if stream_id.len() > 512 || stream_id.as_bytes().contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SRT stream ID must be at most 512 bytes and contain no NUL",
+            ));
+        }
         let socket = Self::new(config)?;
+        socket.with_handle(|handle| {
+            // SAFETY: libsrt copies the initialized string bytes before connect.
+            if unsafe {
+                sys::srt_setsockflag(
+                    handle,
+                    sys::SRT_SOCKOPT_SRTO_STREAMID,
+                    stream_id.as_ptr().cast(),
+                    stream_id.len() as i32,
+                )
+            } < 0
+            {
+                Err(last_error("set stream ID"))
+            } else {
+                Ok(())
+            }
+        })?;
         let address = SockAddr::from(address);
         socket.with_handle(|handle| {
             // SAFETY: valid sockaddr, socket exclusively guarded; nonblocking connect.
@@ -211,6 +237,34 @@ impl NativeSocket {
             }
         }).await.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "libsrt handshake timed out"))??;
         Ok(socket)
+    }
+
+    pub fn stream_id(&self) -> io::Result<String> {
+        self.with_handle(|handle| {
+            let mut buffer = [0u8; 513];
+            let mut length = buffer.len() as i32;
+            // SAFETY: buffer/length describe initialized writable storage;
+            // the socket handle is guarded against concurrent close.
+            if unsafe {
+                sys::srt_getsockflag(
+                    handle,
+                    sys::SRT_SOCKOPT_SRTO_STREAMID,
+                    buffer.as_mut_ptr().cast(),
+                    &mut length,
+                )
+            } < 0
+            {
+                return Err(last_error("get stream ID"));
+            }
+            if !(0..=512).contains(&length) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid SRT stream ID length",
+                ));
+            }
+            String::from_utf8(buffer[..length as usize].to_vec())
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        })
     }
 
     pub async fn accept(&self) -> io::Result<Self> {

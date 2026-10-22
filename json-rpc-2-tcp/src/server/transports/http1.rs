@@ -3,7 +3,7 @@
 use axum::{
     Router,
     body::{Body, Bytes},
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Extension, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -23,6 +23,13 @@ pub struct Http1Transport {
     listener: TcpListener,
     runtime: Arc<TransportRuntime>,
 }
+
+/// Request extension inserted by an embedding listener after TLS termination.
+///
+/// It lets an embedded HTTP router report the secure transport kind without
+/// relying on ALPN, which is optional for existing HTTP/1.1 clients.
+#[derive(Clone, Copy, Debug)]
+pub struct TlsIngress;
 
 impl Http1Transport {
     pub fn new(listener: TcpListener) -> Self {
@@ -83,8 +90,20 @@ pub async fn serve_http1(
     .await
 }
 
-async fn control_ping(ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>) -> impl IntoResponse {
-    log_control("HTTP/1.1", peer, "ping", "pong");
+async fn control_ping(
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    tls: Option<Extension<TlsIngress>>,
+) -> impl IntoResponse {
+    log_control(
+        if tls.is_some() {
+            "TLS/HTTP/1.1"
+        } else {
+            "HTTP/1.1"
+        },
+        peer,
+        "ping",
+        "pong",
+    );
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -95,15 +114,20 @@ async fn control_ping(ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>) -> i
 async fn http_rpc(
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     State((protocol, _runtime)): State<(Arc<dyn JsonRpcProtocol>, Arc<TransportRuntime>)>,
+    tls: Option<Extension<TlsIngress>>,
     body: Bytes,
 ) -> Response {
     let started = Instant::now();
-    let context = TransportSession::stateless("http1");
+    let context = TransportSession::stateless(if tls.is_some() { "tls" } else { "http1" });
     let binary = json_rpc_2_transport::gateway::is_gateway_frame(&body);
     let request_log = body.clone();
     let response = protocol.handle_owned_message(body, &context).await;
     log_json_rpc(
-        "HTTP/1.1",
+        if tls.is_some() {
+            "TLS/HTTP/1.1"
+        } else {
+            "HTTP/1.1"
+        },
         peer,
         &request_log,
         response.as_ref().map(|message| {

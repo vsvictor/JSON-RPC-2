@@ -101,7 +101,12 @@ async fn handle_connection(
     serve_stream(read_half, write_half, protocol, shutdown, peer, "tcp").await
 }
 
-pub(crate) async fn serve_stream<R, W>(
+/// Serve the JSON-lines/binary gateway protocol on an already accepted stream.
+///
+/// The caller owns the stream and is responsible for connection limits,
+/// cancellation, and waiting for this future before shutting down its listener.
+/// `kind` is copied into request and push session contexts.
+pub async fn serve_stream<R, W>(
     mut reader: R,
     mut write_half: W,
     protocol: Arc<dyn JsonRpcProtocol>,

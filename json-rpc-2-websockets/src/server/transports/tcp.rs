@@ -4,7 +4,10 @@ use std::{io, sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::{TcpListener, TcpStream},
+};
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::protocol::{CloseFrame, Message, Role, WebSocketConfig, frame::coding::CloseCode},
@@ -99,18 +102,53 @@ async fn handle_connection(
         .max_message_size(Some(MAX_WS_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_WS_MESSAGE_BYTES));
     let websocket = WebSocketStream::from_raw_socket(stream, Role::Server, Some(config)).await;
-    run_websocket_session(websocket, peer, protocol, shutdown, runtime).await;
+    run_websocket_session(websocket, peer, protocol, shutdown, runtime, "ws-tcp").await;
     Ok(())
 }
 
-async fn run_websocket_session(
-    mut websocket: WebSocketStream<TcpStream>,
+/// Serve a raw WebSocket session on an already accepted stream without an
+/// HTTP upgrade. The caller owns admission, cancellation, and task tracking.
+pub async fn serve_established_stream<S>(
+    stream: S,
     peer: std::net::SocketAddr,
     protocol: Arc<dyn WebSocketProtocol>,
     shutdown: CancellationToken,
     runtime: Arc<TransportRuntime>,
-) {
-    let mut session = TransportSession::new("ws-tcp", true);
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    serve_established_stream_with_kind(stream, peer, protocol, shutdown, runtime, "ws-tcp").await;
+}
+
+/// Variant of [`serve_established_stream`] for secure raw WebSocket sessions.
+pub async fn serve_established_stream_with_kind<S>(
+    stream: S,
+    peer: std::net::SocketAddr,
+    protocol: Arc<dyn WebSocketProtocol>,
+    shutdown: CancellationToken,
+    runtime: Arc<TransportRuntime>,
+    kind: &'static str,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_WS_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_WS_MESSAGE_BYTES));
+    let websocket = WebSocketStream::from_raw_socket(stream, Role::Server, Some(config)).await;
+    run_websocket_session(websocket, peer, protocol, shutdown, runtime, kind).await;
+}
+
+async fn run_websocket_session<S>(
+    mut websocket: WebSocketStream<S>,
+    peer: std::net::SocketAddr,
+    protocol: Arc<dyn WebSocketProtocol>,
+    shutdown: CancellationToken,
+    runtime: Arc<TransportRuntime>,
+    kind: &'static str,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = TransportSession::new(kind, true);
     let _session_guard = WebSocketSessionGuard::new(Arc::clone(&protocol), session.context.clone());
     loop {
         let event = tokio::select! {
@@ -251,12 +289,14 @@ enum SessionEvent {
     Shutdown,
 }
 
-async fn close_session(
-    mut websocket: WebSocketStream<TcpStream>,
+async fn close_session<S>(
+    mut websocket: WebSocketStream<S>,
     code: CloseCode,
     reason: &'static str,
     timeout: std::time::Duration,
-) {
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let frame = CloseFrame {
         code,
         reason: reason.into(),

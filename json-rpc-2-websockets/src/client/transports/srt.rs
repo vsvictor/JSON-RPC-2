@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use json_rpc_2_datagram::client::transports::srt::SrtClientTransport;
+use json_rpc_2_datagram::client::transports::srt::{SrtClientTransport, WS_SRT_STREAM_ID};
 use json_rpc_2_transport::{RpcClientTransport, TransportError};
 
 use super::DatagramWebSocketClientTransport;
@@ -43,7 +43,13 @@ impl SrtWebSocketClientTransport {
     ) -> Result<Self, TransportError> {
         Ok(Self {
             inner: DatagramWebSocketClientTransport::new(
-                SrtClientTransport::connect_with_config(address, reliability, srt_config).await?,
+                SrtClientTransport::connect_with_stream_id(
+                    address,
+                    reliability,
+                    srt_config,
+                    WS_SRT_STREAM_ID,
+                )
+                .await?,
                 "ws-srt",
                 "WebSocket/SRT peer closed the session",
             ),
