@@ -18,10 +18,10 @@ use std::{
 
 use bytes::Bytes;
 use serde::Serialize;
-use serde_json::Value;
-use tokio::task::JoinHandle;
+use tokio::{sync::mpsc, task::JoinHandle};
 pub use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 use crate::{TcpCongestionControl, TcpTuningConfig};
 use json_rpc_2_core::UdpReliabilityConfig;
@@ -40,6 +40,200 @@ pub type ProtocolFuture<'a> = Pin<Box<dyn Future<Output = Option<Bytes>> + Send 
 /// response bytes, or `None` when the request is a notification.
 pub trait JsonRpcProtocol: Send + Sync + 'static {
     fn handle_message<'a>(&'a self, input: &'a [u8]) -> ProtocolFuture<'a>;
+
+    fn handle_message_with_context<'a>(
+        &'a self,
+        input: &'a [u8],
+        _context: &'a TransportContext,
+    ) -> ProtocolFuture<'a> {
+        self.handle_message(input)
+    }
+
+    fn session_opened(&self, _context: &TransportContext) {}
+
+    fn session_closed(&self, _context: &TransportContext) {}
+}
+
+#[derive(Clone)]
+pub struct TransportContext {
+    pub transport: String,
+    pub connection_id: String,
+    pub push_sender: Option<mpsc::UnboundedSender<Bytes>>,
+}
+
+pub struct GatewayRequestMetadata {
+    pub connection_id: String,
+    pub transport: String,
+    pub payload_length: Option<usize>,
+}
+
+impl GatewayRequestMetadata {
+    pub fn parse(line: &str) -> io::Result<Option<Self>> {
+        if line == "JRPC-GW/1" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "gateway metadata requires connection ID and transport",
+            ));
+        }
+        let Some(rest) = line.strip_prefix("JRPC-GW/1 ") else {
+            return Ok(None);
+        };
+        let mut fields = rest.split_ascii_whitespace();
+        let connection_id = fields.next();
+        let transport = fields.next();
+        let payload_length = fields
+            .next()
+            .map(|value| {
+                value.parse::<usize>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "gateway metadata payload length must be a non-negative integer",
+                    )
+                })
+            })
+            .transpose()?;
+        if fields.next().is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid gateway metadata fields",
+            ));
+        }
+        let (Some(connection_id), Some(transport)) = (connection_id, transport) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "gateway metadata requires connection ID and transport",
+            ));
+        };
+        if connection_id.len() > 128
+            || connection_id.is_empty()
+            || !connection_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || transport.is_empty()
+            || !transport
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid gateway metadata value",
+            ));
+        }
+        if payload_length.is_some_and(|length| length > json_rpc_2_core::MAX_MESSAGE_BYTES) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "gateway metadata payload exceeds the maximum message size",
+            ));
+        }
+        Ok(Some(Self {
+            connection_id: connection_id.to_owned(),
+            transport: transport.to_owned(),
+            payload_length,
+        }))
+    }
+
+    pub fn context(&self, push_sender: Option<mpsc::UnboundedSender<Bytes>>) -> TransportContext {
+        TransportContext {
+            transport: self.transport.clone(),
+            connection_id: self.connection_id.clone(),
+            push_sender,
+        }
+    }
+}
+
+#[cfg(test)]
+mod gateway_metadata_tests {
+    use super::GatewayRequestMetadata;
+
+    #[test]
+    fn parses_gateway_metadata_without_changing_the_payload_contract() {
+        let metadata = GatewayRequestMetadata::parse(
+            "JRPC-GW/1 550e8400-e29b-41d4-a716-446655440000 ws-tcp 25",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            metadata.connection_id,
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+        assert_eq!(metadata.transport, "ws-tcp");
+        assert_eq!(metadata.payload_length, Some(25));
+    }
+
+    #[test]
+    fn ignores_lines_without_the_gateway_metadata_prefix() {
+        assert!(
+            GatewayRequestMetadata::parse(r#"{"jsonrpc":"2.0","method":"echo","id":1}"#)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_gateway_metadata() {
+        for line in [
+            "JRPC-GW/1",
+            "JRPC-GW/1 connection-id",
+            "JRPC-GW/1 connection-id tcp extra",
+            "JRPC-GW/1 invalid_id tcp",
+            "JRPC-GW/1 connection-id tcp not-a-length",
+        ] {
+            assert!(
+                GatewayRequestMetadata::parse(line).is_err(),
+                "accepted malformed metadata: {line}"
+            );
+        }
+    }
+}
+
+pub struct TransportSession {
+    pub context: TransportContext,
+    pub push_receiver: mpsc::UnboundedReceiver<Bytes>,
+}
+
+impl TransportSession {
+    pub fn new(transport: impl Into<String>, supports_push: bool) -> Self {
+        let (push_sender, push_receiver) = mpsc::unbounded_channel();
+        Self {
+            context: TransportContext {
+                transport: transport.into(),
+                connection_id: Uuid::new_v4().to_string(),
+                push_sender: supports_push.then_some(push_sender),
+            },
+            push_receiver,
+        }
+    }
+
+    pub fn stateless(transport: impl Into<String>) -> TransportContext {
+        TransportContext {
+            transport: transport.into(),
+            connection_id: Uuid::new_v4().to_string(),
+            push_sender: None,
+        }
+    }
+}
+
+pub struct ProtocolSessionGuard {
+    protocol: Arc<dyn JsonRpcProtocol>,
+    context: TransportContext,
+}
+
+impl ProtocolSessionGuard {
+    pub fn new(protocol: Arc<dyn JsonRpcProtocol>, context: TransportContext) -> Self {
+        protocol.session_opened(&context);
+        Self { protocol, context }
+    }
+
+    pub fn context(&self) -> &TransportContext {
+        &self.context
+    }
+}
+
+impl Drop for ProtocolSessionGuard {
+    fn drop(&mut self) {
+        self.protocol.session_closed(&self.context);
+    }
 }
 
 /// Runtime limits for the server dispatcher and transport fan-out.
@@ -229,30 +423,15 @@ pub fn log_json_rpc(
     response: Option<&[u8]>,
     latency: Duration,
 ) {
-    let peer = peer.to_string();
-    let (method, request_id) = extract_request_meta(request);
-    let response_code = response.and_then(extract_response_code);
     debug!(
         transport,
-        peer,
-        method = method.as_deref().unwrap_or("<invalid>"),
-        request_id = request_id.as_deref().unwrap_or("notification"),
+        peer = %peer,
+        request_bytes = request.len(),
+        response_bytes = response.map_or(0, <[u8]>::len),
         latency_ms = latency.as_millis() as u64,
-        response_code = response_code.unwrap_or(0),
         notification = response.is_none(),
-        "handled json-rpc message"
+        "handled opaque message"
     );
-    if tracing::enabled!(tracing::Level::DEBUG) {
-        debug!(transport, peer, direction = "received", request = %String::from_utf8_lossy(request), "json-rpc request payload");
-        match response {
-            Some(response) => {
-                debug!(transport, peer, direction = "outgoing", response = %String::from_utf8_lossy(response), "json-rpc response payload");
-            }
-            None => {
-                debug!(transport, peer, "json-rpc notification without response");
-            }
-        }
-    }
 }
 
 pub fn log_control(transport: &str, peer: impl Display, action: &str, response: &str) {
@@ -272,41 +451,6 @@ pub fn log_transport_error(
     error: &dyn std::fmt::Display,
 ) {
     warn!(transport, peer = %peer, stage, error = %error, "transport session failed");
-}
-
-fn extract_request_meta(request: &[u8]) -> (Option<String>, Option<String>) {
-    match serde_json::from_slice::<Value>(request) {
-        Ok(Value::Object(object)) => (
-            object
-                .get("method")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            object.get("id").map(serialize_value),
-        ),
-        Ok(Value::Array(items)) => (
-            Some(format!("batch[{}]", items.len())),
-            Some(format!(
-                "{} ids",
-                items.iter().filter(|item| item.get("id").is_some()).count()
-            )),
-        ),
-        _ => (None, None),
-    }
-}
-
-fn extract_response_code(response: &[u8]) -> Option<i64> {
-    match serde_json::from_slice::<Value>(response).ok()? {
-        Value::Object(object) => object
-            .get("error")
-            .and_then(|error| error.get("code"))
-            .and_then(Value::as_i64),
-        Value::Array(items) => items.iter().find_map(|item| {
-            item.get("error")
-                .and_then(|error| error.get("code"))
-                .and_then(Value::as_i64)
-        }),
-        _ => None,
-    }
 }
 
 pub fn apply_tcp_listener_tuning(
@@ -371,8 +515,10 @@ fn apply_tcp_congestion_sockref(
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn apply_tcp_congestion_raw(socket: &socket2::Socket, congestion: TcpCongestionControl) -> io::Result<()>
-{
+fn apply_tcp_congestion_raw(
+    socket: &socket2::Socket,
+    congestion: TcpCongestionControl,
+) -> io::Result<()> {
     let Some(name) = congestion.as_socket_name() else {
         return Ok(());
     };
@@ -441,10 +587,6 @@ fn apply_tcp_fast_open_listener(
             "TCP Fast Open listeners are only supported on linux/android/macos/ios in this crate",
         ))
     }
-}
-
-fn serialize_value(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "<invalid>".to_owned())
 }
 
 /// Shared multiplexor for transports that fan out independent stream sessions.

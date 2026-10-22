@@ -15,7 +15,7 @@ use std::{
 use tokio::task::JoinSet;
 
 pub use json_rpc_2_core::*;
-pub use json_rpc_2_transport::{JsonRpcProtocol, ProtocolFuture, ServerLimits};
+pub use json_rpc_2_transport::{JsonRpcProtocol, ProtocolFuture, ServerLimits, TransportContext};
 pub type TransportLimits = ServerLimits;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -39,7 +39,7 @@ impl std::fmt::Display for RegistrationError {
 impl std::error::Error for RegistrationError {}
 
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send>>;
-type Handler = Arc<dyn Fn(Value) -> HandlerFuture + Send + Sync>;
+type Handler = Arc<dyn Fn(Value, Option<TransportContext>) -> HandlerFuture + Send + Sync>;
 type MethodMap = HashMap<String, Handler>;
 
 #[derive(Default)]
@@ -118,7 +118,7 @@ impl RpcServer {
     /// Transport implementations should depend on [`JsonRpcProtocol`] rather
     /// than on this concrete server type.
     pub async fn handle_bytes(&self, input: &[u8]) -> Option<Bytes> {
-        self.process_message(input).await
+        self.process_message(input, None).await
     }
 
     /// Register a method whose handler may perform asynchronous work.
@@ -134,6 +134,20 @@ impl RpcServer {
         F: Fn(Value) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Value, RpcError>> + Send + 'static,
     {
+        self.register_with_context(name, move |params, _context| handler(params))
+    }
+
+    /// Register a method that also receives transport metadata when the
+    /// caller provides a session-aware transport context.
+    pub fn register_with_context<F, Fut>(
+        &self,
+        name: impl Into<String>,
+        handler: F,
+    ) -> Result<(), RegistrationError>
+    where
+        F: Fn(Value, Option<TransportContext>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Value, RpcError>> + Send + 'static,
+    {
         let name = name.into();
         if name.starts_with("rpc.") {
             return Err(RegistrationError::ReservedMethod);
@@ -145,12 +159,19 @@ impl RpcServer {
         }
 
         let mut next = (*current).clone();
-        next.insert(name, Arc::new(move |params| Box::pin(handler(params))));
+        next.insert(
+            name,
+            Arc::new(move |params, context| Box::pin(handler(params, context))),
+        );
         self.methods.store(Arc::new(next));
         Ok(())
     }
 
-    async fn process_message(&self, input: &[u8]) -> Option<Bytes> {
+    async fn process_message(
+        &self,
+        input: &[u8],
+        context: Option<TransportContext>,
+    ) -> Option<Bytes> {
         let value = match serde_json::from_slice::<Value>(input) {
             Ok(value) => value,
             Err(_) => {
@@ -173,7 +194,8 @@ impl RpcServer {
                 let mut tasks = JoinSet::new();
                 for request in batch {
                     let server = self.clone();
-                    tasks.spawn(async move { server.handle_value(request).await });
+                    let context = context.clone();
+                    tasks.spawn(async move { server.handle_value(request, context).await });
                 }
 
                 let mut responses = Vec::new();
@@ -190,13 +212,13 @@ impl RpcServer {
                 }
             }
             request => self
-                .handle_value(request)
+                .handle_value(request, context)
                 .await
                 .map(|response| serialize(&response)),
         }
     }
 
-    async fn handle_value(&self, value: Value) -> Option<Value> {
+    async fn handle_value(&self, value: Value, context: Option<TransportContext>) -> Option<Value> {
         let invalid_id = valid_id_from_object(&value).unwrap_or(Value::Null);
         let Some(object) = value.as_object() else {
             return Some(response_error(invalid_id, RpcError::invalid_request()));
@@ -236,7 +258,7 @@ impl RpcServer {
                 .await
                 .expect("request semaphore closed");
             self.metrics.active_requests.fetch_add(1, Ordering::Relaxed);
-            let _ = handler(params).await;
+            let _ = handler(params, context).await;
             self.metrics.active_requests.fetch_sub(1, Ordering::Relaxed);
             return None;
         };
@@ -249,7 +271,7 @@ impl RpcServer {
             .expect("request semaphore closed");
         self.metrics.active_requests.fetch_add(1, Ordering::Relaxed);
         self.metrics.rpc_calls_total.fetch_add(1, Ordering::Relaxed);
-        let response = match handler(params).await {
+        let response = match handler(params, context).await {
             Ok(result) => Some(json!({"jsonrpc": "2.0", "result": result, "id": id})),
             Err(error) => {
                 self.metrics
@@ -269,7 +291,15 @@ impl RpcServer {
 
 impl JsonRpcProtocol for RpcServer {
     fn handle_message<'a>(&'a self, input: &'a [u8]) -> ProtocolFuture<'a> {
-        Box::pin(self.process_message(input))
+        Box::pin(self.process_message(input, None))
+    }
+
+    fn handle_message_with_context<'a>(
+        &'a self,
+        input: &'a [u8],
+        context: &'a TransportContext,
+    ) -> ProtocolFuture<'a> {
+        Box::pin(self.process_message(input, Some(context.clone())))
     }
 }
 
@@ -386,8 +416,10 @@ mod dispatcher {
             if self.methods.contains_key(&name) {
                 return Err(RegistrationError::DuplicateMethod);
             }
-            self.methods
-                .insert(name, Arc::new(move |params| Box::pin(handler(params))));
+            self.methods.insert(
+                name,
+                Arc::new(move |params, _context| Box::pin(handler(params))),
+            );
             Ok(())
         }
     }

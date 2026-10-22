@@ -1874,7 +1874,6 @@ dependencies = [
  "json-rpc-2-core",
  "json-rpc-2-transport",
  "libc",
- "pkg-config",
  "socket2",
  "tokio",
  "tokio-util",
@@ -2032,6 +2031,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
