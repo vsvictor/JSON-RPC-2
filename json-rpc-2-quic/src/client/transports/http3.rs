@@ -16,7 +16,7 @@ use super::uri_host;
 use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_transport::{
     CONTROL_PATH, ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
-    RpcClientTransport, TransportError,
+    RpcClientTransport, TransportError, TransportMessage,
 };
 use json_rpc_2_transport::{closed, transport_error};
 
@@ -100,8 +100,22 @@ impl Http3ClientTransport {
 
 impl RpcClientTransport for Http3ClientTransport {
     fn send<'a>(&'a self, message: Bytes) -> ClientTransportFuture<'a> {
+        self.send_message(message.into(), true)
+    }
+
+    fn send_message<'a>(
+        &'a self,
+        message: TransportMessage,
+        _expects_response: bool,
+    ) -> ClientTransportFuture<'a> {
         Box::pin(async move {
-            let request = rpc_request(&self.uri)?;
+            let binary =
+                json_rpc_2_transport::gateway::is_gateway_frame(if message.header.is_empty() {
+                    &message.payload
+                } else {
+                    &message.header
+                });
+            let request = rpc_request(&self.uri, binary)?;
             let mut stream = self.request_stream(request).await?;
             receive_http3_response(&mut stream, message, None).await
         })
@@ -114,9 +128,12 @@ impl RpcClientTransport for Http3ClientTransport {
         cancel: CancellationToken,
     ) -> ClientTransportFuture<'a> {
         Box::pin(async move {
-            let request = rpc_request(&self.uri)?;
+            let request = rpc_request(
+                &self.uri,
+                json_rpc_2_transport::gateway::is_gateway_frame(&message),
+            )?;
             let mut stream = self.request_stream(request).await?;
-            receive_http3_response(&mut stream, message, Some(&cancel)).await
+            receive_http3_response(&mut stream, message.into(), Some(&cancel)).await
         })
     }
 
@@ -179,21 +196,33 @@ impl RpcClientTransport for Http3ClientTransport {
     }
 }
 
-fn rpc_request(uri: &str) -> Result<Request<()>, TransportError> {
+fn rpc_request(uri: &str, binary: bool) -> Result<Request<()>, TransportError> {
     Request::builder()
         .method(Method::POST)
         .uri(uri)
-        .header(header::CONTENT_TYPE, "application/json")
+        .header(
+            header::CONTENT_TYPE,
+            if binary {
+                "application/octet-stream"
+            } else {
+                "application/json"
+            },
+        )
         .body(())
         .map_err(transport_error)
 }
 
 async fn receive_http3_response(
     stream: &mut H3RequestStream,
-    message: Bytes,
+    message: TransportMessage,
     cancel: Option<&CancellationToken>,
 ) -> Result<Option<Bytes>, TransportError> {
-    send_http3_data(stream, message, cancel).await?;
+    if !message.header.is_empty() {
+        send_http3_data(stream, message.header, cancel).await?;
+    }
+    if !message.payload.is_empty() {
+        send_http3_data(stream, message.payload, cancel).await?;
+    }
     finish_http3_stream(stream, cancel).await?;
     let response = recv_http3_headers(stream, cancel).await?;
     if response.status() == StatusCode::NO_CONTENT {

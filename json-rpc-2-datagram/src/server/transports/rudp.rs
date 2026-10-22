@@ -184,11 +184,17 @@ async fn handle_packet(
                     runtime.metrics.stream_started();
                     tasks.spawn(async move {
                         let started = Instant::now();
-                        let response = protocol.handle_message(&packet.payload).await;
+                        let payload = bytes::Bytes::from(packet.payload);
+                        let response = json_rpc_2_transport::dispatch_stateless(
+                            protocol.as_ref(),
+                            payload.clone(),
+                            "rudp",
+                        )
+                        .await;
                         log_json_rpc(
                             "RUDP",
                             peer,
-                            &packet.payload,
+                            &payload,
                             response.as_deref(),
                             started.elapsed(),
                         );

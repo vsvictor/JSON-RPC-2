@@ -2,7 +2,7 @@
 
 use axum::{
     Router,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{ConnectInfo, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -14,8 +14,8 @@ use tokio::net::TcpListener;
 use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_transport::JsonRpcProtocol;
 use json_rpc_2_transport::{
-    CONTROL_PATH, CancellationToken, Transport, TransportFuture, TransportRuntime, log_control,
-    log_json_rpc,
+    CONTROL_PATH, CancellationToken, Transport, TransportFuture, TransportRuntime,
+    TransportSession, log_control, log_json_rpc,
 };
 
 /// HTTP/1.1 transport with JSON-RPC requests at `POST /`.
@@ -98,19 +98,35 @@ async fn http_rpc(
     body: Bytes,
 ) -> Response {
     let started = Instant::now();
-    let response = protocol.handle_message(&body).await;
+    let context = TransportSession::stateless("http1");
+    let binary = json_rpc_2_transport::gateway::is_gateway_frame(&body);
+    let request_log = body.clone();
+    let response = protocol.handle_owned_message(body, &context).await;
     log_json_rpc(
         "HTTP/1.1",
         peer,
-        &body,
-        response.as_deref(),
+        &request_log,
+        response.as_ref().map(|message| {
+            if message.header.is_empty() {
+                message.payload.as_ref()
+            } else {
+                message.header.as_ref()
+            }
+        }),
         started.elapsed(),
     );
     match response {
         Some(response) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            response,
+            [(
+                header::CONTENT_TYPE,
+                if binary {
+                    "application/octet-stream"
+                } else {
+                    "application/json"
+                },
+            )],
+            Body::new(response),
         )
             .into_response(),
         None => StatusCode::NO_CONTENT.into_response(),

@@ -117,18 +117,20 @@ pub async fn serve(
                         let sessions = Arc::clone(&sessions);
                         let runtime = Arc::clone(&runtime);
                         tasks.spawn(async move {
-                            let request_bytes = websocket_message_bytes(&inbound).to_vec();
+                            let request_bytes = super::message_bytes_for_log(&inbound);
                             let started = Instant::now();
-                            let response = protocol.handle_message(inbound).await;
-                            let response_bytes = response
-                                .as_ref()
-                                .map(websocket_message_bytes)
-                                .map(|bytes| bytes.to_vec());
+                            let response = super::handle_stateless_message(
+                                protocol.as_ref(),
+                                inbound,
+                                "ws-coap",
+                            )
+                            .await;
+                            let response_bytes = response.as_ref().map(websocket_message_bytes);
                             log_json_rpc(
                                 "WebSocket/CoAP",
                                 peer,
                                 &request_bytes,
-                                response_bytes.as_deref(),
+                                response_bytes,
                                 started.elapsed(),
                             );
                             let outbound = match response {

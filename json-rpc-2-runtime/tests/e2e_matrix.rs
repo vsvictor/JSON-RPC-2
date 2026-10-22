@@ -67,6 +67,8 @@ use serde_json::{Value, json};
 
 const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
+mod support;
+
 trait DynTransport: RpcClientTransport {}
 impl<T: RpcClientTransport> DynTransport for T {}
 
@@ -275,11 +277,14 @@ async fn start_all(
     #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
     let builder = builder.set_udplite_port(0).set_ws_udplite_port(0);
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    let builder = builder
-        .set_dccp_port(0)
-        .set_sctp_port(0)
-        .set_ws_dccp_port(0)
-        .set_ws_sctp_port(0);
+    let builder = {
+        let builder = builder.set_sctp_port(0).set_ws_sctp_port(0);
+        if support::dccp_available(LOCALHOST) {
+            builder.set_dccp_port(0).set_ws_dccp_port(0)
+        } else {
+            builder
+        }
+    };
     let running = builder
         .set_tls(vec![certificate.clone()], key)
         .start()

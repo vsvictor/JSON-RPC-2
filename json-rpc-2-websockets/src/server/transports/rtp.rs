@@ -247,29 +247,32 @@ async fn handle_data_packet(
             tasks.spawn(async move {
                 let request_bytes = inbound
                     .as_ref()
-                    .map(websocket_message_bytes)
-                    .unwrap_or_default()
-                    .to_vec();
+                    .map(super::message_bytes_for_log)
+                    .unwrap_or_default();
                 let started = Instant::now();
                 let mut response_bytes_for_log = None;
                 let encoded_response = match inbound {
-                    Some(message) => match protocol.handle_message(message).await {
-                        Some(response) => {
-                            response_bytes_for_log =
-                                Some(websocket_message_bytes(&response).to_vec());
-                            send_response(
-                                &socket,
-                                peer,
-                                packet.message_id,
-                                response,
-                                &runtime,
-                                &endpoint,
-                                "WebSocket/RTP",
-                            )
+                    Some(message) => {
+                        match super::handle_stateless_message(protocol.as_ref(), message, "ws-rtp")
                             .await
+                        {
+                            Some(response) => {
+                                response_bytes_for_log =
+                                    Some(super::message_bytes_for_log(&response));
+                                send_response(
+                                    &socket,
+                                    peer,
+                                    packet.message_id,
+                                    response,
+                                    &runtime,
+                                    &endpoint,
+                                    "WebSocket/RTP",
+                                )
+                                .await
+                            }
+                            None => None,
                         }
-                        None => None,
-                    },
+                    }
                     None => {
                         log_control("WebSocket/RTP", peer, "close", "ack");
                         None

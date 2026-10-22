@@ -1,26 +1,26 @@
-//! Newline-delimited JSON over TLS-wrapped TCP.
+//! JSON lines and binary gateway frames over TLS-wrapped TCP.
 
-use std::{io, sync::Arc, time::Instant};
+use std::{io, sync::Arc};
 
-use futures_util::{SinkExt, StreamExt};
 use rustls::ServerConfig;
-use tokio::{
-    io::AsyncWriteExt,
-    net::{TcpListener, TcpStream},
-};
-use tokio_rustls::{TlsAcceptor, server::TlsStream};
-use tokio_util::codec::{Framed, LinesCodec};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::TlsAcceptor;
 
-use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_transport::JsonRpcProtocol;
 use json_rpc_2_transport::multiplex::StreamMultiplexor;
 use json_rpc_2_transport::{
-    CONTROL_PING, CONTROL_PONG, CancellationToken, GatewayRequestMetadata, ProtocolSessionGuard,
-    Transport, TransportFuture, TransportRuntime, TransportSession, apply_tcp_stream_tuning,
-    log_control, log_json_rpc, log_transport_error,
+    CancellationToken, Transport, TransportFuture, TransportRuntime, apply_tcp_stream_tuning,
+    log_transport_error,
 };
 
-/// TLS transport using one compact JSON message per newline-delimited line.
+#[cfg(not(feature = "tcp"))]
+#[allow(dead_code)]
+#[path = "tcp.rs"]
+mod tcp;
+#[cfg(feature = "tcp")]
+use super::tcp;
+
+/// TLS transport accepting JSON lines and binary gateway frames.
 pub struct TlsTransport {
     listener: TcpListener,
     acceptor: TlsAcceptor,
@@ -109,69 +109,8 @@ async fn handle_connection(
         result = acceptor.accept(stream) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
-    let mut framed = Framed::new(stream, LinesCodec::new_with_max_length(MAX_MESSAGE_BYTES));
-    let TransportSession {
-        context,
-        mut push_receiver,
-    } = TransportSession::new("tls", true);
-    let session = ProtocolSessionGuard::new(protocol.clone(), context);
-    let mut gateway_metadata = None;
-    loop {
-        let event = tokio::select! {
-            line = framed.next() => (line, None),
-            push = push_receiver.recv() => (None, Some(push)),
-            _ = shutdown.cancelled() => break,
-        };
-        if let Some(push) = event.1 {
-            let Some(push) = push else { break };
-            let push = String::from_utf8(push.to_vec())
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            framed
-                .send(push)
-                .await
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            continue;
-        }
-        let Some(line) = event.0 else { break };
-        let line = line.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if let Some(metadata) = GatewayRequestMetadata::parse(&line)? {
-            gateway_metadata = Some(metadata);
-            continue;
-        }
-        if line.as_bytes() == CONTROL_PING {
-            log_control("TLS", peer, "ping", "pong");
-            framed
-                .send(String::from_utf8(CONTROL_PONG.to_vec()).expect("ASCII control payload"))
-                .await
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            continue;
-        }
-        let started = Instant::now();
-        let message_context = gateway_metadata
-            .take()
-            .map(|metadata| metadata.context(None))
-            .unwrap_or_else(|| session.context().clone());
-        let response = protocol
-            .handle_message_with_context(line.as_bytes(), &message_context)
-            .await;
-        log_json_rpc(
-            "TLS",
-            peer,
-            line.as_bytes(),
-            response.as_deref(),
-            started.elapsed(),
-        );
-        if let Some(response) = response {
-            let response = String::from_utf8(response.to_vec())
-                .expect("serialized JSON-RPC responses are valid UTF-8");
-            framed
-                .send(response)
-                .await
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        }
-    }
-    let mut stream: TlsStream<TcpStream> = framed.into_inner();
-    match stream.shutdown().await {
+    let (reader, writer) = tokio::io::split(stream);
+    match tcp::serve_stream(reader, writer, protocol, shutdown, peer, "tls").await {
         Err(error) if error.kind() != io::ErrorKind::NotConnected => Err(error),
         _ => Ok(()),
     }

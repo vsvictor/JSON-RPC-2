@@ -4,7 +4,6 @@ use std::{io, sync::Arc, time::Instant};
 
 use axum::{
     Router,
-    body::Bytes,
     extract::{
         ConnectInfo, State,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
@@ -302,45 +301,41 @@ async fn websocket_session(
             // flushes it and ends the stream, completing the handshake.
             Message::Close(_) => continue,
         };
-        let request_bytes = match &request {
-            WebSocketMessage::Text(text) => text.as_bytes().to_vec(),
-            WebSocketMessage::Binary(data) => data.to_vec(),
-        };
+        let request_bytes = super::message_bytes_for_log(&request);
         let started = Instant::now();
-        let response = match protocol.handle_message(request).await {
-            Some(WebSocketMessage::Text(text)) => {
-                let response_bytes = text.as_bytes().to_vec();
-                let response = Message::Text(text.into());
-                log_json_rpc(
-                    "WebSocket/HTTP/1.1",
-                    peer,
-                    &request_bytes,
-                    Some(&response_bytes),
-                    started.elapsed(),
-                );
-                response
-            }
-            Some(WebSocketMessage::Binary(data)) => {
-                log_json_rpc(
-                    "WebSocket/HTTP/1.1",
-                    peer,
-                    &request_bytes,
-                    Some(data.as_ref()),
-                    started.elapsed(),
-                );
-                Message::Binary(Bytes::from(data))
-            }
-            None => {
-                log_json_rpc(
-                    "WebSocket/HTTP/1.1",
-                    peer,
-                    &request_bytes,
-                    None,
-                    started.elapsed(),
-                );
-                continue;
-            }
-        };
+        let response =
+            match super::handle_stateless_message(protocol.as_ref(), request, "ws-http1").await {
+                Some(WebSocketMessage::Text(text)) => {
+                    log_json_rpc(
+                        "WebSocket/HTTP/1.1",
+                        peer,
+                        &request_bytes,
+                        Some(text.as_bytes()),
+                        started.elapsed(),
+                    );
+                    Message::Text(text.into())
+                }
+                Some(WebSocketMessage::Binary(data)) => {
+                    log_json_rpc(
+                        "WebSocket/HTTP/1.1",
+                        peer,
+                        &request_bytes,
+                        Some(data.as_ref()),
+                        started.elapsed(),
+                    );
+                    Message::Binary(data)
+                }
+                None => {
+                    log_json_rpc(
+                        "WebSocket/HTTP/1.1",
+                        peer,
+                        &request_bytes,
+                        None,
+                        started.elapsed(),
+                    );
+                    continue;
+                }
+            };
         if socket.send(response).await.is_err() {
             return;
         }

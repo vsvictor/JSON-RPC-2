@@ -76,7 +76,12 @@ type WebSocketConnectFuture<C> = Pin<
     >,
 >;
 
-/// JSON-RPC over a WebSocket, one JSON document per text message.
+/// JSON-RPC over a WebSocket: direct JSON uses text messages, while gateway
+/// envelopes use binary messages.
+///
+/// WebSocket libraries require a contiguous frame, so the default
+/// `RpcClientTransport::send_message` coalesces split gateway headers and payloads
+/// at this library boundary.
 pub struct WebSocketClientTransport<C: WebSocketCarrier> {
     session: Mutex<Option<(WebSocketStream<C::Io>, C)>>,
     connector: std::sync::Arc<dyn Fn() -> WebSocketConnectFuture<C> + Send + Sync>,
@@ -118,10 +123,16 @@ impl<T> DatagramWebSocketClientTransport<T> {
     }
 
     fn encode_outbound(message: Bytes) -> Result<Bytes, TransportError> {
-        let text = std::str::from_utf8(&message).map_err(|error| {
-            TransportError::new(format!("invalid WebSocket text payload: {error}"))
-        })?;
-        encode_websocket_message(&WebSocketMessage::Text(text.to_owned()))
+        let message = if json_rpc_2_transport::gateway::is_gateway_frame(&message) {
+            WebSocketMessage::Binary(message)
+        } else {
+            let text = std::str::from_utf8(&message).map_err(|error| {
+                TransportError::new(format!("invalid WebSocket text payload: {error}"))
+            })?;
+            WebSocketMessage::Text(text.to_owned())
+        };
+        // The codec builds a contiguous frame, copying its payload at this boundary.
+        encode_websocket_message(&message)
             .map(Bytes::from)
             .map_err(TransportError::new)
     }
@@ -306,20 +317,22 @@ async fn exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let text = std::str::from_utf8(&message)
-        .map(str::to_owned)
-        .map_err(transport_error)?;
-    socket
-        .send(Message::Text(text.into()))
-        .await
-        .map_err(transport_error)?;
+    let message = if json_rpc_2_transport::gateway::is_gateway_frame(&message) {
+        Message::Binary(message)
+    } else {
+        let text = std::str::from_utf8(&message)
+            .map(str::to_owned)
+            .map_err(transport_error)?;
+        Message::Text(text.into())
+    };
+    socket.send(message).await.map_err(transport_error)?;
     if !expects {
         return Ok(None);
     }
     loop {
         match socket.next().await {
             Some(Ok(Message::Text(response))) => {
-                return Ok(Some(Bytes::from(response.to_string())));
+                return Ok(Some(response.into()));
             }
             Some(Ok(Message::Binary(response))) => return Ok(Some(response)),
             Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
@@ -350,4 +363,144 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+
+    fn gateway_message(payload: &[u8]) -> Bytes {
+        let mut message = b"JRPC-GW\x03".to_vec();
+        message.extend_from_slice(&[0; 17]);
+        message.extend_from_slice(payload);
+        Bytes::from(message)
+    }
+
+    struct FramedPeer {
+        request: WebSocketMessage,
+        response: WebSocketMessage,
+    }
+
+    impl RpcClientTransport for FramedPeer {
+        fn send<'a>(&'a self, message: Bytes) -> ClientTransportFuture<'a> {
+            Box::pin(async move {
+                assert_eq!(
+                    decode_websocket_message(&message).unwrap(),
+                    Some(self.request.clone())
+                );
+                Ok(Some(Bytes::from(
+                    encode_websocket_message(&self.response).unwrap(),
+                )))
+            })
+        }
+
+        fn transport_ping<'a>(&'a self) -> ClientPingFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn reconnect<'a>(&'a self) -> ClientRecoverFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close<'a>(&'a self) -> ClientCloseFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn wrapped_transports_preserve_binary_gateway_and_direct_text() {
+        for (request, response, binary) in [
+            (
+                gateway_message(b"\xffrequest\n\0"),
+                gateway_message(b"\xferesponse\n\n"),
+                true,
+            ),
+            (
+                Bytes::from_static(br#"{"jsonrpc":"2.0","method":"echo","id":1}"#),
+                Bytes::from_static(br#"{"jsonrpc":"2.0","result":"ok","id":1}"#),
+                false,
+            ),
+        ] {
+            let wrap = |bytes: Bytes| {
+                if binary {
+                    WebSocketMessage::Binary(bytes)
+                } else {
+                    WebSocketMessage::Text(std::str::from_utf8(&bytes).unwrap().to_owned())
+                }
+            };
+            let transport = DatagramWebSocketClientTransport::new(
+                FramedPeer {
+                    request: wrap(request.clone()),
+                    response: wrap(response.clone()),
+                },
+                "test",
+                "closed",
+            );
+            assert_eq!(
+                transport
+                    .send_with_expectation(request.clone(), true)
+                    .await
+                    .unwrap(),
+                Some(response.clone())
+            );
+            assert_eq!(
+                transport
+                    .send_cancelable(request, true, tokio_util::sync::CancellationToken::new(),)
+                    .await
+                    .unwrap(),
+                Some(response)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_websockets_preserve_binary_gateway_and_direct_text() {
+        for (request, response, binary) in [
+            (
+                gateway_message(b"\xffrequest\n\0"),
+                gateway_message(b"\xferesponse\n\n"),
+                true,
+            ),
+            (
+                Bytes::from_static(br#"{"jsonrpc":"2.0","method":"echo","id":1}"#),
+                Bytes::from_static(br#"{"jsonrpc":"2.0","result":"ok","id":1}"#),
+                false,
+            ),
+        ] {
+            let (client, server) = tokio::io::duplex(4096);
+            let mut client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+            let expected_request = request.clone();
+            let expected_response = response.clone();
+            let peer = async move {
+                let inbound = server.next().await.unwrap().unwrap();
+                assert_eq!(inbound.is_binary(), binary);
+                assert_eq!(inbound.into_data(), expected_request);
+                let outbound = if binary {
+                    Message::Binary(expected_response)
+                } else {
+                    Message::Text(
+                        std::str::from_utf8(&expected_response)
+                            .unwrap()
+                            .to_owned()
+                            .into(),
+                    )
+                };
+                server.send(outbound).await.unwrap();
+            };
+            let (result, ()) = tokio::join!(exchange(&mut client, request, true), peer);
+            assert_eq!(result.unwrap(), Some(response));
+        }
+    }
+
+    #[test]
+    fn invalid_direct_text_still_fails() {
+        assert!(
+            DatagramWebSocketClientTransport::<FramedPeer>::encode_outbound(Bytes::from_static(
+                b"\xffnot-a-gateway-frame"
+            ))
+            .is_err()
+        );
+    }
 }

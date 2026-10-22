@@ -17,7 +17,7 @@ use super::{
 use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_core::{
     ReliableUdpPacket, ReliableUdpPacketKind, decode_udp_packet, decode_websocket_message,
-    encode_udp_packet, encode_websocket_message, websocket_message_bytes,
+    encode_udp_packet, encode_websocket_message,
 };
 use json_rpc_2_transport::{TransportRuntime, log_control, log_json_rpc, log_transport_error};
 
@@ -166,16 +166,21 @@ async fn handle_packet(
                     tasks.spawn(async move {
                         let request_bytes = inbound
                             .as_ref()
-                            .map(websocket_message_bytes)
-                            .unwrap_or_default()
-                            .to_vec();
+                            .map(super::message_bytes_for_log)
+                            .unwrap_or_default();
                         let started = Instant::now();
                         let mut response_bytes_for_log = None;
                         let encoded_response = match inbound {
-                            Some(message) => match protocol.handle_message(message).await {
+                            Some(message) => match super::handle_stateless_message(
+                                protocol.as_ref(),
+                                message,
+                                "ws-udplite",
+                            )
+                            .await
+                            {
                                 Some(response) => {
                                     response_bytes_for_log =
-                                        Some(websocket_message_bytes(&response).to_vec());
+                                        Some(super::message_bytes_for_log(&response));
                                     send_response(
                                         &socket,
                                         peer,

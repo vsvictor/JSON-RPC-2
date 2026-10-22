@@ -101,7 +101,10 @@ async fn handle_connection(
             continue;
         }
         let started = Instant::now();
-        let response = protocol.handle_message(&message).await;
+        let message = bytes::Bytes::from(message);
+        let response =
+            json_rpc_2_transport::dispatch_stateless(protocol.as_ref(), message.clone(), "sctp")
+                .await;
         log_json_rpc(
             "SCTP",
             peer,
@@ -130,8 +133,6 @@ mod platform {
     use socket2::{Domain, Protocol, SockAddr, SockRef, Socket, Type};
     use tokio::io::unix::AsyncFd;
 
-    use crate::MAX_MESSAGE_BYTES;
-
     pub(crate) struct SctpListener {
         fd: AsyncFd<OwnedFd>,
         local_addr: SocketAddr,
@@ -141,7 +142,7 @@ mod platform {
         pub(super) fn bind(address: SocketAddr) -> io::Result<Self> {
             let socket = Socket::new(
                 Domain::for_address(address),
-                Type::SEQPACKET,
+                Type::STREAM,
                 Some(Protocol::from(libc::IPPROTO_SCTP)),
             )?;
             if address.is_ipv6() {
@@ -205,18 +206,7 @@ mod platform {
         }
 
         pub(super) async fn recv(&self) -> io::Result<Vec<u8>> {
-            let mut buffer = vec![0; MAX_MESSAGE_BYTES];
-            loop {
-                let mut guard = self.fd.readable().await?;
-                match guard.try_io(|fd| recv_raw(fd.get_ref().as_raw_fd(), &mut buffer)) {
-                    Ok(result) => {
-                        let read = result?;
-                        buffer.truncate(read);
-                        return Ok(buffer);
-                    }
-                    Err(_would_block) => continue,
-                }
-            }
+            crate::sctp_io::recv_record(&self.fd).await
         }
     }
 
@@ -246,8 +236,14 @@ mod platform {
     }
 
     fn send_raw(fd: i32, payload: &[u8]) -> io::Result<()> {
-        let written =
-            unsafe { libc::send(fd, payload.as_ptr().cast::<c_void>(), payload.len(), 0) };
+        let written = unsafe {
+            libc::send(
+                fd,
+                payload.as_ptr().cast::<c_void>(),
+                payload.len(),
+                libc::MSG_NOSIGNAL,
+            )
+        };
         if written < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -258,14 +254,6 @@ mod platform {
             ));
         }
         Ok(())
-    }
-
-    fn recv_raw(fd: i32, buffer: &mut [u8]) -> io::Result<usize> {
-        let read = unsafe { libc::recv(fd, buffer.as_mut_ptr().cast::<c_void>(), buffer.len(), 0) };
-        if read < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(read as usize)
     }
 }
 

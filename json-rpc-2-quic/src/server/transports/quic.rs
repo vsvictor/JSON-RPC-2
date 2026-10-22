@@ -132,16 +132,26 @@ async fn handle_stream(
         return Ok(());
     }
     let started = Instant::now();
-    let response = protocol.handle_message(&request).await;
+    let context = json_rpc_2_transport::TransportSession::stateless("quic");
+    let request = bytes::Bytes::from(request);
+    let request_log = request.clone();
+    let response = protocol.handle_owned_message(request, &context).await;
     log_json_rpc(
         "QUIC",
         peer,
-        &request,
-        response.as_deref(),
+        &request_log,
+        response.as_ref().map(|message| {
+            if message.header.is_empty() {
+                message.payload.as_ref()
+            } else {
+                message.header.as_ref()
+            }
+        }),
         started.elapsed(),
     );
     if let Some(response) = response {
-        send.write_all(&response).await?;
+        send.write_all(&response.header).await?;
+        send.write_all(&response.payload).await?;
     }
     send.finish()?;
     // Wait until the peer has received the whole response before the

@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_transport::{
     CONTROL_PING, CONTROL_PONG, ClientCloseFuture, ClientPingFuture, ClientRecoverFuture,
-    ClientTransportFuture, RpcClientTransport, TransportError,
+    ClientTransportFuture, RpcClientTransport, TransportError, TransportMessage,
 };
 use json_rpc_2_transport::{closed, transport_error};
 
@@ -65,6 +65,14 @@ impl QuicClientTransport {
 
 impl RpcClientTransport for QuicClientTransport {
     fn send<'a>(&'a self, message: Bytes) -> ClientTransportFuture<'a> {
+        self.send_message(message.into(), true)
+    }
+
+    fn send_message<'a>(
+        &'a self,
+        message: TransportMessage,
+        _expects_response: bool,
+    ) -> ClientTransportFuture<'a> {
         Box::pin(async move {
             let connection = self.current_connection().await?;
             send_request(connection, message, None).await
@@ -79,7 +87,7 @@ impl RpcClientTransport for QuicClientTransport {
     ) -> ClientTransportFuture<'a> {
         Box::pin(async move {
             let connection = self.current_connection().await?;
-            send_request(connection, message, Some(cancel)).await
+            send_request(connection, message.into(), Some(cancel)).await
         })
     }
 
@@ -140,11 +148,12 @@ impl RpcClientTransport for QuicClientTransport {
 
 async fn send_request(
     connection: Connection,
-    message: Bytes,
+    message: TransportMessage,
     cancel: Option<CancellationToken>,
 ) -> Result<Option<Bytes>, TransportError> {
     let (mut send, mut recv) = connection.open_bi().await.map_err(transport_error)?;
-    write_quic_message(&mut send, &mut recv, &message, cancel.as_ref()).await?;
+    write_quic_message(&mut send, &mut recv, &message.header, cancel.as_ref()).await?;
+    write_quic_message(&mut send, &mut recv, &message.payload, cancel.as_ref()).await?;
     send.finish().map_err(transport_error)?;
     let response = read_quic_response(&mut send, &mut recv, cancel.as_ref()).await?;
     Ok((!response.is_empty()).then_some(response))

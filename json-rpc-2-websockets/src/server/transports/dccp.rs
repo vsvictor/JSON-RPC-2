@@ -2,7 +2,7 @@
 
 use std::{io, net::SocketAddr, sync::Arc};
 
-use super::{WebSocketProtocol, WebSocketTransportFuture, protocol_adapter};
+use super::{WebSocketProtocol, WebSocketTransportFuture, protocol_adapter_with_kind};
 use json_rpc_2_datagram::server::transports::dccp::DccpTransport;
 use json_rpc_2_transport::{CancellationToken, Transport};
 
@@ -34,6 +34,7 @@ impl super::WebSocketTransport for DccpWebSocketTransport {
         protocol: Arc<dyn WebSocketProtocol>,
         shutdown: CancellationToken,
     ) -> WebSocketTransportFuture {
-        self.inner.run(protocol_adapter(protocol), shutdown)
+        self.inner
+            .run(protocol_adapter_with_kind(protocol, "ws-dccp"), shutdown)
     }
 }

@@ -815,6 +815,15 @@ pub struct MultiTransportServer {
 }
 
 impl MultiTransportServer {
+    /// Accept opaque gateway frames and propagate client metadata to handlers.
+    /// Enable only on trusted backend listeners, never on public gateway ingress.
+    pub fn enable_gateway_framing(&mut self) -> &mut Self {
+        self.protocol = Arc::new(
+            json_rpc_2_transport::gateway::GatewayBackendProtocol::new(self.protocol.clone()),
+        );
+        self
+    }
+
     pub fn builder(
         protocol: Arc<dyn JsonRpcProtocol>,
     ) -> MultiTransportServerBuilder<builder::MissingBind, builder::NoTransport> {

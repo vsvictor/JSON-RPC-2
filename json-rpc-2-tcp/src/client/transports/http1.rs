@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 use bytes::Bytes;
 use http::{Method, Request, StatusCode, header};
-use http_body_util::{BodyExt, Full};
+use http_body_util::BodyExt;
 use hyper::client::conn::http1::{SendRequest, handshake};
 use hyper_util::rt::TokioIo;
 use tokio::{sync::Mutex, task::JoinHandle};
@@ -13,9 +13,11 @@ use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_transport::TcpTuningConfig;
 use json_rpc_2_transport::{
     CONTROL_PATH, ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
-    RpcClientTransport, TransportError,
+    RpcClientTransport, TransportError, TransportMessage,
 };
 use json_rpc_2_transport::{closed, transport_error};
+
+type Http1Connection = (SendRequest<TransportMessage>, JoinHandle<hyper::Result<()>>);
 
 /// HTTP/1.1 client transport. HTTP 204 is reported as an empty response.
 pub struct Http1ClientTransport {
@@ -23,7 +25,7 @@ pub struct Http1ClientTransport {
     uri: String,
     ping_uri: String,
     tuning: TcpTuningConfig,
-    connection: Mutex<Option<(SendRequest<Full<Bytes>>, JoinHandle<hyper::Result<()>>)>>,
+    connection: Mutex<Option<Http1Connection>>,
 }
 
 impl Http1ClientTransport {
@@ -47,7 +49,7 @@ impl Http1ClientTransport {
     async fn open(
         address: SocketAddr,
         tuning: &TcpTuningConfig,
-    ) -> Result<(SendRequest<Full<Bytes>>, JoinHandle<hyper::Result<()>>), TransportError> {
+    ) -> Result<Http1Connection, TransportError> {
         let stream = json_rpc_2_transport::connect_tcp_stream(address, tuning).await?;
         let (sender, connection) = handshake(TokioIo::new(stream))
             .await
@@ -58,12 +60,33 @@ impl Http1ClientTransport {
 
 impl RpcClientTransport for Http1ClientTransport {
     fn send<'a>(&'a self, message: Bytes) -> ClientTransportFuture<'a> {
+        self.send_message(message.into(), true)
+    }
+
+    fn send_message<'a>(
+        &'a self,
+        message: TransportMessage,
+        _expects_response: bool,
+    ) -> ClientTransportFuture<'a> {
         Box::pin(async move {
+            let binary =
+                json_rpc_2_transport::gateway::is_gateway_frame(if message.header.is_empty() {
+                    &message.payload
+                } else {
+                    &message.header
+                });
             let request = Request::builder()
                 .method(Method::POST)
                 .uri(&self.uri)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Full::new(message))
+                .header(
+                    header::CONTENT_TYPE,
+                    if binary {
+                        "application/octet-stream"
+                    } else {
+                        "application/json"
+                    },
+                )
+                .body(message)
                 .map_err(transport_error)?;
             let response = {
                 let mut connection = self.connection.lock().await;
@@ -97,7 +120,7 @@ impl RpcClientTransport for Http1ClientTransport {
             let request = Request::builder()
                 .method(Method::GET)
                 .uri(&self.ping_uri)
-                .body(Full::new(Bytes::new()))
+                .body(TransportMessage::from(Bytes::new()))
                 .map_err(transport_error)?;
             let response = {
                 let mut connection = self.connection.lock().await;

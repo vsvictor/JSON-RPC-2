@@ -425,7 +425,12 @@ pub(crate) async fn serve(
                         json_rpc_2_transport::log_control(transport, "external", "ping", "pong");
                         Some(Bytes::from_static(b"pong"))
                     } else {
-                        let response = protocol.handle_message(&message.payload).await;
+                        let response = json_rpc_2_transport::dispatch_stateless(
+                            protocol.as_ref(),
+                            message.payload.clone(),
+                            &transport.to_ascii_lowercase(),
+                        )
+                        .await;
                         json_rpc_2_transport::log_json_rpc(
                             transport,
                             "external",

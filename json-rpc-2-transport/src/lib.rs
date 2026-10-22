@@ -1,9 +1,12 @@
 //! Transport contracts and runtime primitives shared by clients and servers.
 
 mod client_transport;
+pub mod gateway;
+mod message;
 mod server_transport;
 mod udplite;
 
+pub use message::TransportMessage;
 pub use udplite::apply_udp_lite_coverage;
 
 pub use client_transport::{
@@ -13,10 +16,11 @@ pub use client_transport::{
 };
 pub use server_transport::{
     CancellationToken, GatewayRequestMetadata, H3_NO_ERROR, JsonRpcProtocol, ProtocolFuture,
-    ProtocolSessionGuard, QUIC_NO_ERROR, RunningTransport, RuntimeMetrics, RuntimeMetricsSnapshot,
-    ServerLimits, ServerShutdownPolicy, Transport, TransportContext, TransportFuture,
-    TransportLimits, TransportRuntime, TransportSession, apply_tcp_listener_tuning,
-    apply_tcp_stream_tuning, log_control, log_json_rpc, log_transport_error, multiplex,
+    ProtocolMessageFuture, ProtocolSessionGuard, QUIC_NO_ERROR, RunningTransport, RuntimeMetrics,
+    RuntimeMetricsSnapshot, ServerLimits, ServerShutdownPolicy, Transport, TransportContext,
+    TransportFuture, TransportLimits, TransportRuntime, TransportSession,
+    apply_tcp_listener_tuning, apply_tcp_stream_tuning, dispatch_stateless, log_control,
+    log_json_rpc, log_transport_error, multiplex,
 };
 
 /// TCP congestion control profile used by TCP-based transports.

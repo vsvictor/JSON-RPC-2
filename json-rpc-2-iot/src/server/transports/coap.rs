@@ -115,11 +115,17 @@ pub async fn serve(
                         let runtime = Arc::clone(&runtime);
                         tasks.spawn(async move {
                             let started = Instant::now();
-                            let response = protocol.handle_message(&message.payload).await;
+                            let payload = bytes::Bytes::from(message.payload);
+                            let response = json_rpc_2_transport::dispatch_stateless(
+                                protocol.as_ref(),
+                                payload.clone(),
+                                "coap",
+                            )
+                            .await;
                             log_json_rpc(
                                 "CoAP",
                                 peer,
-                                &message.payload,
+                                &payload,
                                 response.as_deref(),
                                 started.elapsed(),
                             );

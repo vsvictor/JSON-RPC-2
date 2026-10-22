@@ -4,6 +4,9 @@ pub use json_rpc_2_transport::*;
 pub mod client;
 pub mod server;
 
+#[cfg(all(feature = "sctp", any(target_os = "linux", target_os = "android")))]
+mod sctp_io;
+
 pub mod transports {
     pub use json_rpc_2_transport::{
         CONTROL_PATH, CONTROL_PING, CONTROL_PONG, H3_NO_ERROR, QUIC_NO_ERROR,

@@ -358,7 +358,7 @@ async fn run_websocket_session(
                     .await;
                     return;
                 }
-                WebSocketMessage::Binary(Bytes::copy_from_slice(&data))
+                WebSocketMessage::Binary(data)
             }
             Message::Ping(payload) => {
                 log_control("WebSocket/HTTP/3", peer, "ping", "pong");
@@ -372,20 +372,18 @@ async fn run_websocket_session(
             Message::Pong(_) | Message::Close(_) | Message::Frame(_) => continue,
         };
 
-        let request_bytes = match &request {
-            WebSocketMessage::Text(text) => text.as_bytes().to_vec(),
-            WebSocketMessage::Binary(data) => data.to_vec(),
-        };
+        let request_bytes = super::message_bytes_for_log(&request);
         let started = Instant::now();
-        if let Some(response) = protocol.handle_message(request).await {
+        if let Some(response) =
+            super::handle_stateless_message(protocol.as_ref(), request, "ws-http3").await
+        {
             let response = match response {
                 WebSocketMessage::Text(text) => {
-                    let response_bytes = text.as_bytes().to_vec();
                     log_json_rpc(
                         "WebSocket/HTTP/3",
                         peer,
                         &request_bytes,
-                        Some(&response_bytes),
+                        Some(text.as_bytes()),
                         started.elapsed(),
                     );
                     Message::Text(text.into())
