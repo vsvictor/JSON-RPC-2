@@ -8,8 +8,6 @@ pub mod server;
 pub mod broker;
 #[cfg(feature = "amqp")]
 pub use broker::AmqpConfig;
-#[cfg(any(feature = "mqtt", feature = "amqp"))]
-pub use broker::BrokerSessionConfig;
 #[cfg(feature = "mqtt")]
 pub use broker::MqttConfig;
 

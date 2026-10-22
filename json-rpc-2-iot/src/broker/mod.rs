@@ -1,75 +1,19 @@
 //! Broker-backed RPC. MQTT uses a JSON application envelope; AMQP uses native
 //! reply-to/correlation-id properties. Neither adapter implements a broker.
 use bytes::Bytes;
+pub use gateway_sessions::{BrokerEnvelope, MessageKind};
+use gateway_sessions::{
+    BrokerSessionPolicy, MessageMetadata as Metadata, SessionError, SessionIdentity,
+};
 use json_rpc_2_transport::{CancellationToken, TransportError, closed};
 use std::{
     collections::HashMap,
     future::Future,
     net::SocketAddr,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::sync::{RwLock, mpsc, oneshot};
-
-#[derive(Clone, Copy, Debug)]
-pub struct BrokerSessionConfig {
-    pub heartbeat_interval: Duration,
-    pub session_lease: Duration,
-}
-
-impl Default for BrokerSessionConfig {
-    fn default() -> Self {
-        Self {
-            heartbeat_interval: Duration::from_secs(10),
-            session_lease: Duration::from_secs(45),
-        }
-    }
-}
-
-impl BrokerSessionConfig {
-    pub fn validate(&self) -> Result<(), TransportError> {
-        if self.heartbeat_interval.is_zero()
-            || self.session_lease <= self.heartbeat_interval
-            || self
-                .session_lease
-                .checked_add(self.heartbeat_interval)
-                .is_none()
-        {
-            return Err(TransportError::new(
-                "broker session lease must exceed a nonzero heartbeat interval",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum MessageKind {
-    #[default]
-    Rpc,
-    Open,
-    Close,
-    Heartbeat,
-    Push,
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ClientSession {
-    id: String,
-    push_to: String,
-}
-
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Metadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    session: Option<ClientSession>,
-    #[serde(default)]
-    kind: MessageKind,
-}
 
 #[cfg(feature = "amqp")]
 mod amqp;
@@ -86,7 +30,7 @@ pub struct MqttConfig {
     pub operation_timeout: Duration,
     pub response_timeout: Duration,
     pub max_payload_bytes: usize,
-    pub sessions: BrokerSessionConfig,
+    pub sessions: BrokerSessionPolicy,
     /// PEM CA bundle; None uses the system trust store.
     pub ca_certificate: Option<Vec<u8>>,
 }
@@ -99,7 +43,7 @@ impl Default for MqttConfig {
             operation_timeout: Duration::from_secs(10),
             response_timeout: Duration::from_secs(30),
             max_payload_bytes: 1024 * 1024,
-            sessions: BrokerSessionConfig::default(),
+            sessions: BrokerSessionPolicy::default(),
             ca_certificate: None,
         }
     }
@@ -136,7 +80,7 @@ pub struct AmqpConfig {
     pub operation_timeout: Duration,
     pub response_timeout: Duration,
     pub max_payload_bytes: usize,
-    pub sessions: BrokerSessionConfig,
+    pub sessions: BrokerSessionPolicy,
     pub prefetch: u16,
 }
 #[cfg(feature = "amqp")]
@@ -148,7 +92,7 @@ impl Default for AmqpConfig {
             operation_timeout: Duration::from_secs(10),
             response_timeout: Duration::from_secs(30),
             max_payload_bytes: 1024 * 1024,
-            sessions: BrokerSessionConfig::default(),
+            sessions: BrokerSessionPolicy::default(),
             prefetch: 64,
         }
     }
@@ -184,7 +128,7 @@ pub(crate) enum Config {
     Amqp(AmqpConfig),
 }
 impl Config {
-    fn sessions(&self) -> BrokerSessionConfig {
+    fn sessions(&self) -> BrokerSessionPolicy {
         match self {
             #[cfg(feature = "mqtt")]
             Self::Mqtt(config) => config.sessions,
@@ -229,7 +173,9 @@ impl Config {
         &self,
         server: bool,
     ) -> Result<(Session, mpsc::Receiver<Message>), TransportError> {
-        self.sessions().validate()?;
+        self.sessions()
+            .validate()
+            .map_err(|error| TransportError::new(error.to_string()))?;
         if self.operation_timeout().is_zero()
             || self.response_timeout().is_zero()
             || self.max_payload() == 0
@@ -336,7 +282,7 @@ impl Drop for PendingGuard {
 }
 struct Connection {
     session: Arc<Session>,
-    identity: ClientSession,
+    identity: SessionIdentity,
     reader: tokio::task::JoinHandle<()>,
     heartbeat: tokio::task::JoinHandle<()>,
 }
@@ -370,10 +316,8 @@ impl Client {
         self.pending.lock().unwrap().clear();
         let (session, mut incoming) = self.config.open(false).await?;
         let session = Arc::new(session);
-        let identity = ClientSession {
-            id: uuid::Uuid::new_v4().to_string(),
-            push_to: session.reply_to().to_owned(),
-        };
+        let identity = SessionIdentity::generate(session.reply_to().to_owned())
+            .map_err(|error| TransportError::new(error.to_string()))?;
         bounded(
             self.config.operation_timeout(),
             session.publish(
@@ -579,21 +523,6 @@ impl Drop for Client {
 struct IngressSession {
     guard: json_rpc_2_transport::ProtocolSessionGuard,
     push: tokio::task::JoinHandle<()>,
-    push_to: String,
-    activity: Arc<SessionActivity>,
-}
-
-struct SessionActivity {
-    last_seen: Mutex<Instant>,
-    requests: AtomicUsize,
-}
-
-struct ActiveRequest(Arc<SessionActivity>);
-impl Drop for ActiveRequest {
-    fn drop(&mut self) {
-        *self.0.last_seen.lock().unwrap() = Instant::now();
-        self.0.requests.fetch_sub(1, Ordering::Relaxed);
-    }
 }
 impl Drop for IngressSession {
     fn drop(&mut self) {
@@ -605,7 +534,7 @@ fn ingress_session(
     config: &Config,
     protocol: Arc<dyn json_rpc_2_transport::JsonRpcProtocol>,
     session: Arc<Session>,
-    identity: &ClientSession,
+    identity: &SessionIdentity,
 ) -> IngressSession {
     let transport = match config {
         #[cfg(feature = "mqtt")]
@@ -644,15 +573,7 @@ fn ingress_session(
             }
         }
     });
-    IngressSession {
-        guard,
-        push,
-        push_to,
-        activity: Arc::new(SessionActivity {
-            last_seen: Mutex::new(Instant::now()),
-            requests: AtomicUsize::new(0),
-        }),
-    }
+    IngressSession { guard, push }
 }
 
 pub(crate) struct Prepared {
@@ -698,8 +619,10 @@ pub(crate) async fn serve(
         };
         let session = Arc::new(session);
         let mut sessions: HashMap<String, IngressSession> = HashMap::new();
-        let mut retired: HashMap<String, Instant> = HashMap::new();
         let policy = config.sessions();
+        let session_registry =
+            gateway_sessions::SessionRegistry::new(policy, runtime.limits.max_connections.max(1))
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
         let mut leases = tokio::time::interval(policy.heartbeat_interval);
         let worker_limit = runtime
             .limits
@@ -710,49 +633,95 @@ pub(crate) async fn serve(
             let message = tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = leases.tick() => {
-                    retired.retain(|_, closed| closed.elapsed() < policy.session_lease + policy.heartbeat_interval);
-                    sessions.retain(|_, session| !session.push.is_finished() && (
-                        session.activity.requests.load(Ordering::Relaxed) > 0
-                        || session.activity.last_seen.lock().unwrap().elapsed() < policy.session_lease
-                    ));
+                    for identity in session_registry.expire(Instant::now()) {
+                        sessions.remove(&identity.id);
+                    }
+                    let failed_push_sessions: Vec<_> = sessions
+                        .iter()
+                        .filter(|(_, session)| session.push.is_finished())
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    for id in failed_push_sessions {
+                        session_registry.close(&id, Instant::now());
+                        sessions.remove(&id);
+                    }
                     continue;
                 },
                 result = workers.join_next(), if !workers.is_empty() => {
                     if let Some(Ok(Some(id))) = result {
+                        session_registry.close(&id, Instant::now());
                         sessions.remove(&id);
-                        if retired.len() < runtime.limits.max_connections {
-                            retired.insert(id, Instant::now());
-                        }
                     }
                     continue;
                 },
                 message = incoming.recv() => match message { Some(m) => m, None => break },
             };
             let mut context = None;
+            let mut active_request = None;
             if let Some(identity) = &message.metadata.session {
-                let valid = uuid::Uuid::parse_str(&identity.id).is_ok()
-                    && !identity.push_to.is_empty()
-                    && identity.push_to.len() <= 255
-                    && !retired.contains_key(&identity.id);
-                let valid = valid
-                    && sessions
-                        .get(&identity.id)
-                        .is_none_or(|existing| existing.push_to == identity.push_to);
-                if valid && message.metadata.kind == MessageKind::Close {
-                    sessions.remove(&identity.id);
-                } else if valid {
-                    if !sessions.contains_key(&identity.id)
-                        && sessions.len() < runtime.limits.max_connections
-                    {
-                        sessions.insert(
-                            identity.id.clone(),
-                            ingress_session(&config, protocol.clone(), session.clone(), identity),
-                        );
+                let valid_identity = identity.validate().is_ok();
+                match message.metadata.kind {
+                    MessageKind::Close if valid_identity => {
+                        if session_registry
+                            .close_identity(identity, Instant::now())
+                            .is_some()
+                        {
+                            sessions.remove(&identity.id);
+                        }
                     }
-                    if let Some(ingress) = sessions.get_mut(&identity.id) {
-                        *ingress.activity.last_seen.lock().unwrap() = Instant::now();
-                        context = Some(ingress.guard.context().clone());
+                    MessageKind::Heartbeat if valid_identity => {
+                        session_registry.heartbeat(identity, Instant::now());
                     }
+                    MessageKind::Open if valid_identity => {
+                        match session_registry.open(identity.clone(), Instant::now()) {
+                            Ok(()) => {
+                                sessions.entry(identity.id.clone()).or_insert_with(|| {
+                                    ingress_session(
+                                        &config,
+                                        protocol.clone(),
+                                        session.clone(),
+                                        identity,
+                                    )
+                                });
+                            }
+                            Err(SessionError::Retired) => {
+                                sessions.remove(&identity.id);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    MessageKind::Rpc if valid_identity => {
+                        // Keep compatibility with clients that attach identity to
+                        // their first RPC without a preceding Open control frame.
+                        match session_registry.open(identity.clone(), Instant::now()) {
+                            Ok(()) => {
+                                sessions.entry(identity.id.clone()).or_insert_with(|| {
+                                    ingress_session(
+                                        &config,
+                                        protocol.clone(),
+                                        session.clone(),
+                                        identity,
+                                    )
+                                });
+                                if let Some(ingress) = sessions.get(&identity.id) {
+                                    active_request =
+                                        session_registry.begin_request(identity, Instant::now());
+                                    if active_request.is_some() {
+                                        context = Some(ingress.guard.context().clone());
+                                    }
+                                }
+                            }
+                            Err(SessionError::Retired) => {
+                                sessions.remove(&identity.id);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    MessageKind::Rpc
+                    | MessageKind::Open
+                    | MessageKind::Close
+                    | MessageKind::Heartbeat
+                    | MessageKind::Push => {}
                 }
                 if message.metadata.kind != MessageKind::Rpc || context.is_none() {
                     #[cfg(feature = "amqp")]
@@ -802,15 +771,7 @@ pub(crate) async fn serve(
             }
             // An admitted long-running handler retains its session until it
             // completes or reaches the configured response timeout.
-            let activity = message
-                .metadata
-                .session
-                .as_ref()
-                .and_then(|identity| sessions.get(&identity.id))
-                .map(|session| {
-                    session.activity.requests.fetch_add(1, Ordering::Relaxed);
-                    ActiveRequest(session.activity.clone())
-                });
+            let activity = active_request;
             let session = session.clone();
             let protocol = protocol.clone();
             let config = config.clone();

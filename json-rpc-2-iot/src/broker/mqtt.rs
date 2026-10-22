@@ -1,19 +1,6 @@
 use super::*;
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, Outgoing, QoS, SubscribeReasonCode};
-use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-
-#[derive(Serialize, Deserialize)]
-struct Envelope {
-    payload: Vec<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    reply_to: Option<String>,
-    correlation_id: String,
-    #[serde(default)]
-    control: bool,
-    #[serde(default)]
-    metadata: Metadata,
-}
 struct Publish {
     destination: String,
     data: Vec<u8>,
@@ -41,7 +28,7 @@ impl Session {
         control: bool,
         metadata: Metadata,
     ) -> Result<(), TransportError> {
-        let data = serde_json::to_vec(&Envelope {
+        let data = serde_json::to_vec(&BrokerEnvelope {
             payload: payload.to_vec(),
             reply_to,
             correlation_id,
@@ -155,7 +142,7 @@ pub(super) async fn open(
                     },
                     Ok(Event::Incoming(Incoming::Publish(packet))) => {
                         if packet.retain { continue; }
-                        if let Ok(envelope) = serde_json::from_slice::<Envelope>(&packet.payload) {
+                        if let Ok(envelope) = serde_json::from_slice::<BrokerEnvelope>(&packet.payload) {
                             if envelope.payload.len() > max_payload || envelope.correlation_id.len() > 256 { continue; }
                             if envelope.reply_to.as_ref().is_some_and(|topic| !topic.starts_with("json-rpc-2/replies/") || topic.contains(['#', '+', '\0'])) { continue; }
                             if envelope.metadata.session.as_ref().is_some_and(|session| !session.push_to.starts_with("json-rpc-2/replies/") || session.push_to.contains(['#', '+', '\0'])) { continue; }

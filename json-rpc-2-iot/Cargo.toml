@@ -12,6 +12,7 @@ amqp = ["dep:lapin", "dep:futures-util"]
 
 [dependencies]
 bytes = "1"
+gateway-sessions = { git = "https://github.com/vsvictor/JSON-RPC-2-GATEWAY.git", branch = "master" }
 futures-util = { version = "0.3", optional = true }
 lapin = { version = "4.12", optional = true, default-features = false, features = ["tokio", "rustls--ring", "rustls-native-certs"] }
 rumqttc = { version = "0.25", optional = true, default-features = false, features = ["use-rustls-no-provider", "url"] }

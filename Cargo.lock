@@ -1198,6 +1198,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway-sessions"
+version = "0.1.0"
+source = "git+https://github.com/vsvictor/JSON-RPC-2-GATEWAY.git?branch=master#005f37b6347021f780bdae50d3fb757f112ea4dc"
+dependencies = [
+ "serde",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1911,6 +1921,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-util",
+ "gateway-sessions",
  "json-rpc-2-core",
  "json-rpc-2-transport",
  "lapin",
