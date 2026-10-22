@@ -8,7 +8,7 @@ consumed from Kotlin (Android/JVM, via JNA) and Swift (iOS).
 - drives the existing `json_rpc_2::client::RpcClient` and every client
   transport the base crate ships (`tcp`, `tls`, `udp`, `rtp`, `rudp`, `srt`, `udplite`, `dccp`,
   `sctp`, `http1`, `ws-tcp`, `ws-udp`, `ws-rtp`, `ws-rudp`, `ws-srt`, `ws-udplite`,
-  `ws-dccp`, `ws-sctp`, `ws-http1`, `quic`, `http3`, `ws-quic`, `ws-http3`),
+  `ws-dccp`, `ws-sctp`, `ws-http1`, `ws-tls`, `quic`, `http3`, `ws-quic`, `ws-http3`),
   delegating to a local `AnyTransport` enum that
   simply forwards to whichever concrete transport was selected,
 - replicates the original CLI example's TLS endpoint setup (trusting a
@@ -63,9 +63,9 @@ Then rebuild the consumers:
 
 ## Transport & API surface
 
-All 29 transports `json-rpc-2` ships are exposed via `FfiTransportKind`
+All 30 transports `json-rpc-2` ships are exposed via `FfiTransportKind`
 (`Tcp`, `Tls`, `Udp`, `Rtp`, `Rudp`, `Srt`, `UdpLite`, `Dccp`, `Sctp`, `Mqtt`, `Coap`, `Amqp`, `Http1`, `WsTcp`, `WsUdp`,
-`WsRtp`, `WsRudp`, `WsSrt`, `WsUdpLite`, `WsDccp`, `WsSctp`, `WsMqtt`, `WsCoap`, `WsAmqp`, `WsHttp1`, `Quic`, `Http3`,
+`WsRtp`, `WsRudp`, `WsSrt`, `WsUdpLite`, `WsDccp`, `WsSctp`, `WsMqtt`, `WsCoap`, `WsAmqp`, `WsHttp1`, `WsTls`, `Quic`, `Http3`,
 `WsQuic`, `WsHttp3`) and
 both:
 
@@ -75,7 +75,7 @@ both:
   `connect_tcp`, `connect_udp`, `connect_rtp`, `connect_rudp`, `connect_srt`, `connect_udplite`,
   `connect_tls`, `connect_dccp`, `connect_sctp`, `connect_mqtt`, `connect_coap`, `connect_amqp`, `connect_http1`, `connect_ws_tcp`,
   `connect_ws_udp`, `connect_ws_rtp`, `connect_ws_rudp`, `connect_ws_srt`, `connect_ws_udplite`,
-  `connect_ws_dccp`, `connect_ws_sctp`, `connect_ws_mqtt`, `connect_ws_coap`, `connect_ws_amqp`, `connect_ws_http1`, `connect_quic`,
+  `connect_ws_dccp`, `connect_ws_sctp`, `connect_ws_mqtt`, `connect_ws_coap`, `connect_ws_amqp`, `connect_ws_http1`, `connect_ws_tls`, `connect_quic`,
   `connect_http3`, `connect_ws_quic`, `connect_ws_http3`
 
 - `tcp`/`udp`/`rtp`/`rudp`/`dccp`/`sctp`/`mqtt`/`coap`/`amqp`/`http1`/`ws-tcp`/`ws-udp`/`ws-rtp`/
@@ -90,6 +90,9 @@ both:
   certificate, see `../certs/cert.pem`); `server_name` defaults to `host`.
 - `tls` uses TLS over TCP and also requires `ca_pem`; `server_name` defaults
   to `host`. Use `connect_tls` or the generic `RpcClient.connect`.
+- `ws-tls` uses WebSocket over verified TLS and requires `ca_pem`; the URL host
+  is used for certificate hostname verification. Use `connect_ws_tls` with
+  `WebSocketTlsConnectOptions` or the generic `RpcClient.connect`.
 - `dccp`/`ws-dccp` and `sctp`/`ws-sctp` are available only on Linux/Android builds.
 
 For a separate certificate-setting step, create
@@ -111,7 +114,7 @@ Default ports for each transport are documented in the base repository's
 `JSON_RPC_WS_RTP_PORT`, `JSON_RPC_WS_RUDP_PORT`, `JSON_RPC_WS_SRT_PORT`, `JSON_RPC_WS_UDPLITE_PORT`,
 `JSON_RPC_WS_DCCP_PORT`, `JSON_RPC_WS_SCTP_PORT`, `JSON_RPC_WS_MQTT_PORT`, `JSON_RPC_WS_COAP_PORT`,
 `JSON_RPC_WS_AMQP_PORT`, `JSON_RPC_WS_QUIC_PORT`,
-`JSON_RPC_WS_HTTP1_PORT`, `JSON_RPC_WS_HTTP3_PORT`);
+`JSON_RPC_WS_HTTP1_PORT`, `JSON_RPC_WS_TLS_PORT`, `JSON_RPC_WS_HTTP3_PORT`);
 the Kotlin/Swift wrappers mirror them as defaults too.
 
 `params`/results cross the FFI boundary as JSON-encoded strings (UniFFI has

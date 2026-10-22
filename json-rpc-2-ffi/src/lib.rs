@@ -6,7 +6,7 @@
 //! ships (`tcp`, `tls`, `udp`, `rtp`, `rudp`, `srt`, `udplite`, `dccp`, `sctp`, `mqtt`, `coap`,
 //! `amqp`, `http1`, `quic`, `http3`, `ws-tcp`, `ws-udp`, `ws-rtp`, `ws-rudp`, `ws-srt`,
 //! `ws-udplite`, `ws-dccp`, `ws-sctp`, `ws-mqtt`, `ws-coap`, `ws-amqp`, `ws-quic`,
-//! `ws-http1`, `ws-http3`), exposing
+//! `ws-http1`, `ws-tls`, `ws-http3`), exposing
 //! an async-free, blocking API (methods block the calling thread on a
 //! dedicated Tokio runtime) that UniFFI turns into idiomatic Kotlin and
 //! Swift bindings. The Kotlin/Swift sides wrap these blocking calls in
@@ -182,8 +182,7 @@ fn transport_error(error: impl std::fmt::Display) -> FfiError {
     }
 }
 
-/// Every client transport `json-rpc-2` ships, matching
-/// [`json_rpc_2::server::multi::TransportKind`] one-to-one.
+/// Every client transport `json-rpc-2` ships.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiTransportKind {
     /// Newline-delimited JSON over one persistent TCP connection.
@@ -255,6 +254,9 @@ pub enum FfiTransportKind {
     /// WebSocket established with the HTTP/1.1 Upgrade mechanism.
     #[cfg(all(feature = "websocket", feature = "http1"))]
     WsHttp1,
+    /// WebSocket with the HTTP/1.1 Upgrade mechanism inside verified TLS.
+    #[cfg(feature = "websocket_tls")]
+    WsTls,
     /// Raw QUIC: one connection, one bidirectional stream per message. TLS.
     #[cfg(feature = "quic")]
     Quic,
@@ -485,6 +487,13 @@ impl TransportCapabilities for FfiTransportKind {
                 socket: TransportSocket::Tcp,
                 supports_ping: true,
             },
+            #[cfg(feature = "websocket_tls")]
+            Self::WsTls => TransportCapabilitySet {
+                multiplexing: TransportMultiplexing::Serialized,
+                security: TransportSecurity::Tls,
+                socket: TransportSocket::Tcp,
+                supports_ping: true,
+            },
             #[cfg(feature = "quic")]
             Self::Quic => TransportCapabilitySet {
                 multiplexing: TransportMultiplexing::Multiplexed,
@@ -521,7 +530,7 @@ impl TransportCapabilities for FfiTransportKind {
 /// `port`; credentials can be embedded in that URL, which is never formatted
 /// for debug output. `broker_route` selects the request topic/queue. `ca_pem`
 /// and `server_name` are only used by the
-/// TLS-based transports (`tls`, `quic`, `http3`, `ws-quic`, `ws-http3`); the self-signed
+/// TLS-based transports (`tls`, `ws-tls`, `quic`, `http3`, `ws-quic`, `ws-http3`); the self-signed
 /// certificate the server publishes must be trusted explicitly, there is no
 /// public CA to fall back on. `srt_passphrase` is only used by `srt` and
 /// `ws-srt`. `udplite_*_coverage` is only used by `udplite` and
@@ -535,8 +544,8 @@ pub struct ConnectOptions {
     /// `JSON_RPC_TCP_PORT`). For MQTT/AMQP this is used only when
     /// `broker_url` is omitted.
     pub port: u16,
-    /// PEM-encoded certificate(s) to trust; required for `tls`, `quic`,
-    /// `http3`, `ws-quic`, and `ws-http3`.
+    /// PEM-encoded certificate(s) to trust; required for `tls`, `ws-tls`,
+    /// `quic`, `http3`, `ws-quic`, and `ws-http3`.
     pub ca_pem: Option<String>,
     /// TLS name to verify; defaults to `host` (as in the original CLI
     /// example).
@@ -650,6 +659,14 @@ pub struct WebSocketConnectOptions {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct WebSocketTlsConnectOptions {
+    pub host: String,
+    pub port: u16,
+    pub path: Option<String>,
+    pub ca_pem: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct QuicConnectOptions {
     pub host: String,
     pub port: u16,
@@ -726,6 +743,8 @@ enum AnyTransport {
     WsSctp(SctpWebSocketClientTransport),
     #[cfg(all(feature = "websocket", feature = "http1"))]
     WsHttp1(Http1WebSocketClientTransport),
+    #[cfg(feature = "websocket_tls")]
+    WsTls(Http1WebSocketClientTransport),
     #[cfg(feature = "quic")]
     Quic(QuicClientTransport),
     #[cfg(feature = "http3")]
@@ -801,6 +820,8 @@ impl RpcClientTransport for AnyTransport {
             Self::WsSctp(transport) => transport.send(message),
             #[cfg(all(feature = "websocket", feature = "http1"))]
             Self::WsHttp1(transport) => transport.send(message),
+            #[cfg(feature = "websocket_tls")]
+            Self::WsTls(transport) => transport.send(message),
             #[cfg(feature = "quic")]
             Self::Quic(transport) => transport.send(message),
             #[cfg(feature = "http3")]
@@ -882,6 +903,8 @@ impl RpcClientTransport for AnyTransport {
             Self::WsSctp(transport) => transport.send_with_expectation(message, expects_response),
             #[cfg(all(feature = "websocket", feature = "http1"))]
             Self::WsHttp1(transport) => transport.send_with_expectation(message, expects_response),
+            #[cfg(feature = "websocket_tls")]
+            Self::WsTls(transport) => transport.send_with_expectation(message, expects_response),
             #[cfg(feature = "quic")]
             Self::Quic(transport) => transport.send_with_expectation(message, expects_response),
             #[cfg(feature = "http3")]
@@ -968,6 +991,10 @@ impl RpcClientTransport for AnyTransport {
             Self::WsHttp1(transport) => {
                 transport.send_cancelable(message, expects_response, cancel)
             }
+            #[cfg(feature = "websocket_tls")]
+            Self::WsTls(transport) => {
+                transport.send_with_expectation(message, expects_response)
+            }
             #[cfg(feature = "quic")]
             Self::Quic(transport) => transport.send_cancelable(message, expects_response, cancel),
             #[cfg(feature = "http3")]
@@ -1045,6 +1072,8 @@ impl RpcClientTransport for AnyTransport {
             Self::WsSctp(transport) => transport.transport_ping(),
             #[cfg(all(feature = "websocket", feature = "http1"))]
             Self::WsHttp1(transport) => transport.transport_ping(),
+            #[cfg(feature = "websocket_tls")]
+            Self::WsTls(transport) => transport.transport_ping(),
             #[cfg(feature = "quic")]
             Self::Quic(transport) => transport.transport_ping(),
             #[cfg(feature = "http3")]
@@ -1120,6 +1149,8 @@ impl RpcClientTransport for AnyTransport {
             Self::WsSctp(transport) => transport.kind(),
             #[cfg(all(feature = "websocket", feature = "http1"))]
             Self::WsHttp1(transport) => transport.kind(),
+            #[cfg(feature = "websocket_tls")]
+            Self::WsTls(transport) => transport.kind(),
             #[cfg(feature = "quic")]
             Self::Quic(transport) => transport.kind(),
             #[cfg(feature = "http3")]
@@ -1195,6 +1226,8 @@ impl RpcClientTransport for AnyTransport {
             Self::WsSctp(transport) => transport.peer(),
             #[cfg(all(feature = "websocket", feature = "http1"))]
             Self::WsHttp1(transport) => transport.peer(),
+            #[cfg(feature = "websocket_tls")]
+            Self::WsTls(transport) => transport.peer(),
             #[cfg(feature = "quic")]
             Self::Quic(transport) => transport.peer(),
             #[cfg(feature = "http3")]
@@ -1270,6 +1303,8 @@ impl RpcClientTransport for AnyTransport {
             Self::WsSctp(transport) => transport.reconnect(),
             #[cfg(all(feature = "websocket", feature = "http1"))]
             Self::WsHttp1(transport) => transport.reconnect(),
+            #[cfg(feature = "websocket_tls")]
+            Self::WsTls(transport) => transport.reconnect(),
             #[cfg(feature = "quic")]
             Self::Quic(transport) => transport.reconnect(),
             #[cfg(feature = "http3")]
@@ -1345,6 +1380,8 @@ impl RpcClientTransport for AnyTransport {
             Self::WsSctp(transport) => transport.close(),
             #[cfg(all(feature = "websocket", feature = "http1"))]
             Self::WsHttp1(transport) => transport.close(),
+            #[cfg(feature = "websocket_tls")]
+            Self::WsTls(transport) => transport.close(),
             #[cfg(feature = "quic")]
             Self::Quic(transport) => transport.close(),
             #[cfg(feature = "http3")]
@@ -1386,6 +1423,21 @@ async fn resolve(host: &str, port: u16) -> Result<SocketAddr, FfiError> {
         .map_err(transport_error)?
         .next()
         .ok_or_else(|| transport_error(format!("cannot resolve {host}")))
+}
+
+#[cfg(feature = "websocket")]
+fn websocket_url(scheme: &str, host: &str, port: u16, path: &str) -> String {
+    let authority_host = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    let path = if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("/{path}")
+    };
+    format!("{scheme}://{authority_host}:{port}{path}")
 }
 
 #[cfg(any(feature = "mqtt", feature = "amqp"))]
@@ -2185,11 +2237,26 @@ impl RpcClient {
                 }
                 #[cfg(all(feature = "websocket", feature = "http1"))]
                 FfiTransportKind::WsHttp1 => {
-                    let url = format!("ws://{to}/ws");
+                    let url = websocket_url("ws", &options.host, options.port, "/ws");
                     AnyTransport::WsHttp1(
                         Http1WebSocketClientTransport::connect(&url)
                             .await
                             .map_err(transport_error)?,
+                    )
+                }
+                #[cfg(feature = "websocket_tls")]
+                FfiTransportKind::WsTls => {
+                    let tls_host = options.server_name.as_deref().unwrap_or(&options.host);
+                    let url = websocket_url("wss", tls_host, options.port, "/ws");
+                    AnyTransport::WsTls(
+                        Http1WebSocketClientTransport::connect_with_ca_pem_to_addr(
+                            &url,
+                            to,
+                            options.ca_pem.as_deref().expect("checked above"),
+                            json_rpc_2::TcpTuningConfig::default(),
+                        )
+                        .await
+                        .map_err(transport_error)?,
                     )
                 }
                 #[cfg(feature = "quic")]
@@ -2472,13 +2539,33 @@ pub fn connect_ws_sctp(options: SctpConnectOptions) -> Result<Arc<RpcClient>, Ff
 #[uniffi::export]
 pub fn connect_ws_http1(options: WebSocketConnectOptions) -> Result<Arc<RpcClient>, FfiError> {
     runtime().block_on(async move {
-        let to = resolve(&options.host, options.port).await?;
         let path = options.path.unwrap_or_else(|| "/ws".to_owned());
-        let url = format!("ws://{to}{path}");
+        let url = websocket_url("ws", &options.host, options.port, &path);
         let transport = AnyTransport::WsHttp1(
             Http1WebSocketClientTransport::connect(&url)
                 .await
                 .map_err(transport_error)?,
+        );
+        Ok(wrap_client(transport))
+    })
+}
+
+#[cfg(feature = "websocket_tls")]
+#[uniffi::export]
+pub fn connect_ws_tls(options: WebSocketTlsConnectOptions) -> Result<Arc<RpcClient>, FfiError> {
+    runtime().block_on(async move {
+        let address = resolve(&options.host, options.port).await?;
+        let path = options.path.unwrap_or_else(|| "/ws".to_owned());
+        let url = websocket_url("wss", &options.host, options.port, &path);
+        let transport = AnyTransport::WsTls(
+            Http1WebSocketClientTransport::connect_with_ca_pem_to_addr(
+                &url,
+                address,
+                &options.ca_pem,
+                json_rpc_2::TcpTuningConfig::default(),
+            )
+            .await
+            .map_err(transport_error)?,
         );
         Ok(wrap_client(transport))
     })

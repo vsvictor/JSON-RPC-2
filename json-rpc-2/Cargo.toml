@@ -6,7 +6,7 @@ description = "Compatibility facade for split JSON-RPC 2.0 core/client/server cr
 readme = "README.md"
 
 [features]
-default = ["tcp", "tls", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "websocket", "mqtt", "coap", "amqp"]
+default = ["tcp", "tls", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "websocket", "websocket_tls", "mqtt", "coap", "amqp"]
 tcp = ["json-rpc-2-tcp/tcp", "json-rpc-2-websockets/tcp", "json-rpc-2-runtime/tcp"]
 tls = ["tcp", "json-rpc-2-tcp/tls", "json-rpc-2-runtime/tls"]
 udp = ["json-rpc-2-datagram/udp", "json-rpc-2-websockets/udp", "json-rpc-2-runtime/udp"]
@@ -20,6 +20,7 @@ quic = ["json-rpc-2-quic/quic", "json-rpc-2-websockets/quic", "json-rpc-2-runtim
 http1 = ["json-rpc-2-tcp/http1", "json-rpc-2-websockets/http1", "json-rpc-2-runtime/http1"]
 http3 = ["json-rpc-2-quic/http3", "json-rpc-2-websockets/http3", "json-rpc-2-runtime/http3"]
 websocket = ["json-rpc-2-websockets/websocket", "json-rpc-2-runtime/websocket"]
+websocket_tls = ["websocket", "json-rpc-2-runtime/websocket_tls"]
 mqtt = ["json-rpc-2-iot/mqtt", "json-rpc-2-websockets/mqtt", "json-rpc-2-runtime/mqtt"]
 coap = ["json-rpc-2-iot/coap", "json-rpc-2-websockets/coap", "json-rpc-2-runtime/coap"]
 amqp = ["json-rpc-2-iot/amqp", "json-rpc-2-websockets/amqp", "json-rpc-2-runtime/amqp"]

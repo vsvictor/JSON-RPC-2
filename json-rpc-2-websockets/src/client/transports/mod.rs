@@ -343,6 +343,7 @@ where
     }
     while let Some(message) = socket.next().await {
         match message {
+            Ok(Message::Close(_)) => break,
             Ok(_) => {}
             Err(WsError::ConnectionClosed | WsError::AlreadyClosed) => break,
             Err(error) => return Err(transport_error(error)),

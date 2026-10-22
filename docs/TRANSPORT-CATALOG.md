@@ -1,6 +1,6 @@
 # Каталог транспортів
 
-У workspace є **29 транспортних варіантів**: 15 базових носіїв і 14
+У workspace є **30 транспортних варіантів**: 15 базових носіїв і 15
 WebSocket-style адаптерів поверх них. Описи нижче коротко пояснюють, як саме
 проєкт переносить JSON-RPC; це не обіцянка повної відповідності кожному
 мережевому стандарту.
@@ -43,7 +43,8 @@ WebSocket-style адаптерів поверх них. Описи нижче к
 | `ws-mqtt` | WebSocket-style envelope у повідомленнях MQTT через зовнішній брокер. |
 | `ws-coap` | WebSocket-style envelope у повідомленнях обмеженого CoAP-профілю. |
 | `ws-amqp` | WebSocket-style envelope у AMQP content frames через зовнішній брокер. |
-| `ws-http1` | WebSocket після HTTP/1.1 Upgrade; клієнт підтримує `ws://` і захищену схему `wss://`. |
+| `ws-http1` | WebSocket після HTTP/1.1 Upgrade без TLS (`ws://`); клієнтський API також приймає `wss://` адреси для підключення до `ws-tls`. |
+| `ws-tls` | Стандартний WebSocket через HTTP/1.1 Upgrade поверх TLS; сервер використовує сертифікат з `set_tls`, клієнт перевіряє ланцюжок і hostname. |
 | `ws-quic` | WebSocket-style повідомлення через окремий QUIC stream bridge. |
 | `ws-http3` | WebSocket-сесія через HTTP/3 extended CONNECT. |
 
@@ -53,9 +54,9 @@ WebSocket-style адаптерів поверх них. Описи нижче к
 > endpoint на відповідному носії. `ws-tcp` також не є HTTP Upgrade endpoint;
 > для цього призначений `ws-http1`.
 >
-> `wss://` — це захищений TLS режим `ws-http1`, а не окремий транспортний
-> тип чи feature. Серверний адаптер HTTP/1.1 приймає звичайний `TcpListener`,
-> тому TLS для нього має завершуватися перед адаптером.
+> `wss://` обслуговує окремий runtime transport kind `ws-tls`, зі своїм
+> портом (`--ws-tls-port` / `JSON_RPC_WS_TLS_PORT`) та TLS сертифікатом.
+> Plain `ws-http1` лишається без змін.
 
 Детальніше про framing, порядок, keepalive й обмеження: [семантика транспортів](TRANSPORTS.md).
 Фактичний рівень відповідності стандартам і зовнішні перевірки наведені в

@@ -41,7 +41,7 @@
 
 | Варіант | Фактичний контракт |
 |---|---|
-| HTTP/1.1 Upgrade | WebSocket framing через бібліотечний стек після HTTP Upgrade; клієнт приймає `ws://` і `wss://`. Серверний адаптер слухає звичайний TCP, тож TLS потрібно завершити перед ним; внутрішні тести не замінюють Autobahn conformance suite |
+| HTTP/1.1 Upgrade | RFC 6455 framing через бібліотечний стек після HTTP Upgrade; окремі `ws-http1` (plain) і `ws-tls` (WSS) listener-и. WSS використовує налаштовані сертифікати; клієнтська перевірка ланцюжка та hostname лишається активною. Внутрішні тести не замінюють Autobahn conformance suite |
 | HTTP/3 extended CONNECT | WebSocket-сесія через HTTP/3 carrier; незалежний RFC 9220 interop ще потрібний |
 | Raw TCP / raw QUIC | WebSocket frame stream через власне встановлення з'єднання; не стандартний `ws://`/`wss://` endpoint з HTTP Upgrade |
 | UDP, RTP, RUDP, SRT, UDP-Lite, DCCP, SCTP | Власна text/binary/close envelope поверх message-oriented носія; **не RFC 6455 поверх цих сокетів** |

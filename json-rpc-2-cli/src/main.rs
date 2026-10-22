@@ -331,6 +331,9 @@ fn configured_server(
             Kind::WebSocketHttp1 => {
                 server.set_ws_http1_port(port);
             }
+            Kind::WebSocketTls => {
+                server.set_ws_tls_port(port);
+            }
             Kind::WebSocketHttp3 => {
                 server.set_ws_http3_port(port);
             }
@@ -622,6 +625,28 @@ async fn call(
         Kind::WebSocketHttp1 => {
             let transport = Http1WebSocketClientTransport::connect_with_tuning(
                 &format!("ws://{to}/ws"),
+                options.tcp_tuning.clone(),
+            )
+            .await?;
+            demonstrate(&label, transport, params, options).await
+        }
+        Kind::WebSocketTls => {
+            let ca_path = options.ca.as_deref().unwrap_or(&options.cert);
+            let ca_pem = std::fs::read_to_string(ca_path).map_err(|error| {
+                format!(
+                    "cannot read WebSocket TLS CA {}: {error}",
+                    ca_path.display()
+                )
+            })?;
+            let tls_host = if server_name.parse::<Ipv6Addr>().is_ok() {
+                format!("[{server_name}]")
+            } else {
+                server_name.clone()
+            };
+            let transport = Http1WebSocketClientTransport::connect_with_ca_pem_to_addr(
+                &format!("wss://{tls_host}:{}/ws", to.port()),
+                to,
+                &ca_pem,
                 options.tcp_tuning.clone(),
             )
             .await?;
