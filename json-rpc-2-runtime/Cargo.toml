@@ -21,7 +21,7 @@ amqp = ["dep:futures-util", "dep:json-rpc-2-iot", "json-rpc-2-iot/amqp", "json-r
 quic = ["dep:quinn", "dep:json-rpc-2-quic", "json-rpc-2-quic/quic", "json-rpc-2-websockets?/quic"]
 http1 = ["dep:axum", "dep:json-rpc-2-tcp", "json-rpc-2-tcp/http1", "json-rpc-2-websockets?/http1"]
 http3 = ["dep:axum", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn", "dep:json-rpc-2-quic", "json-rpc-2-quic/http3", "json-rpc-2-websockets?/http3"]
-websocket = ["rtp", "rudp", "srt", "udplite", "mqtt", "coap", "amqp", "dep:axum", "dep:base64", "dep:futures-util", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn", "dep:tokio-tungstenite", "dep:json-rpc-2-websockets", "json-rpc-2-websockets/websocket"]
+websocket = ["rtp", "rudp", "udplite", "mqtt", "coap", "amqp", "dep:axum", "dep:base64", "dep:futures-util", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn", "dep:tokio-tungstenite", "dep:json-rpc-2-websockets", "json-rpc-2-websockets/websocket"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"], optional = true }

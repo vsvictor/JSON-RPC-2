@@ -12,9 +12,10 @@ pub use client_transport::{
     transport_error,
 };
 pub use server_transport::{
-    CancellationToken, H3_NO_ERROR, JsonRpcProtocol, ProtocolFuture, QUIC_NO_ERROR,
-    RunningTransport, RuntimeMetrics, RuntimeMetricsSnapshot, ServerLimits, ServerShutdownPolicy,
-    Transport, TransportFuture, TransportLimits, TransportRuntime, apply_tcp_listener_tuning,
+    CancellationToken, GatewayRequestMetadata, H3_NO_ERROR, JsonRpcProtocol, ProtocolFuture,
+    ProtocolSessionGuard, QUIC_NO_ERROR, RunningTransport, RuntimeMetrics, RuntimeMetricsSnapshot,
+    ServerLimits, ServerShutdownPolicy, Transport, TransportContext, TransportFuture,
+    TransportLimits, TransportRuntime, TransportSession, apply_tcp_listener_tuning,
     apply_tcp_stream_tuning, log_control, log_json_rpc, log_transport_error, multiplex,
 };
 
