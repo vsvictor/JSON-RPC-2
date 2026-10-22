@@ -5,7 +5,7 @@ edition = "2024"
 description = "Multi-transport JSON-RPC 2.0 server runtime and orchestration"
 
 [features]
-default = ["tcp", "tls", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "websocket", "mqtt", "coap", "amqp"]
+default = ["tcp", "tls", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "websocket", "websocket_tls", "mqtt", "coap", "amqp"]
 tcp = ["dep:futures-util", "dep:json-rpc-2-tcp", "json-rpc-2-tcp/tcp", "json-rpc-2-websockets?/tcp"]
 tls = ["tcp", "dep:json-rpc-2-tcp", "json-rpc-2-tcp/tls"]
 udp = ["dep:json-rpc-2-datagram", "json-rpc-2-datagram/udp", "json-rpc-2-websockets?/udp"]
@@ -22,6 +22,7 @@ quic = ["dep:quinn", "dep:json-rpc-2-quic", "json-rpc-2-quic/quic", "json-rpc-2-
 http1 = ["dep:axum", "dep:json-rpc-2-tcp", "json-rpc-2-tcp/http1", "json-rpc-2-websockets?/http1"]
 http3 = ["dep:axum", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn", "dep:json-rpc-2-quic", "json-rpc-2-quic/http3", "json-rpc-2-websockets?/http3"]
 websocket = ["rtp", "rudp", "srt", "udplite", "mqtt", "coap", "amqp", "dep:axum", "dep:base64", "dep:futures-util", "dep:h3", "dep:h3-quinn", "dep:http", "dep:quinn", "dep:tokio-tungstenite", "dep:json-rpc-2-websockets", "json-rpc-2-websockets/websocket"]
+websocket_tls = ["websocket", "tls", "http1", "json-rpc-2-websockets/tls"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"], optional = true }

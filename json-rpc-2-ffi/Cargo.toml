@@ -19,7 +19,7 @@ required-features = ["uniffi-bindgen"]
 [features]
 # Keeps the `uniffi` CLI (and its extra dependencies) out of the mobile
 # `cdylib`/`staticlib` build; only pulled in when generating bindings.
-default = ["tcp", "tls", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "mqtt", "coap", "amqp", "websocket"]
+default = ["tcp", "tls", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3", "mqtt", "coap", "amqp", "websocket", "websocket_tls"]
 tcp = ["json-rpc-2/tcp"]
 tls = ["json-rpc-2/tls"]
 udp = ["json-rpc-2/udp"]
@@ -36,12 +36,13 @@ mqtt = ["json-rpc-2/mqtt"]
 coap = ["json-rpc-2/coap"]
 amqp = ["json-rpc-2/amqp"]
 websocket = ["json-rpc-2/websocket"]
+websocket_tls = ["websocket", "http1", "json-rpc-2/websocket_tls"]
 uniffi-bindgen = ["uniffi/cli"]
 
 [dependencies]
 bytes = "1"
 # The original Rust crate is reused as-is: every transport it ships
-# (tcp, tls, udp, rtp, dccp, sctp, http1, quic, http3, ws-tcp, ws-udp, ws-rtp, ws-dccp, ws-sctp, ws-quic, ws-http1, ws-http3) is wrapped
+# (tcp, tls, udp, rtp, dccp, sctp, http1, quic, http3, ws-tcp, ws-udp, ws-rtp, ws-dccp, ws-sctp, ws-quic, ws-http1, ws-tls, ws-http3) is wrapped
 # here, no protocol or transport logic is duplicated.
 json-rpc-2 = { path = "../json-rpc-2", default-features = false }
 

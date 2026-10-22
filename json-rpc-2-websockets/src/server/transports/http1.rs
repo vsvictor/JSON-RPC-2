@@ -13,6 +13,10 @@ use axum::{
 };
 use futures_util::StreamExt;
 use tokio::net::TcpListener;
+#[cfg(feature = "tls")]
+use tokio::task::JoinSet;
+#[cfg(feature = "tls")]
+use tokio_rustls::TlsAcceptor;
 
 use super::{
     CancellationToken, WebSocketMessage, WebSocketProtocol, WebSocketTransport,
@@ -28,12 +32,120 @@ pub struct Http1WebSocketTransport {
     runtime: Arc<TransportRuntime>,
 }
 
+#[cfg(feature = "tls")]
+/// WebSocket-over-HTTP/1.1 Upgrade served over a verified TLS connection.
+pub struct TlsWebSocketTransport {
+    listener: TcpListener,
+    tls: Arc<rustls::ServerConfig>,
+    runtime: Arc<TransportRuntime>,
+}
+
+#[cfg(feature = "tls")]
+impl TlsWebSocketTransport {
+    pub fn new(listener: TcpListener, tls: Arc<rustls::ServerConfig>) -> Self {
+        Self {
+            listener,
+            tls,
+            runtime: Arc::new(TransportRuntime::default()),
+        }
+    }
+
+    pub fn with_runtime(mut self, runtime: Arc<TransportRuntime>) -> Self {
+        self.runtime = runtime;
+        self
+    }
+}
+
+#[cfg(feature = "tls")]
+impl WebSocketTransport for TlsWebSocketTransport {
+    fn run(
+        self,
+        protocol: Arc<dyn WebSocketProtocol>,
+        shutdown: CancellationToken,
+    ) -> WebSocketTransportFuture {
+        Box::pin(Http1WebSocketTransport::serve_tls(
+            self.listener,
+            protocol,
+            shutdown,
+            self.runtime,
+            self.tls,
+        ))
+    }
+}
+
 impl Http1WebSocketTransport {
     pub fn new(listener: TcpListener) -> Self {
         Self {
             listener,
             runtime: Arc::new(TransportRuntime::default()),
         }
+    }
+
+    #[cfg(feature = "tls")]
+    async fn serve_tls(
+        listener: TcpListener,
+        protocol: Arc<dyn WebSocketProtocol>,
+        shutdown: CancellationToken,
+        runtime: Arc<TransportRuntime>,
+        tls: Arc<rustls::ServerConfig>,
+    ) -> io::Result<()> {
+        let multiplexor =
+            StreamMultiplexor::with_limit(runtime.limits.max_connections, runtime.metrics.clone());
+        let router = router_with_sessions(
+            protocol,
+            multiplexor.handle(),
+            shutdown.clone(),
+            Arc::clone(&runtime),
+        );
+        let acceptor = TlsAcceptor::from(tls);
+        let mut connections = JoinSet::new();
+
+        let result = loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break Ok(()),
+                accepted = listener.accept() => {
+                    let (stream, peer) = accepted?;
+                    let acceptor = acceptor.clone();
+                    let router = router.clone();
+                    connections.spawn(async move {
+                        let stream = match acceptor.accept(stream).await {
+                            Ok(stream) => stream,
+                            Err(error) => {
+                                log_transport_error("WebSocket/TLS", peer, "TLS handshake", &error);
+                                return;
+                            }
+                        };
+                        let service = tower::service_fn(move |mut request: hyper::Request<hyper::body::Incoming>| {
+                            let router = router.clone();
+                            request.extensions_mut().insert(ConnectInfo(peer));
+                            async move {
+                                use tower::ServiceExt;
+                                router.oneshot(request.map(axum::body::Body::new)).await
+                            }
+                        });
+                        let service = hyper_util::service::TowerToHyperService::new(service);
+                        if let Err(error) = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                            .with_upgrades()
+                            .await
+                        {
+                            log_transport_error("WebSocket/TLS", peer, "HTTP/1.1 connection", &error);
+                        }
+                    });
+                }
+                Some(result) = connections.join_next(), if !connections.is_empty() => {
+                    if let Err(error) = result {
+                        log_transport_error("WebSocket/TLS", "server", "connection task", &error);
+                    }
+                }
+            }
+        };
+
+        shutdown.cancel();
+        multiplexor.close().await;
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
+        result
     }
 
     pub fn with_runtime(mut self, runtime: Arc<TransportRuntime>) -> Self {

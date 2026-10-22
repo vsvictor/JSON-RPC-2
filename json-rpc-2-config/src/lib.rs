@@ -33,7 +33,7 @@ are required: set them in .env.
                                                 tcp, tls, udp, rtp, rudp, srt, udplite, dccp, sctp, quic, http1, http3,
                                                 mqtt, coap, amqp,
                                                 ws-tcp, ws-udp, ws-rtp, ws-rudp, ws-srt, ws-udplite, ws-dccp, ws-sctp,
-                                                ws-quic, ws-http1, ws-http3, ws-mqtt, ws-coap, ws-amqp
+                                                ws-quic, ws-http1, ws-tls, ws-http3, ws-mqtt, ws-coap, ws-amqp
                                                 (udplite/ws-udplite, dccp/ws-dccp and sctp/ws-sctp: Linux/Android only)
 Server:
   --bind <IPS>          JSON_RPC_BIND           local addresses to listen on, comma-separated
@@ -73,7 +73,7 @@ Client:
                                                 enable TCP Fast Open on supported adapter-owned TCP sockets
   --tcp-fastopen-queue-len <N> JSON_RPC_TCP_FASTOPEN_QUEUE_LEN
                                                 Fast Open listener queue length
-TCP tuning applies only to tcp/tls/http1/ws-tcp/ws-http1, never MQTT/AMQP broker library sockets.
+TCP tuning applies only to tcp/tls/http1/ws-tcp/ws-http1/ws-tls, never MQTT/AMQP broker library sockets.
 In mixed selections it affects only those local TCP adapters; broker socket tuning is not exposed.
   --udp-retransmit-ms <N>   JSON_RPC_UDP_RETRANSMIT_MS
                                                 delay between UDP retransmits
@@ -148,6 +148,7 @@ their legacy port options are deprecated and rejected:
   --ws-sctp-port <N>  * JSON_RPC_WS_SCTP_PORT   SCTP (Linux/Android only)
   --ws-quic-port <N>  * JSON_RPC_WS_QUIC_PORT   UDP
   --ws-http1-port <N> * JSON_RPC_WS_HTTP1_PORT  TCP
+  --ws-tls-port <N>   * JSON_RPC_WS_TLS_PORT    TLS-encrypted TCP (WSS)
   --ws-http3-port <N> * JSON_RPC_WS_HTTP3_PORT  UDP
 
   -h, --help                                    show this help";
@@ -752,6 +753,7 @@ impl KindSettings for TransportKind {
             TransportKind::WebSocketSctp => "JSON_RPC_WS_SCTP_PORT",
             TransportKind::WebSocketQuic => "JSON_RPC_WS_QUIC_PORT",
             TransportKind::WebSocketHttp1 => "JSON_RPC_WS_HTTP1_PORT",
+            TransportKind::WebSocketTls => "JSON_RPC_WS_TLS_PORT",
             TransportKind::WebSocketHttp3 => "JSON_RPC_WS_HTTP3_PORT",
         }
     }
