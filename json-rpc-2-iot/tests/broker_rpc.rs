@@ -1,7 +1,8 @@
 //! Real brokers only; no fake wire peers. See tests/brokers/README.md.
 #![cfg(any(feature = "mqtt", feature = "amqp"))]
 use bytes::Bytes;
-use json_rpc_2_transport::{JsonRpcProtocol, ProtocolFuture, RpcClientTransport, Transport};
+use json_rpc_2_gateway_transport::{JsonRpcProtocol, ProtocolFuture, Transport};
+use json_rpc_2_transport::RpcClientTransport;
 use std::{
     sync::{
         Arc,
@@ -141,7 +142,7 @@ async fn wait_ready(client: &dyn RpcClientTransport) {
 
 async fn graceful_shutdown(
     client: &dyn RpcClientTransport,
-    server: json_rpc_2_transport::RunningTransport,
+    server: json_rpc_2_gateway_transport::RunningTransport,
     seen: Arc<AtomicUsize>,
 ) {
     let before = seen.load(Ordering::SeqCst);

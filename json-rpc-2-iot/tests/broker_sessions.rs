@@ -2,10 +2,8 @@
 #![cfg(any(feature = "mqtt", feature = "amqp"))]
 
 use bytes::Bytes;
-use json_rpc_2_transport::{
-    JsonRpcProtocol, ProtocolFuture, RpcClientTransport, Transport, TransportContext,
-    TransportError,
-};
+use json_rpc_2_gateway_transport::{JsonRpcProtocol, ProtocolFuture, Transport, TransportContext};
+use json_rpc_2_transport::{RpcClientTransport, TransportError};
 use std::{
     future::Future,
     pin::Pin,
@@ -97,7 +95,7 @@ async fn mqtt_saturated_dispatch_keeps_close_heartbeat_and_expiration_live() {
             ..Default::default()
         };
         let protocol = Arc::new(SaturatedSessions::default());
-        let mut runtime = json_rpc_2_transport::TransportRuntime::default();
+        let mut runtime = json_rpc_2_gateway_transport::TransportRuntime::default();
         runtime.limits.max_concurrent_requests = 1;
         let server = MqttTransport::connect(mqtt_server_config(&config))
             .await
@@ -308,7 +306,7 @@ async fn exercise(
     a: &dyn PushClient,
     b: &dyn PushClient,
     protocol: &Sessions,
-    server: json_rpc_2_transport::RunningTransport,
+    server: json_rpc_2_gateway_transport::RunningTransport,
     kind: &str,
 ) {
     assert_eq!(a.push().await.unwrap().as_ref(), PUSH);
@@ -388,7 +386,7 @@ async fn exercise_lease(
     a: Box<dyn PushClient>,
     b: Box<dyn PushClient>,
     protocol: &Sessions,
-    server: json_rpc_2_transport::RunningTransport,
+    server: json_rpc_2_gateway_transport::RunningTransport,
 ) {
     assert_eq!(a.push().await.unwrap().as_ref(), PUSH);
     assert_eq!(b.push().await.unwrap().as_ref(), PUSH);

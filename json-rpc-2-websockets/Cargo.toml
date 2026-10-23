@@ -49,4 +49,5 @@ tower = { version = "0.5", features = ["util"], optional = true }
 
 [dev-dependencies]
 gateway-iot = { git = "https://github.com/vsvictor/JSON-RPC-2-GATEWAY.git", branch = "master", default-features = false, features = ["mqtt", "amqp"] }
+json-rpc-2-gateway-transport = { package = "json-rpc-2-transport", git = "https://github.com/vsvictor/JSON-RPC-2.git", branch = "start" }
 rcgen = "0.13"

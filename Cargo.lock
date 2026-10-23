@@ -1200,12 +1200,13 @@ dependencies = [
 [[package]]
 name = "gateway-iot"
 version = "0.1.0"
+source = "git+https://github.com/vsvictor/JSON-RPC-2-GATEWAY.git?branch=master#f7071684101dc958eef1d30b1eacbcffd5e1ec54"
 dependencies = [
  "bytes",
  "futures-util",
  "gateway-sessions",
- "json-rpc-2-core",
- "json-rpc-2-transport",
+ "json-rpc-2-core 0.1.0 (git+https://github.com/vsvictor/JSON-RPC-2.git?branch=start)",
+ "json-rpc-2-transport 0.1.0 (git+https://github.com/vsvictor/JSON-RPC-2.git?branch=start)",
  "lapin",
  "rumqttc",
  "rustls",
@@ -1220,6 +1221,7 @@ dependencies = [
 [[package]]
 name = "gateway-sessions"
 version = "0.1.0"
+source = "git+https://github.com/vsvictor/JSON-RPC-2-GATEWAY.git?branch=master#f7071684101dc958eef1d30b1eacbcffd5e1ec54"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -1832,14 +1834,14 @@ name = "json-rpc-2"
 version = "0.1.0"
 dependencies = [
  "json-rpc-2-client",
- "json-rpc-2-core",
+ "json-rpc-2-core 0.1.0",
  "json-rpc-2-datagram",
  "json-rpc-2-iot",
  "json-rpc-2-quic",
  "json-rpc-2-runtime",
  "json-rpc-2-server",
  "json-rpc-2-tcp",
- "json-rpc-2-transport",
+ "json-rpc-2-transport 0.1.0",
  "json-rpc-2-websockets",
  "serde_json",
  "tokio",
@@ -1865,9 +1867,9 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "criterion",
- "json-rpc-2-core",
+ "json-rpc-2-core 0.1.0",
  "json-rpc-2-server",
- "json-rpc-2-transport",
+ "json-rpc-2-transport 0.1.0",
  "rcgen",
  "rustls",
  "serde",
@@ -1896,12 +1898,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-rpc-2-core"
+version = "0.1.0"
+source = "git+https://github.com/vsvictor/JSON-RPC-2.git?branch=start#b82edbc976b211a1a782a58a7fefe3ca74ed276d"
+dependencies = [
+ "aes-gcm",
+ "bytes",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "json-rpc-2-datagram"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "json-rpc-2-core",
- "json-rpc-2-transport",
+ "json-rpc-2-core 0.1.0",
+ "json-rpc-2-transport 0.1.0",
  "libc",
  "socket2",
  "tokio",
@@ -1913,7 +1927,7 @@ dependencies = [
 name = "json-rpc-2-ext"
 version = "0.1.0"
 dependencies = [
- "json-rpc-2-core",
+ "json-rpc-2-core 0.1.0",
  "serde",
  "serde_json",
  "tokio",
@@ -1941,8 +1955,9 @@ dependencies = [
  "bytes",
  "futures-util",
  "gateway-iot",
- "json-rpc-2-core",
- "json-rpc-2-transport",
+ "json-rpc-2-core 0.1.0",
+ "json-rpc-2-transport 0.1.0",
+ "json-rpc-2-transport 0.1.0 (git+https://github.com/vsvictor/JSON-RPC-2.git?branch=start)",
  "lapin",
  "rumqttc",
  "rustls",
@@ -1964,8 +1979,8 @@ dependencies = [
  "h3",
  "h3-quinn",
  "http",
- "json-rpc-2-core",
- "json-rpc-2-transport",
+ "json-rpc-2-core 0.1.0",
+ "json-rpc-2-transport 0.1.0",
  "quinn",
  "rcgen",
  "rustls",
@@ -1987,12 +2002,12 @@ dependencies = [
  "h3-quinn",
  "http",
  "json-rpc-2-client",
- "json-rpc-2-core",
+ "json-rpc-2-core 0.1.0",
  "json-rpc-2-datagram",
  "json-rpc-2-quic",
  "json-rpc-2-server",
  "json-rpc-2-tcp",
- "json-rpc-2-transport",
+ "json-rpc-2-transport 0.1.0",
  "json-rpc-2-websockets",
  "libc",
  "quinn",
@@ -2013,9 +2028,9 @@ dependencies = [
  "arc-swap",
  "bytes",
  "criterion",
- "json-rpc-2-core",
+ "json-rpc-2-core 0.1.0",
  "json-rpc-2-tcp",
- "json-rpc-2-transport",
+ "json-rpc-2-transport 0.1.0",
  "jsonrpsee",
  "proptest",
  "reqwest",
@@ -2037,8 +2052,8 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "json-rpc-2-core",
- "json-rpc-2-transport",
+ "json-rpc-2-core 0.1.0",
+ "json-rpc-2-transport 0.1.0",
  "libc",
  "rustls",
  "tokio",
@@ -2052,7 +2067,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "http-body",
- "json-rpc-2-core",
+ "json-rpc-2-core 0.1.0",
  "libc",
  "serde",
  "serde_json",
@@ -2061,6 +2076,24 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "json-rpc-2-transport"
+version = "0.1.0"
+source = "git+https://github.com/vsvictor/JSON-RPC-2.git?branch=start#b82edbc976b211a1a782a58a7fefe3ca74ed276d"
+dependencies = [
+ "bytes",
+ "http-body",
+ "json-rpc-2-core 0.1.0 (git+https://github.com/vsvictor/JSON-RPC-2.git?branch=start)",
+ "libc",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tokio",
+ "tokio-util",
+ "tracing",
  "uuid",
 ]
 
@@ -2078,12 +2111,13 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
- "json-rpc-2-core",
+ "json-rpc-2-core 0.1.0",
  "json-rpc-2-datagram",
  "json-rpc-2-iot",
  "json-rpc-2-quic",
  "json-rpc-2-tcp",
- "json-rpc-2-transport",
+ "json-rpc-2-transport 0.1.0",
+ "json-rpc-2-transport 0.1.0 (git+https://github.com/vsvictor/JSON-RPC-2.git?branch=start)",
  "quinn",
  "rcgen",
  "rustls",

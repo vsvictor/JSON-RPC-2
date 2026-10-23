@@ -1,9 +1,8 @@
 //! Disruptive, real Docker broker restart tests; run separately, serially.
 #![cfg(any(feature = "mqtt", feature = "amqp"))]
 use bytes::Bytes;
-use json_rpc_2_transport::{
-    JsonRpcProtocol, ProtocolFuture, RpcClientTransport, RunningTransport, Transport,
-};
+use json_rpc_2_gateway_transport::{JsonRpcProtocol, ProtocolFuture, RunningTransport, Transport};
+use json_rpc_2_transport::RpcClientTransport;
 use std::{sync::Arc, time::Duration};
 
 struct Echo;
