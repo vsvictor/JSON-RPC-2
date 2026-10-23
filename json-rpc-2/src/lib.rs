@@ -80,12 +80,6 @@ pub mod transports {
     pub use json_rpc_2_datagram::server::transports::udp;
     #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
     pub use json_rpc_2_datagram::server::transports::udplite;
-    #[cfg(feature = "amqp")]
-    pub use json_rpc_2_iot::server::transports::amqp;
-    #[cfg(feature = "coap")]
-    pub use json_rpc_2_iot::server::transports::coap;
-    #[cfg(feature = "mqtt")]
-    pub use json_rpc_2_iot::server::transports::mqtt;
     #[cfg(feature = "http3")]
     pub use json_rpc_2_quic::server::transports::http3;
     #[cfg(feature = "quic")]

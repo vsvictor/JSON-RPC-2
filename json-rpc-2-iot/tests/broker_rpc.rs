@@ -25,6 +25,33 @@ impl JsonRpcProtocol for Echo {
         })
     }
 }
+
+#[cfg(feature = "mqtt")]
+fn mqtt_server_config(config: &json_rpc_2_iot::MqttConfig) -> gateway_iot::MqttConfig {
+    gateway_iot::MqttConfig {
+        broker_url: config.broker_url.clone(),
+        request_topic: config.request_topic.clone(),
+        operation_timeout: config.operation_timeout,
+        response_timeout: config.response_timeout,
+        max_payload_bytes: config.max_payload_bytes,
+        ca_certificate: config.ca_certificate.clone(),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "amqp")]
+fn amqp_server_config(config: &json_rpc_2_iot::AmqpConfig) -> gateway_iot::AmqpConfig {
+    gateway_iot::AmqpConfig {
+        broker_url: config.broker_url.clone(),
+        request_queue: config.request_queue.clone(),
+        operation_timeout: config.operation_timeout,
+        response_timeout: config.response_timeout,
+        max_payload_bytes: config.max_payload_bytes,
+        prefetch: config.prefetch,
+        ..Default::default()
+    }
+}
+
 async fn exercise(client: Arc<dyn RpcClientTransport>, seen: Arc<AtomicUsize>) {
     // Control traffic must not enter the protocol handler.
     client.transport_ping().await.unwrap();
@@ -156,10 +183,8 @@ async fn same_rpc_id_isolated(a: &dyn RpcClientTransport, b: &dyn RpcClientTrans
 #[tokio::test]
 #[ignore = "requires MQTT_BROKER_URL and a real MQTT 3.1.1 broker"]
 async fn mqtt_real_broker() {
-    use json_rpc_2_iot::{
-        MqttConfig, client::transports::mqtt::MqttClientTransport,
-        server::transports::mqtt::MqttTransport,
-    };
+    use gateway_iot::server::transports::mqtt::MqttTransport;
+    use json_rpc_2_iot::{MqttConfig, client::transports::mqtt::MqttClientTransport};
     let config = MqttConfig {
         broker_url: std::env::var("MQTT_BROKER_URL").expect("set MQTT_BROKER_URL"),
         request_topic: format!("json-rpc-2/tests/{}", uuid::Uuid::new_v4()),
@@ -167,7 +192,7 @@ async fn mqtt_real_broker() {
         ..Default::default()
     };
     let seen = Arc::new(AtomicUsize::new(0));
-    let server = MqttTransport::connect(config.clone())
+    let server = MqttTransport::connect(mqtt_server_config(&config))
         .await
         .unwrap()
         .start(Arc::new(Echo(seen.clone())));
@@ -195,10 +220,8 @@ async fn mqtt_real_broker() {
 #[tokio::test]
 #[ignore = "requires AMQP_BROKER_URL and a real AMQP 0-9-1 broker"]
 async fn amqp_real_broker() {
-    use json_rpc_2_iot::{
-        AmqpConfig, client::transports::amqp::AmqpClientTransport,
-        server::transports::amqp::AmqpTransport,
-    };
+    use gateway_iot::server::transports::amqp::AmqpTransport;
+    use json_rpc_2_iot::{AmqpConfig, client::transports::amqp::AmqpClientTransport};
     let config = AmqpConfig {
         broker_url: std::env::var("AMQP_BROKER_URL").expect("set AMQP_BROKER_URL"),
         request_queue: format!("json-rpc-2.tests.{}", uuid::Uuid::new_v4()),
@@ -206,7 +229,7 @@ async fn amqp_real_broker() {
         ..Default::default()
     };
     let seen = Arc::new(AtomicUsize::new(0));
-    let server = AmqpTransport::connect(config.clone())
+    let server = AmqpTransport::connect(amqp_server_config(&config))
         .await
         .unwrap()
         .start(Arc::new(Echo(seen.clone())));
@@ -233,10 +256,8 @@ async fn amqp_real_broker() {
 #[cfg(feature = "mqtt")]
 #[tokio::test]
 async fn mqtt_bad_config_and_bounded_connect() {
-    use json_rpc_2_iot::{
-        MqttConfig, client::transports::mqtt::MqttClientTransport,
-        server::transports::mqtt::MqttTransport,
-    };
+    use gateway_iot::server::transports::mqtt::MqttTransport;
+    use json_rpc_2_iot::{MqttConfig, client::transports::mqtt::MqttClientTransport};
     let config = MqttConfig {
         broker_url: "invalid://user:private@example.test".into(),
         ..Default::default()
@@ -247,7 +268,7 @@ async fn mqtt_bad_config_and_bounded_connect() {
         .unwrap();
     assert!(!error.to_string().contains("private"));
     assert!(
-        MqttTransport::connect(MqttConfig {
+        MqttTransport::connect(gateway_iot::MqttConfig {
             broker_url: "invalid://broker".into(),
             ..Default::default()
         })
@@ -274,10 +295,8 @@ async fn mqtt_bad_config_and_bounded_connect() {
 #[cfg(feature = "amqp")]
 #[tokio::test]
 async fn amqp_bad_config_and_bounded_connect() {
-    use json_rpc_2_iot::{
-        AmqpConfig, client::transports::amqp::AmqpClientTransport,
-        server::transports::amqp::AmqpTransport,
-    };
+    use gateway_iot::server::transports::amqp::AmqpTransport;
+    use json_rpc_2_iot::{AmqpConfig, client::transports::amqp::AmqpClientTransport};
     let config = AmqpConfig {
         broker_url: "invalid://user:private@example.test".into(),
         ..Default::default()
@@ -288,7 +307,7 @@ async fn amqp_bad_config_and_bounded_connect() {
         .unwrap();
     assert!(!error.to_string().contains("private"));
     assert!(
-        AmqpTransport::connect(AmqpConfig {
+        AmqpTransport::connect(gateway_iot::AmqpConfig {
             broker_url: "invalid://broker".into(),
             ..Default::default()
         })

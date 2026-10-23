@@ -1198,9 +1198,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway-iot"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "gateway-sessions",
+ "json-rpc-2-core",
+ "json-rpc-2-transport",
+ "lapin",
+ "rumqttc",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "gateway-sessions"
 version = "0.1.0"
-source = "git+https://github.com/vsvictor/JSON-RPC-2-GATEWAY.git?branch=master#e6ae9878f533fd5d639370dcebb1a544a527080d"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -1921,7 +1940,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-util",
- "gateway-sessions",
+ "gateway-iot",
  "json-rpc-2-core",
  "json-rpc-2-transport",
  "lapin",
@@ -1970,7 +1989,6 @@ dependencies = [
  "json-rpc-2-client",
  "json-rpc-2-core",
  "json-rpc-2-datagram",
- "json-rpc-2-iot",
  "json-rpc-2-quic",
  "json-rpc-2-server",
  "json-rpc-2-tcp",
@@ -2054,6 +2072,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures-util",
+ "gateway-iot",
  "h3",
  "h3-quinn",
  "http",
@@ -3583,7 +3602,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

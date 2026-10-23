@@ -200,7 +200,7 @@ impl RpcServer {
 
                 let mut responses = Vec::new();
                 while let Some(response) = tasks.join_next().await {
-                    if let Some(response) = response.expect("batch task panicked") {
+                    if let Some(response) = response.expect("batch docs panicked") {
                         responses.push(response);
                     }
                 }

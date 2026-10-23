@@ -3,9 +3,9 @@
 
 use bytes::Bytes;
 use json_rpc_2_transport::{
-    JsonRpcProtocol, ProtocolFuture, RpcClientTransport, TransportContext, TransportError,
+    JsonRpcProtocol, ProtocolFuture, RpcClientTransport, Transport, TransportContext,
+    TransportError,
 };
-use json_rpc_2_websockets::server::transports::{JsonRpcWebSocket, WebSocketTransport};
 use std::{
     future::Future,
     pin::Pin,
@@ -205,10 +205,9 @@ fn uuid_from_bytes(bytes: &[u8]) {
 #[tokio::test]
 #[ignore = "requires MQTT_BROKER_URL pointing at an isolated real broker"]
 async fn ws_mqtt_persistent_sessions_and_decoded_push() {
-    use json_rpc_2_websockets::{
-        client::transports::mqtt::{MqttConfig, MqttWebSocketClientTransport},
-        server::transports::mqtt::MqttWebSocketTransport,
-    };
+    use gateway_iot::{MqttConfig, server::transports::mqtt_websocket::MqttWebSocketTransport};
+    use json_rpc_2_iot::MqttConfig as MqttClientConfig;
+    use json_rpc_2_websockets::client::transports::mqtt::MqttWebSocketClientTransport;
     tokio::time::timeout(Duration::from_secs(20), async {
         let config = MqttConfig {
             broker_url: std::env::var("MQTT_BROKER_URL").unwrap(),
@@ -217,22 +216,31 @@ async fn ws_mqtt_persistent_sessions_and_decoded_push() {
             response_timeout: Duration::from_secs(2),
             ..Default::default()
         };
+        let client_config = MqttClientConfig {
+            broker_url: config.broker_url.clone(),
+            request_topic: config.request_topic.clone(),
+            operation_timeout: config.operation_timeout,
+            response_timeout: config.response_timeout,
+            max_payload_bytes: config.max_payload_bytes,
+            heartbeat_interval: config.sessions.heartbeat_interval,
+            ca_certificate: config.ca_certificate.clone(),
+        };
         let protocol = Arc::new(Sessions::default());
         let server = MqttWebSocketTransport::connect(config.clone())
             .await
             .unwrap()
-            .start(Arc::new(JsonRpcWebSocket::new(protocol.clone())));
+            .start(protocol.clone());
         let raw =
             json_rpc_2_iot::client::transports::mqtt::MqttClientTransport::connect_with_config(
-                config.clone(),
+                client_config.clone(),
             )
             .await
             .unwrap();
         close_frame(&raw, &protocol).await;
-        let a = MqttWebSocketClientTransport::connect_with_config(config.clone())
+        let a = MqttWebSocketClientTransport::connect_with_config(client_config.clone())
             .await
             .unwrap();
-        let b = MqttWebSocketClientTransport::connect_with_config(config)
+        let b = MqttWebSocketClientTransport::connect_with_config(client_config)
             .await
             .unwrap();
         exercise(&a, &b, &protocol, server, "ws-mqtt").await;
@@ -245,10 +253,9 @@ async fn ws_mqtt_persistent_sessions_and_decoded_push() {
 #[tokio::test]
 #[ignore = "requires AMQP_BROKER_URL pointing at an isolated real broker"]
 async fn ws_amqp_persistent_sessions_and_decoded_push() {
-    use json_rpc_2_websockets::{
-        client::transports::amqp::{AmqpConfig, AmqpWebSocketClientTransport},
-        server::transports::amqp::AmqpWebSocketTransport,
-    };
+    use gateway_iot::{AmqpConfig, server::transports::amqp_websocket::AmqpWebSocketTransport};
+    use json_rpc_2_iot::AmqpConfig as AmqpClientConfig;
+    use json_rpc_2_websockets::client::transports::amqp::AmqpWebSocketClientTransport;
     tokio::time::timeout(Duration::from_secs(20), async {
         let config = AmqpConfig {
             broker_url: std::env::var("AMQP_BROKER_URL").unwrap(),
@@ -257,22 +264,31 @@ async fn ws_amqp_persistent_sessions_and_decoded_push() {
             response_timeout: Duration::from_secs(2),
             ..Default::default()
         };
+        let client_config = AmqpClientConfig {
+            broker_url: config.broker_url.clone(),
+            request_queue: config.request_queue.clone(),
+            operation_timeout: config.operation_timeout,
+            response_timeout: config.response_timeout,
+            max_payload_bytes: config.max_payload_bytes,
+            heartbeat_interval: config.sessions.heartbeat_interval,
+            prefetch: config.prefetch,
+        };
         let protocol = Arc::new(Sessions::default());
         let server = AmqpWebSocketTransport::connect(config.clone())
             .await
             .unwrap()
-            .start(Arc::new(JsonRpcWebSocket::new(protocol.clone())));
+            .start(protocol.clone());
         let raw =
             json_rpc_2_iot::client::transports::amqp::AmqpClientTransport::connect_with_config(
-                config.clone(),
+                client_config.clone(),
             )
             .await
             .unwrap();
         close_frame(&raw, &protocol).await;
-        let a = AmqpWebSocketClientTransport::connect_with_config(config.clone())
+        let a = AmqpWebSocketClientTransport::connect_with_config(client_config.clone())
             .await
             .unwrap();
-        let b = AmqpWebSocketClientTransport::connect_with_config(config)
+        let b = AmqpWebSocketClientTransport::connect_with_config(client_config)
             .await
             .unwrap();
         exercise(&a, &b, &protocol, server, "ws-amqp").await;

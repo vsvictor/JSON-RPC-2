@@ -172,7 +172,7 @@ impl TcpClientTransport {
         // Exclusive ownership is the cancellation guard: dropping this future
         // drops the socket before releasing the mutex, leaving Invalidated for
         // queued callers. A cancellation while waiting for the mutex changes
-        // nothing. There is no cleanup task and no old generation to restore.
+        // nothing. There is no cleanup docs and no old generation to restore.
         let mut framed = match std::mem::replace(&mut *connection, ConnectionState::Invalidated) {
             ConnectionState::Ready(framed) => framed,
             ConnectionState::Invalidated => Self::open(self.address, &self.tuning).await?,

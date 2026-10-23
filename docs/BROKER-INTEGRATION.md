@@ -26,18 +26,18 @@ tests never silently replace a broker with a fake endpoint.
 Runtime/facade tests use `JSON_RPC_TEST_MQTT_URL` and `JSON_RPC_TEST_AMQP_URL`;
 set these to the same URLs when invoking both test families.
 
-## Broker contract
+## Broker client contract
 
-`MqttTransport::new(MqttConfig)` and `AmqpTransport::new(AmqpConfig)` create RPC
-consumers, **not** listeners or brokers. Prefer asynchronous
-`MqttTransport::connect(config).await` / `AmqpTransport::connect(config).await`
-(and the equivalent WebSocket constructors) for startup: these return only after
-the broker connection and subscription/consumer are established. `run` reuses
-that prepared connection. Lazy `new(config)` remains available; its `run`
-establishes the broker connection;
-initial connect/subscribe failures are returned. After an established connection
+`json-rpc-2-iot` provides client transports only. They connect to an existing
+broker using `connect(SocketAddr)` or `connect_with_config(config)` and own the
+private reply subscription/queue. IoT server consumers and server-side broker
+I/O are implemented by `gateway-iot`, not by JSON-RPC-2 or
+`MultiTransportServer`. `GatewayIotIngress` starts configured server adapters
+and closes already-started adapters if a later startup fails.
+
+Gateway IoT server adapters establish their broker connection and
+subscription/consumer before startup returns. After an established connection
 is lost, the server recreates its consumer with one-second retry spacing.
-Clients expose `connect(SocketAddr)` and `connect_with_config(config)`.
 `reconnect()` recreates the unique reply subscription/queue and fails old pending
 exchanges; it never replays requests whose outcome is unknown.
 
@@ -84,12 +84,12 @@ or AMQP-over-WebSocket connections. Give them separate namespaces from raw RPC.
 
 ## Persistent ingress and unsolicited push
 
-The built-in broker clients register a transport session after establishing their
+The IoT client transports register a transport session after establishing their
 private receive route. The `gateway-sessions` crate owns the session identity,
 wire metadata, lifecycle kinds, lease policy, event dispatch, bounded lease
 registry, and ownership of active session resources through `SessionRuntime`.
-JSON-RPC-2 broker adapters retain broker I/O and provide a factory for
-transport-specific session guards and push relays. Identity and push route are
+`gateway-iot` owns broker server I/O and ingress session orchestration. Identity
+and push route are
 transport metadata, including on notifications; they are never extracted from
 business JSON or RPC IDs. The client creates a UUID identity, and the server
 allocates a transport context once per registered client, calls `session_opened`, reuses it for

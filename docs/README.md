@@ -9,7 +9,7 @@ Compatibility facade over the split workspace crates:
 - `json-rpc-2-client`: transport-agnostic client session runtime
 - `json-rpc-2-config`: typed environment / CLI config loader for the example runtime
 - `json-rpc-2-datagram`: non-WebSocket datagram/message-oriented transports
-- `json-rpc-2-iot`: non-WebSocket IoT transports (MQTT, CoAP, AMQP)
+- `json-rpc-2-iot`: client-only MQTT, CoAP, and AMQP transports
 - `json-rpc-2-quic`: non-WebSocket QUIC/HTTP3 transports
 - `json-rpc-2-server`: transport-agnostic dispatcher and typestate builder
 - `json-rpc-2-runtime`: multi-transport server orchestration and health endpoints
@@ -82,12 +82,11 @@ let transport = QuicClientTransport::connect(endpoint, address, "mobilespace.loc
 
 ## Architecture highlights
 
-- **Transport ownership**: concrete client and server adapters live in the
-  TCP, datagram, QUIC, IoT, and WebSocket family crates. These depend on
-  `json-rpc-2-core` and `json-rpc-2-transport`, not on the client or server runtime crates. WebSocket
-  carriers additionally depend on the underlying transport families.
-  `json-rpc-2-runtime` selects family implementations through optional
-  dependencies for its multi-transport runtime.
+- **Transport ownership**: TCP, datagram, and QUIC family crates own their
+  client and server adapters; `json-rpc-2-iot` owns only IoT clients. IoT
+  server adapters and broker ingress lifecycle are owned by the separate
+  `gateway-iot` crate. WebSocket clients remain in the JSON-RPC-2 workspace;
+  IoT WebSocket server adapters belong to `gateway-iot`.
 - **Explicit limits**: `ClientLimits` and `ServerLimits` distinguish the
   client queue/in-flight budget from server connection/request limits.
   Legacy `TransportLimits` aliases remain available in the corresponding APIs.
@@ -144,7 +143,7 @@ use explicit `ClientLimits` / `ServerLimits`.
 
 ## Transports
 
-Client and server adapters cover:
+The JSON-RPC-2 workspace contains client and server adapters for:
 
 - TCP
 - TLS-encrypted TCP
@@ -155,9 +154,6 @@ Client and server adapters cover:
 - UDP-Lite (Linux/Android only)
 - DCCP
 - SCTP
-- MQTT 3.1.1 (external broker)
-- CoAP (over UDP)
-- AMQP 0-9-1 (external broker)
 - raw QUIC
 - HTTP/1.1
 - HTTP/3
@@ -169,12 +165,12 @@ Client and server adapters cover:
 - WebSocket over UDP-Lite (Linux/Android only)
 - WebSocket over DCCP
 - WebSocket over SCTP
-- WebSocket over MQTT
-- WebSocket over CoAP
-- WebSocket over AMQP
 - WebSocket over QUIC
 - WebSocket over HTTP/1.1 Upgrade
 - WebSocket over HTTP/3 extended CONNECT
+
+MQTT, CoAP, AMQP, and their WebSocket-style server adapters are provided by
+`gateway-iot`; the JSON-RPC-2 workspace retains only their client adapters.
 
 The server side keeps the JSON-RPC protocol separate from message delivery.
 Transport implementations fan out independent stream sessions through a shared
@@ -315,57 +311,36 @@ The previous `JSRT` wire format is not accepted as a standard SRT connection.
 JSON-RPC message framing over SRT remains project-defined: an arbitrary SRT
 video sender is not automatically a JSON-RPC peer.
 
-## MQTT and AMQP brokers
+## IoT client transports and server ownership
 
-MQTT and AMQP endpoints now refer to an **existing broker**, not a TCP listener
-owned by `RpcServer`. Configure the same request topic/queue for the RPC client
-and service. Replies are routed to per-client destinations with correlation
-metadata, including when multiple clients reuse the same JSON-RPC ID.
+MQTT and AMQP client endpoints connect to an **existing broker**. Configure the
+same request topic/queue for the RPC client and gateway service. Replies are
+routed to per-client destinations with correlation metadata, including when
+multiple clients reuse the same JSON-RPC ID.
 
-Use `MqttConfig` / `AmqpConfig` for broker authentication, routing, TLS, and
-operation deadlines, and supply them to `set_mqtt_config` / `set_amqp_config`
-on the multi-transport runtime. The WebSocket-style variants use separate
-application framing over the same standard broker transports.
+Use `MqttConfig` / `AmqpConfig` for client broker authentication, routing, TLS,
+and operation deadlines, then call the client transport's
+`connect_with_config`. `json-rpc-2-iot` exports client transports only.
+CoAP, MQTT, AMQP, and WebSocket-style IoT server adapters, broker session
+handling, and ingress lifecycle belong to the separate `gateway-iot` crate.
 
-```rust,no_run
-use std::sync::Arc;
-use json_rpc_2::{AmqpConfig, MqttConfig, MultiTransportServer, RpcServer};
+Server configuration and lifecycle are provided by the gateway workspace: configure `GatewayIotIngress` from `gateway-iot`, not `MultiTransportServer`.
 
-# async fn example() -> std::io::Result<()> {
-let mqtt = MqttConfig {
-    broker_url: "mqtt://127.0.0.1:1883".into(),
-    request_topic: "example/rpc/requests".into(),
-    ..Default::default()
-};
-let amqp = AmqpConfig {
-    broker_url: "amqp://guest:guest@127.0.0.1:5672/%2f".into(),
-    request_queue: "example.rpc.requests".into(),
-    ..Default::default()
-};
-let running = MultiTransportServer::builder(Arc::new(RpcServer::new()))
-    .set_mqtt_config(mqtt)
-    .set_amqp_config(amqp)
-    .start()
-    .await?;
-running.close().await?;
-# Ok(())
-# }
-```
-
-Client transports expose `connect_with_config`; pass the matching
-`request_topic` / `request_queue`. Use `set_ws_mqtt_config` /
-`set_ws_amqp_config` and separate routes for WebSocket-style services.
+Client and server must use matching `request_topic` / `request_queue` values.
+`MultiTransportServer` rejects IoT server transports rather than silently
+starting a partial service.
 
 These APIs intentionally change the old private-profile topology. Port `0`
 does not create a local MQTT or AMQP broker. Broker acknowledgements and
 reliability do not imply exactly-once execution of application side effects.
 
-CLI configuration accepts `--mqtt-url`, `--mqtt-topic`, `--mqtt-ws-topic`,
+The CLI client accepts `--mqtt-url`, `--mqtt-topic`, `--mqtt-ws-topic`,
 `--amqp-url`, `--amqp-queue`, and `--amqp-ws-queue`; credentials belong in the
 broker URL. `mqtts://` and `amqps://` enable verified TLS; `--mqtt-ca` accepts
 an additional PEM CA bundle for MQTT. Operation and response deadlines have
 separate `--mqtt-*-timeout-ms` / `--amqp-*-timeout-ms` options. The equivalent
-environment variables and deprecated port aliases are listed by `--help`.
+environment variables are listed by `--help`. The CLI server does not host IoT
+transports; use `gateway-iot` for IoT ingress.
 TCP_NODELAY/BBR/Fast Open settings apply only to adapter-owned TCP/HTTP1
 sockets, not to broker-library sockets.
 
@@ -434,9 +409,9 @@ optional external health surface with:
 ## Multi-transport server
 
 `MultiTransportServer` exposes one `JsonRpcProtocol` implementation over every
-enabled transport. Socket transports listen on each bind address; broker
-transports create one outbound subscription/consumer per configured kind,
-regardless of the number of bind addresses. The preferred entry point is
+enabled transport. Socket transports listen on each bind address. IoT broker
+consumers are outside this runtime and are managed by `gateway-iot`. The
+preferred entry point is
 `MultiTransportServer::builder(protocol)`, which uses typestate to require at
 least one enabled transport and either a socket bind or broker configuration
 before `build()` or `start()` are available. Configure it with `set_bind`, one port setter per
@@ -451,8 +426,7 @@ transports, `set_tcp_tuning` for TCP socket policy, `set_udp_reliability` for
 UDP-family retry/dedup policy, `set_udplite_config` for UDP-Lite checksum
 coverage, and `set_srt_config` for SRT passphrase policy. `start()` validates
 the final configuration and returns a `RunningServer` with graceful shutdown.
-Broker setup must succeed before startup returns. `listeners()` reports local
-socket listeners; `broker_transports()` reports the outbound broker consumers.
+`listeners()` reports local socket listeners.
 UDP-Lite, DCCP, and SCTP transports currently require Linux or Android kernel
 support.
 
@@ -464,8 +438,10 @@ support.
   ```sh
   export JSON_RPC_TEST_MQTT_URL=mqtt://127.0.0.1:1883
   export JSON_RPC_TEST_AMQP_URL=amqp://guest:guest@127.0.0.1:5672/%2f
-  cargo test -p json-rpc-2-runtime --all-features --test brokers -- --ignored
-  cargo test -p json-rpc-2 --all-features --test transport_contract -- --ignored
+  cargo test -p json-rpc-2-iot --test broker_rpc -- --ignored
+  cargo test -p json-rpc-2-iot --test broker_sessions -- --ignored
+  cargo test -p json-rpc-2-iot --test broker_auth -- --ignored
+  cargo test -p json-rpc-2-websockets --no-default-features --features websocket,mqtt,amqp --test broker_sessions -- --ignored
   ```
 
 - `tools/check-features.sh` runs the supported feature-flag matrix for the

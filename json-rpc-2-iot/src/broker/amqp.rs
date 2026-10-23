@@ -12,11 +12,13 @@ pub(super) struct Session {
     channel: Channel,
     task: tokio::task::JoinHandle<()>,
 }
+
 impl Drop for Session {
     fn drop(&mut self) {
         self.task.abort();
     }
 }
+
 impl Session {
     pub async fn publish(
         &self,
@@ -26,7 +28,7 @@ impl Session {
         correlation_id: String,
         control: bool,
         metadata: Metadata,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), json_rpc_2_transport::TransportError> {
         let mut properties = BasicProperties::default()
             .with_correlation_id(correlation_id.into())
             .with_content_type("application/json".into())
@@ -46,7 +48,9 @@ impl Session {
             "json-rpc-2-session".into(),
             AMQPValue::LongString(
                 serde_json::to_vec(&metadata)
-                    .map_err(|_| TransportError::new("AMQP metadata encoding failed"))?
+                    .map_err(|_| {
+                        json_rpc_2_transport::TransportError::new("AMQP metadata encoding failed")
+                    })?
                     .into(),
             ),
         );
@@ -64,17 +68,20 @@ impl Session {
                 properties,
             )
             .await
-            .map_err(|_| TransportError::new("AMQP publish failed"))?
+            .map_err(|_| json_rpc_2_transport::TransportError::new("AMQP publish failed"))?
             .await
-            .map_err(|_| TransportError::new("AMQP publisher confirmation failed"))?;
+            .map_err(|_| {
+                json_rpc_2_transport::TransportError::new("AMQP publisher confirmation failed")
+            })?;
         match confirmation {
             Confirmation::Ack(None) => Ok(()),
-            _ => Err(TransportError::new(
+            _ => Err(json_rpc_2_transport::TransportError::new(
                 "AMQP publication rejected or unroutable",
             )),
         }
     }
-    pub async fn close(&self) -> Result<(), TransportError> {
+
+    pub async fn close(&self) -> Result<(), json_rpc_2_transport::TransportError> {
         self.task.abort();
         if !self.connection.status().connected() {
             return Ok(());
@@ -82,39 +89,43 @@ impl Session {
         self.connection
             .close(200, "RPC shutdown".into())
             .await
-            .map_err(|_| TransportError::new("AMQP close failed"))
+            .map_err(|_| json_rpc_2_transport::TransportError::new("AMQP close failed"))
     }
 }
+
 pub(super) async fn open(
     config: &AmqpConfig,
-    server: bool,
-) -> Result<(super::Session, mpsc::Receiver<Message>), TransportError> {
+) -> Result<(super::Session, mpsc::Receiver<Message>), json_rpc_2_transport::TransportError> {
     if config.request_queue.is_empty()
         || config.request_queue.starts_with("amq.")
         || config.prefetch == 0
     {
-        return Err(TransportError::new("invalid AMQP RPC queue or prefetch"));
+        return Err(json_rpc_2_transport::TransportError::new(
+            "invalid AMQP RPC queue or prefetch",
+        ));
     }
     if !(config.broker_url.starts_with("amqp://") || config.broker_url.starts_with("amqps://")) {
-        return Err(TransportError::new("AMQP URL must use amqp:// or amqps://"));
+        return Err(json_rpc_2_transport::TransportError::new(
+            "AMQP URL must use amqp:// or amqps://",
+        ));
     }
-    bounded(config.operation_timeout, async {
+    super::bounded(config.operation_timeout, async {
         let connection = Connection::connect(&config.broker_url, ConnectionProperties::default())
             .await
-            .map_err(|_| TransportError::new("AMQP broker connection failed"))?;
-        let channel = connection
-            .create_channel()
-            .await
-            .map_err(|_| TransportError::new("AMQP channel creation failed"))?;
+            .map_err(|_| {
+                json_rpc_2_transport::TransportError::new("AMQP broker connection failed")
+            })?;
+        let channel = connection.create_channel().await.map_err(|_| {
+            json_rpc_2_transport::TransportError::new("AMQP channel creation failed")
+        })?;
         channel
             .confirm_select(ConfirmSelectOptions::default())
             .await
-            .map_err(|_| TransportError::new("AMQP confirm setup failed"))?;
+            .map_err(|_| json_rpc_2_transport::TransportError::new("AMQP confirm setup failed"))?;
         channel
             .basic_qos(config.prefetch, BasicQosOptions::default())
             .await
-            .map_err(|_| TransportError::new("AMQP QoS setup failed"))?;
-        // Shared request queue remains available while consumers reconnect.
+            .map_err(|_| json_rpc_2_transport::TransportError::new("AMQP QoS setup failed"))?;
         channel
             .queue_declare(
                 config.request_queue.clone().into(),
@@ -122,34 +133,34 @@ pub(super) async fn open(
                 FieldTable::default(),
             )
             .await
-            .map_err(|_| TransportError::new("AMQP request queue declaration failed"))?;
-        let queue = if server {
-            config.request_queue.clone()
-        } else {
-            channel
-                .queue_declare(
-                    "".into(),
-                    QueueDeclareOptions {
-                        exclusive: true,
-                        auto_delete: true,
-                        ..Default::default()
-                    },
-                    FieldTable::default(),
-                )
-                .await
-                .map_err(|_| TransportError::new("AMQP reply queue declaration failed"))?
-                .name()
-                .to_string()
-        };
+            .map_err(|_| {
+                json_rpc_2_transport::TransportError::new("AMQP request queue declaration failed")
+            })?;
+        let reply_to = channel
+            .queue_declare(
+                "".into(),
+                QueueDeclareOptions {
+                    exclusive: true,
+                    auto_delete: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await
+            .map_err(|_| {
+                json_rpc_2_transport::TransportError::new("AMQP reply queue declaration failed")
+            })?
+            .name()
+            .to_string();
         let mut consumer = channel
             .basic_consume(
-                queue.clone().into(),
+                reply_to.clone().into(),
                 format!("rpc-{}", uuid::Uuid::new_v4()).into(),
                 BasicConsumeOptions::default(),
                 FieldTable::default(),
             )
             .await
-            .map_err(|_| TransportError::new("AMQP consume failed"))?;
+            .map_err(|_| json_rpc_2_transport::TransportError::new("AMQP consume failed"))?;
         let (incoming, receiver) = mpsc::channel(256);
         let max_payload = config.max_payload_bytes;
         let ack_timeout = config.operation_timeout;
@@ -171,22 +182,12 @@ pub(super) async fn open(
                 }
                 let message = Message {
                     payload: delivery.data.into(),
-                    reply_to: delivery
-                        .properties
-                        .reply_to()
-                        .as_ref()
-                        .map(ToString::to_string),
                     correlation_id: delivery
                         .properties
                         .correlation_id()
                         .as_ref()
                         .map(ToString::to_string)
                         .unwrap_or_default(),
-                    control: delivery
-                        .properties
-                        .kind()
-                        .as_ref()
-                        .is_some_and(|kind| kind.as_str() == "json-rpc-2.ping"),
                     metadata: delivery
                         .properties
                         .headers()
@@ -207,12 +208,12 @@ pub(super) async fn open(
             }
         });
         Ok((
-            super::Session::Amqp(Box::new(Session {
-                reply_to: queue,
+            super::Session::Amqp(Session {
+                reply_to,
                 connection,
                 channel,
                 task,
-            })),
+            }),
             receiver,
         ))
     })

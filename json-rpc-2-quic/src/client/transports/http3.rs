@@ -24,7 +24,7 @@ pub type H3Sender = SendRequest<h3_quinn::OpenStreams, Bytes>;
 pub type H3Driver = JoinHandle<ConnectionError>;
 type H3RequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 
-/// Establish an HTTP/3 connection and drive it in a background task.
+/// Establish an HTTP/3 connection and drive it in a background docs.
 pub async fn connect_h3(
     endpoint: &Endpoint,
     address: SocketAddr,

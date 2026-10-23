@@ -2,7 +2,6 @@ pub use json_rpc_2_core::*;
 pub use json_rpc_2_transport::*;
 
 pub mod client;
-pub mod server;
 
 #[cfg(any(feature = "mqtt", feature = "amqp"))]
 pub mod broker;
@@ -25,16 +24,13 @@ pub mod transports {
     #[cfg(feature = "amqp")]
     pub mod amqp {
         pub use crate::client::transports::amqp::*;
-        pub use crate::server::transports::amqp::*;
     }
     #[cfg(feature = "coap")]
     pub mod coap {
         pub use crate::client::transports::coap::*;
-        pub use crate::server::transports::coap::*;
     }
     #[cfg(feature = "mqtt")]
     pub mod mqtt {
         pub use crate::client::transports::mqtt::*;
-        pub use crate::server::transports::mqtt::*;
     }
 }

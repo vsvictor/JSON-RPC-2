@@ -32,13 +32,7 @@
 //! require at least one bind address and at least one enabled transport before
 //! build/start.
 //!
-//! MQTT and AMQP are external broker services, not local listeners. Configure
-//! their authenticated URLs and service topic/queue with `set_mqtt_config` or
-//! `set_amqp_config` (and `set_ws_*_config` for WebSocket application frames).
-//! Broker-only builders need no bind IP. Legacy broker port setters target
-//! localhost and never create a broker; port zero is therefore invalid.
-//! [`RunningServer::listeners`] lists only local endpoints, while
-//! [`RunningServer::broker_transports`] lists outbound service consumers.
+//! IoT server transports are provided by the separate `gateway-iot` crate.
 //!
 //! ```no_run
 //! # async fn example(
@@ -119,16 +113,6 @@ use json_rpc_2_datagram::server::transports::srt::SrtTransport;
 use json_rpc_2_datagram::server::transports::udp::UdpTransport;
 #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
 use json_rpc_2_datagram::server::transports::udplite::UdpLiteTransport;
-#[cfg(feature = "amqp")]
-pub use json_rpc_2_iot::AmqpConfig;
-#[cfg(feature = "mqtt")]
-pub use json_rpc_2_iot::MqttConfig;
-#[cfg(feature = "amqp")]
-use json_rpc_2_iot::server::transports::amqp::AmqpTransport;
-#[cfg(feature = "coap")]
-use json_rpc_2_iot::server::transports::coap::CoapTransport;
-#[cfg(feature = "mqtt")]
-use json_rpc_2_iot::server::transports::mqtt::MqttTransport;
 #[cfg(feature = "http3")]
 use json_rpc_2_quic::server::transports::http3::Http3Transport;
 #[cfg(feature = "quic")]
@@ -145,10 +129,6 @@ use json_rpc_2_transport::{
     RunningTransport, RuntimeMetricsSnapshot, ServerLimits, ServerShutdownPolicy, TLS_ALPN,
     Transport, TransportRuntime,
 };
-#[cfg(all(feature = "websocket", feature = "amqp"))]
-use json_rpc_2_websockets::server::transports::amqp::AmqpWebSocketTransport;
-#[cfg(all(feature = "websocket", feature = "coap"))]
-use json_rpc_2_websockets::server::transports::coap::CoapWebSocketTransport;
 #[cfg(all(
     feature = "websocket",
     feature = "dccp",
@@ -161,8 +141,6 @@ use json_rpc_2_websockets::server::transports::http1::Http1WebSocketTransport;
 use json_rpc_2_websockets::server::transports::http1::TlsWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "http3"))]
 use json_rpc_2_websockets::server::transports::http3::Http3WebSocketTransport;
-#[cfg(all(feature = "websocket", feature = "mqtt"))]
-use json_rpc_2_websockets::server::transports::mqtt::MqttWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "quic"))]
 use json_rpc_2_websockets::server::transports::quic::QuicWebSocketTransport;
 #[cfg(all(feature = "websocket", feature = "rtp"))]
@@ -288,6 +266,14 @@ impl TransportKind {
             Self::WebSocketAmqp => true,
             _ => false,
         }
+    }
+
+    /// Whether this is one of the IoT transports implemented by `gateway-iot`.
+    pub fn is_iot(self) -> bool {
+        matches!(
+            self.id(),
+            "mqtt" | "coap" | "amqp" | "ws-mqtt" | "ws-coap" | "ws-amqp"
+        )
     }
 
     pub const ALL: &[TransportKind] = &[
@@ -804,14 +790,6 @@ pub struct MultiTransportServer {
     udp_reliability: UdpReliabilityConfig,
     udp_lite_config: UdpLiteConfig,
     srt_config: Option<SrtConfig>,
-    #[cfg(feature = "mqtt")]
-    mqtt_config: Option<MqttConfig>,
-    #[cfg(feature = "amqp")]
-    amqp_config: Option<AmqpConfig>,
-    #[cfg(all(feature = "websocket", feature = "mqtt"))]
-    ws_mqtt_config: Option<MqttConfig>,
-    #[cfg(all(feature = "websocket", feature = "amqp"))]
-    ws_amqp_config: Option<AmqpConfig>,
 }
 
 impl MultiTransportServer {
@@ -834,123 +812,25 @@ impl MultiTransportServer {
             udp_reliability: UdpReliabilityConfig::default(),
             udp_lite_config: UdpLiteConfig::default(),
             srt_config: None,
-            #[cfg(feature = "mqtt")]
-            mqtt_config: None,
-            #[cfg(feature = "amqp")]
-            amqp_config: None,
-            #[cfg(all(feature = "websocket", feature = "mqtt"))]
-            ws_mqtt_config: None,
-            #[cfg(all(feature = "websocket", feature = "amqp"))]
-            ws_amqp_config: None,
         }
     }
 
-    /// Local addresses to listen on. Required for local transports, ignored
-    /// by external broker services, which connect once per configured kind.
+    /// Local addresses to listen on.
     pub fn set_bind(&mut self, addresses: impl IntoIterator<Item = IpAddr>) -> &mut Self {
         self.bind = addresses.into_iter().collect();
         self
     }
 
     /// Local port of `kind`; port 0 lets the OS choose a free port.
-    /// For MQTT/AMQP this instead selects an external broker on localhost.
-    /// Broker port 0 is invalid; no broker or private wire server is created.
     pub fn set_port(&mut self, kind: TransportKind, port: u16) -> &mut Self {
         self.ports[kind.index()] = Some(port);
-        let _address = SocketAddr::from(([127, 0, 0, 1], port));
-        match kind {
-            #[cfg(feature = "mqtt")]
-            TransportKind::Mqtt => self.mqtt_config = Some(MqttConfig::for_address(_address)),
-            #[cfg(feature = "amqp")]
-            TransportKind::Amqp => self.amqp_config = Some(AmqpConfig::for_address(_address)),
-            #[cfg(all(feature = "websocket", feature = "mqtt"))]
-            TransportKind::WebSocketMqtt => {
-                let mut config = MqttConfig::for_address(_address);
-                config.request_topic = "json-rpc-2/ws/requests".into();
-                self.ws_mqtt_config = Some(config);
-            }
-            #[cfg(all(feature = "websocket", feature = "amqp"))]
-            TransportKind::WebSocketAmqp => {
-                let mut config = AmqpConfig::for_address(_address);
-                config.request_queue = "json-rpc-2.ws.requests".into();
-                self.ws_amqp_config = Some(config);
-            }
-            _ => {}
-        }
         self
     }
 
     /// Do not start `kind`.
     pub fn clear_port(&mut self, kind: TransportKind) -> &mut Self {
         self.ports[kind.index()] = None;
-        match kind {
-            #[cfg(feature = "mqtt")]
-            TransportKind::Mqtt => self.mqtt_config = None,
-            #[cfg(feature = "amqp")]
-            TransportKind::Amqp => self.amqp_config = None,
-            #[cfg(all(feature = "websocket", feature = "mqtt"))]
-            TransportKind::WebSocketMqtt => self.ws_mqtt_config = None,
-            #[cfg(all(feature = "websocket", feature = "amqp"))]
-            TransportKind::WebSocketAmqp => self.ws_amqp_config = None,
-            _ => {}
-        }
         self
-    }
-
-    /// Subscribe once to an external MQTT broker, regardless of bind addresses.
-    /// The config carries the authenticated broker URL and service request topic.
-    #[cfg(feature = "mqtt")]
-    pub fn set_mqtt_config(&mut self, config: MqttConfig) -> &mut Self {
-        self.ports[TransportKind::Mqtt.index()] = None;
-        self.mqtt_config = Some(config);
-        self
-    }
-
-    #[cfg(feature = "mqtt")]
-    pub fn mqtt_config(&self) -> Option<&MqttConfig> {
-        self.mqtt_config.as_ref()
-    }
-
-    /// Consume once from an external AMQP broker's service queue.
-    /// Credentials and virtual host belong in the config's broker URL.
-    #[cfg(feature = "amqp")]
-    pub fn set_amqp_config(&mut self, config: AmqpConfig) -> &mut Self {
-        self.ports[TransportKind::Amqp.index()] = None;
-        self.amqp_config = Some(config);
-        self
-    }
-
-    #[cfg(feature = "amqp")]
-    pub fn amqp_config(&self) -> Option<&AmqpConfig> {
-        self.amqp_config.as_ref()
-    }
-
-    /// MQTT service for WebSocket application frames; use a topic distinct
-    /// from the raw JSON-RPC service when enabling both.
-    #[cfg(all(feature = "websocket", feature = "mqtt"))]
-    pub fn set_ws_mqtt_config(&mut self, config: MqttConfig) -> &mut Self {
-        self.ports[TransportKind::WebSocketMqtt.index()] = None;
-        self.ws_mqtt_config = Some(config);
-        self
-    }
-
-    #[cfg(all(feature = "websocket", feature = "mqtt"))]
-    pub fn ws_mqtt_config(&self) -> Option<&MqttConfig> {
-        self.ws_mqtt_config.as_ref()
-    }
-
-    /// AMQP service for WebSocket application frames; use a queue distinct
-    /// from the raw JSON-RPC service when enabling both.
-    #[cfg(all(feature = "websocket", feature = "amqp"))]
-    pub fn set_ws_amqp_config(&mut self, config: AmqpConfig) -> &mut Self {
-        self.ports[TransportKind::WebSocketAmqp.index()] = None;
-        self.ws_amqp_config = Some(config);
-        self
-    }
-
-    #[cfg(all(feature = "websocket", feature = "amqp"))]
-    pub fn ws_amqp_config(&self) -> Option<&AmqpConfig> {
-        self.ws_amqp_config.as_ref()
     }
 
     /// TCP port of the TCP transport (newline-delimited JSON).
@@ -993,26 +873,6 @@ impl MultiTransportServer {
     #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
     pub fn set_udplite_port(&mut self, port: u16) -> &mut Self {
         self.set_port(TransportKind::UdpLite, port)
-    }
-
-    /// External MQTT 3.1.1 broker port on localhost, not a local listener.
-    /// Use `set_mqtt_config` for credentials and a service-specific topic.
-    #[cfg(feature = "mqtt")]
-    pub fn set_mqtt_port(&mut self, port: u16) -> &mut Self {
-        self.set_port(TransportKind::Mqtt, port)
-    }
-
-    /// UDP port of the CoAP-style constrained application transport.
-    #[cfg(feature = "coap")]
-    pub fn set_coap_port(&mut self, port: u16) -> &mut Self {
-        self.set_port(TransportKind::Coap, port)
-    }
-
-    /// External AMQP 0-9-1 broker port on localhost, not a local listener.
-    /// Use `set_amqp_config` for credentials, virtual host and service queue.
-    #[cfg(feature = "amqp")]
-    pub fn set_amqp_port(&mut self, port: u16) -> &mut Self {
-        self.set_port(TransportKind::Amqp, port)
     }
 
     /// DCCP port of the datagram transport with congestion control.
@@ -1085,26 +945,6 @@ impl MultiTransportServer {
     #[cfg(all(feature = "websocket", feature = "srt"))]
     pub fn set_ws_srt_port(&mut self, port: u16) -> &mut Self {
         self.set_port(TransportKind::WebSocketSrt, port)
-    }
-
-    /// External localhost MQTT broker for WebSocket application frames.
-    /// Uses the `json-rpc-2/ws/requests` topic.
-    #[cfg(all(feature = "websocket", feature = "mqtt"))]
-    pub fn set_ws_mqtt_port(&mut self, port: u16) -> &mut Self {
-        self.set_port(TransportKind::WebSocketMqtt, port)
-    }
-
-    /// UDP port of the dedicated WebSocket over CoAP-style transport.
-    #[cfg(all(feature = "websocket", feature = "coap"))]
-    pub fn set_ws_coap_port(&mut self, port: u16) -> &mut Self {
-        self.set_port(TransportKind::WebSocketCoap, port)
-    }
-
-    /// External localhost AMQP broker for WebSocket application frames.
-    /// Uses the `json-rpc-2.ws.requests` queue.
-    #[cfg(all(feature = "websocket", feature = "amqp"))]
-    pub fn set_ws_amqp_port(&mut self, port: u16) -> &mut Self {
-        self.set_port(TransportKind::WebSocketAmqp, port)
     }
 
     /// UDP-Lite port of the dedicated WebSocket over UDP-Lite transport.
@@ -1244,17 +1084,7 @@ impl MultiTransportServer {
         TransportKind::ALL
             .iter()
             .copied()
-            .filter(|kind| match kind {
-                #[cfg(feature = "mqtt")]
-                TransportKind::Mqtt => self.mqtt_config.is_some(),
-                #[cfg(feature = "amqp")]
-                TransportKind::Amqp => self.amqp_config.is_some(),
-                #[cfg(all(feature = "websocket", feature = "mqtt"))]
-                TransportKind::WebSocketMqtt => self.ws_mqtt_config.is_some(),
-                #[cfg(all(feature = "websocket", feature = "amqp"))]
-                TransportKind::WebSocketAmqp => self.ws_amqp_config.is_some(),
-                _ => self.port(*kind).is_some(),
-            })
+            .filter(|kind| self.port(*kind).is_some())
     }
 
     /// Check the configuration: bind addresses, at least one transport, TLS
@@ -1263,29 +1093,17 @@ impl MultiTransportServer {
     pub fn validate(&self) -> io::Result<()> {
         let invalid = |message: String| Err(io::Error::new(io::ErrorKind::InvalidInput, message));
         let transports: Vec<TransportKind> = self.transports().collect();
-        if self.bind.is_empty() && transports.iter().any(|kind| !kind.is_broker()) {
+        if let Some(kind) = transports.iter().find(|kind| kind.is_iot()) {
+            return invalid(format!(
+                "{} server transport is provided by the gateway-iot crate",
+                kind.name()
+            ));
+        }
+        if self.bind.is_empty() && !transports.is_empty() {
             return invalid("no bind address".into());
         }
         if transports.is_empty() {
             return invalid("no transport configured".into());
-        }
-        #[cfg(all(feature = "mqtt", feature = "websocket"))]
-        if let (Some(raw), Some(ws)) = (&self.mqtt_config, &self.ws_mqtt_config)
-            && raw.broker_url == ws.broker_url
-            && raw.request_topic == ws.request_topic
-        {
-            return invalid(
-                "raw and WebSocket MQTT services require distinct request topics".into(),
-            );
-        }
-        #[cfg(all(feature = "amqp", feature = "websocket"))]
-        if let (Some(raw), Some(ws)) = (&self.amqp_config, &self.ws_amqp_config)
-            && raw.broker_url == ws.broker_url
-            && raw.request_queue == ws.request_queue
-        {
-            return invalid(
-                "raw and WebSocket AMQP services require distinct request queues".into(),
-            );
         }
         #[cfg(any(feature = "tls", feature = "quic", feature = "http3"))]
         if self.identity.is_none()
@@ -1324,19 +1142,7 @@ impl MultiTransportServer {
             .validate()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         for (i, first) in transports.iter().enumerate() {
-            if first.is_broker() {
-                if self.port(*first) == Some(0) {
-                    return invalid(format!(
-                        "{} requires a nonzero external broker port",
-                        first.name()
-                    ));
-                }
-                continue;
-            }
             for second in &transports[i + 1..] {
-                if second.is_broker() {
-                    continue;
-                }
                 let port = self.port(*first);
                 if first.socket() == second.socket()
                     && port != Some(0)
@@ -1363,8 +1169,7 @@ impl MultiTransportServer {
         Ok(())
     }
 
-    /// Start local listeners on every bind address and broker consumers once
-    /// per configured kind. If startup fails, already started services close.
+    /// Start local listeners on every bind address.
     pub async fn start(&self) -> io::Result<RunningServer> {
         self.validate()?;
         let runtime = Arc::new(TransportRuntime::new(
@@ -1378,35 +1183,10 @@ impl MultiTransportServer {
             Arc::new(JsonRpcWebSocket::new(self.protocol.clone()));
         let mut running = RunningServer {
             listeners: Vec::new(),
-            brokers: Vec::new(),
             runtime: Arc::clone(&runtime),
         };
-        #[cfg(any(feature = "mqtt", feature = "amqp"))]
-        for kind in self.transports().filter(|kind| kind.is_broker()) {
-            let transport = match self
-                .connect_broker(
-                    kind,
-                    #[cfg(feature = "websocket")]
-                    &websocket,
-                    &runtime,
-                )
-                .await
-            {
-                Ok(transport) => transport,
-                Err(error) => {
-                    if let Err(close_error) = running.close().await {
-                        tracing::error!(error = %close_error, "failed to close partially started server");
-                    }
-                    return Err(io::Error::new(
-                        error.kind(),
-                        format!("{} broker startup failed: {error}", kind.name()),
-                    ));
-                }
-            };
-            running.brokers.push((kind, transport));
-        }
         for &ip in &self.bind {
-            for kind in self.transports().filter(|kind| !kind.is_broker()) {
+            for kind in self.transports() {
                 let address = SocketAddr::new(ip, self.port(kind).unwrap_or_default());
                 match self
                     .listen(
@@ -1432,51 +1212,6 @@ impl MultiTransportServer {
             }
         }
         Ok(running)
-    }
-
-    #[cfg(any(feature = "mqtt", feature = "amqp"))]
-    async fn connect_broker(
-        &self,
-        kind: TransportKind,
-        #[cfg(feature = "websocket")] websocket: &Arc<dyn WebSocketProtocol>,
-        runtime: &Arc<TransportRuntime>,
-    ) -> io::Result<RunningTransport> {
-        let missing =
-            || io::Error::new(io::ErrorKind::InvalidInput, "missing broker configuration");
-        match kind {
-            #[cfg(feature = "mqtt")]
-            TransportKind::Mqtt => Ok(MqttTransport::connect(
-                self.mqtt_config.clone().ok_or_else(missing)?,
-            )
-            .await?
-            .with_runtime(Arc::clone(runtime))
-            .start(self.protocol.clone())),
-            #[cfg(feature = "amqp")]
-            TransportKind::Amqp => Ok(AmqpTransport::connect(
-                self.amqp_config.clone().ok_or_else(missing)?,
-            )
-            .await?
-            .with_runtime(Arc::clone(runtime))
-            .start(self.protocol.clone())),
-            #[cfg(all(feature = "websocket", feature = "mqtt"))]
-            TransportKind::WebSocketMqtt => Ok(MqttWebSocketTransport::connect(
-                self.ws_mqtt_config.clone().ok_or_else(missing)?,
-            )
-            .await?
-            .with_runtime(Arc::clone(runtime))
-            .start(websocket.clone())),
-            #[cfg(all(feature = "websocket", feature = "amqp"))]
-            TransportKind::WebSocketAmqp => Ok(AmqpWebSocketTransport::connect(
-                self.ws_amqp_config.clone().ok_or_else(missing)?,
-            )
-            .await?
-            .with_runtime(Arc::clone(runtime))
-            .start(websocket.clone())),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "not a broker transport",
-            )),
-        }
     }
 
     async fn listen(
@@ -1519,60 +1254,12 @@ impl MultiTransportServer {
                         .start(protocol),
                 )
             }
-            #[cfg(feature = "mqtt")]
-            TransportKind::Mqtt => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "MQTT uses an external broker, not a listener",
-                ));
-            }
-            #[cfg(feature = "amqp")]
-            TransportKind::Amqp => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "AMQP uses an external broker, not a listener",
-                ));
-            }
-            #[cfg(feature = "coap")]
-            TransportKind::Coap => {
-                let socket = bind_udp(address)?;
-                (
-                    socket.local_addr()?,
-                    CoapTransport::new(tokio::net::UdpSocket::from_std(socket)?)
-                        .with_runtime(Arc::clone(runtime))
-                        .start(protocol),
-                )
-            }
             #[cfg(all(feature = "websocket", feature = "tcp"))]
             TransportKind::WebSocketTcp => {
                 let listener = bind_tcp(address, &runtime.tcp_tuning)?;
                 (
                     listener.local_addr()?,
                     TcpWebSocketTransport::new(listener)
-                        .with_runtime(Arc::clone(runtime))
-                        .start(websocket.clone()),
-                )
-            }
-            #[cfg(all(feature = "websocket", feature = "mqtt"))]
-            TransportKind::WebSocketMqtt => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "WebSocket MQTT uses an external broker, not a listener",
-                ));
-            }
-            #[cfg(all(feature = "websocket", feature = "amqp"))]
-            TransportKind::WebSocketAmqp => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "WebSocket AMQP uses an external broker, not a listener",
-                ));
-            }
-            #[cfg(all(feature = "websocket", feature = "coap"))]
-            TransportKind::WebSocketCoap => {
-                let socket = bind_udp(address)?;
-                (
-                    socket.local_addr()?,
-                    CoapWebSocketTransport::new(tokio::net::UdpSocket::from_std(socket)?)
                         .with_runtime(Arc::clone(runtime))
                         .start(websocket.clone()),
                 )
@@ -1788,6 +1475,13 @@ impl MultiTransportServer {
                         .start(websocket.clone()),
                 )
             }
+            #[cfg(any(feature = "mqtt", feature = "coap", feature = "amqp"))]
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "IoT server transports are provided by the gateway-iot crate",
+                ));
+            }
         };
         Ok(Listener {
             kind,
@@ -1856,7 +1550,6 @@ struct Listener {
 /// Handle of a started [`MultiTransportServer`].
 pub struct RunningServer {
     listeners: Vec<Listener>,
-    brokers: Vec<(TransportKind, RunningTransport)>,
     runtime: Arc<TransportRuntime>,
 }
 
@@ -1873,12 +1566,6 @@ pub struct HealthHandle {
 }
 
 impl RunningServer {
-    /// External broker subscriptions/consumers. These do not own local
-    /// listening sockets and are intentionally absent from `listeners()`.
-    pub fn broker_transports(&self) -> impl Iterator<Item = TransportKind> + '_ {
-        self.brokers.iter().map(|(kind, _)| *kind)
-    }
-
     /// Every running transport with its actual local address.
     pub fn listeners(&self) -> impl Iterator<Item = (TransportKind, SocketAddr)> + '_ {
         self.listeners
@@ -1910,13 +1597,6 @@ impl RunningServer {
         let mut result = Ok(());
         for listener in self.listeners {
             if let Err(error) = listener.transport.close().await
-                && result.is_ok()
-            {
-                result = Err(error);
-            }
-        }
-        for (_, transport) in self.brokers {
-            if let Err(error) = transport.close().await
                 && result.is_ok()
             {
                 result = Err(error);
@@ -2129,59 +1809,6 @@ mod builder {
     }
 
     impl<BindState, TransportState> Builder<BindState, TransportState> {
-        /// Configure a broker-only service without requiring local bind IPs.
-        #[cfg(feature = "mqtt")]
-        pub fn set_mqtt_config(
-            mut self,
-            config: super::MqttConfig,
-        ) -> Builder<HasBind, HasTransport> {
-            self.inner.set_mqtt_config(config);
-            Builder {
-                inner: self.inner,
-                bind_state: PhantomData,
-                transport_state: PhantomData,
-            }
-        }
-
-        #[cfg(feature = "amqp")]
-        pub fn set_amqp_config(
-            mut self,
-            config: super::AmqpConfig,
-        ) -> Builder<HasBind, HasTransport> {
-            self.inner.set_amqp_config(config);
-            Builder {
-                inner: self.inner,
-                bind_state: PhantomData,
-                transport_state: PhantomData,
-            }
-        }
-
-        #[cfg(all(feature = "websocket", feature = "mqtt"))]
-        pub fn set_ws_mqtt_config(
-            mut self,
-            config: super::MqttConfig,
-        ) -> Builder<HasBind, HasTransport> {
-            self.inner.set_ws_mqtt_config(config);
-            Builder {
-                inner: self.inner,
-                bind_state: PhantomData,
-                transport_state: PhantomData,
-            }
-        }
-
-        #[cfg(all(feature = "websocket", feature = "amqp"))]
-        pub fn set_ws_amqp_config(
-            mut self,
-            config: super::AmqpConfig,
-        ) -> Builder<HasBind, HasTransport> {
-            self.inner.set_ws_amqp_config(config);
-            Builder {
-                inner: self.inner,
-                bind_state: PhantomData,
-                transport_state: PhantomData,
-            }
-        }
-
         pub fn set_tls(
             mut self,
             certificates: Vec<CertificateDer<'static>>,
@@ -2265,21 +1892,6 @@ mod builder {
             self.set_port(TransportKind::UdpLite, port)
         }
 
-        #[cfg(feature = "mqtt")]
-        pub fn set_mqtt_port(self, port: u16) -> Builder<BindState, HasTransport> {
-            self.set_port(TransportKind::Mqtt, port)
-        }
-
-        #[cfg(feature = "coap")]
-        pub fn set_coap_port(self, port: u16) -> Builder<BindState, HasTransport> {
-            self.set_port(TransportKind::Coap, port)
-        }
-
-        #[cfg(feature = "amqp")]
-        pub fn set_amqp_port(self, port: u16) -> Builder<BindState, HasTransport> {
-            self.set_port(TransportKind::Amqp, port)
-        }
-
         #[cfg(all(feature = "dccp", any(target_os = "linux", target_os = "android")))]
         pub fn set_dccp_port(self, port: u16) -> Builder<BindState, HasTransport> {
             self.set_port(TransportKind::Dccp, port)
@@ -2328,21 +1940,6 @@ mod builder {
         #[cfg(all(feature = "websocket", feature = "srt"))]
         pub fn set_ws_srt_port(self, port: u16) -> Builder<BindState, HasTransport> {
             self.set_port(TransportKind::WebSocketSrt, port)
-        }
-
-        #[cfg(all(feature = "websocket", feature = "mqtt"))]
-        pub fn set_ws_mqtt_port(self, port: u16) -> Builder<BindState, HasTransport> {
-            self.set_port(TransportKind::WebSocketMqtt, port)
-        }
-
-        #[cfg(all(feature = "websocket", feature = "coap"))]
-        pub fn set_ws_coap_port(self, port: u16) -> Builder<BindState, HasTransport> {
-            self.set_port(TransportKind::WebSocketCoap, port)
-        }
-
-        #[cfg(all(feature = "websocket", feature = "amqp"))]
-        pub fn set_ws_amqp_port(self, port: u16) -> Builder<BindState, HasTransport> {
-            self.set_port(TransportKind::WebSocketAmqp, port)
         }
 
         #[cfg(all(
@@ -2434,21 +2031,6 @@ mod builder {
             self.set_port(TransportKind::UdpLite, port)
         }
 
-        #[cfg(feature = "mqtt")]
-        pub fn set_mqtt_port(self, port: u16) -> Self {
-            self.set_port(TransportKind::Mqtt, port)
-        }
-
-        #[cfg(feature = "coap")]
-        pub fn set_coap_port(self, port: u16) -> Self {
-            self.set_port(TransportKind::Coap, port)
-        }
-
-        #[cfg(feature = "amqp")]
-        pub fn set_amqp_port(self, port: u16) -> Self {
-            self.set_port(TransportKind::Amqp, port)
-        }
-
         #[cfg(all(feature = "dccp", any(target_os = "linux", target_os = "android")))]
         pub fn set_dccp_port(self, port: u16) -> Self {
             self.set_port(TransportKind::Dccp, port)
@@ -2497,21 +2079,6 @@ mod builder {
         #[cfg(all(feature = "websocket", feature = "srt"))]
         pub fn set_ws_srt_port(self, port: u16) -> Self {
             self.set_port(TransportKind::WebSocketSrt, port)
-        }
-
-        #[cfg(all(feature = "websocket", feature = "mqtt"))]
-        pub fn set_ws_mqtt_port(self, port: u16) -> Self {
-            self.set_port(TransportKind::WebSocketMqtt, port)
-        }
-
-        #[cfg(all(feature = "websocket", feature = "coap"))]
-        pub fn set_ws_coap_port(self, port: u16) -> Self {
-            self.set_port(TransportKind::WebSocketCoap, port)
-        }
-
-        #[cfg(all(feature = "websocket", feature = "amqp"))]
-        pub fn set_ws_amqp_port(self, port: u16) -> Self {
-            self.set_port(TransportKind::WebSocketAmqp, port)
         }
 
         #[cfg(all(

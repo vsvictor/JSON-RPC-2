@@ -48,4 +48,5 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["util"], optional = true }
 
 [dev-dependencies]
+gateway-iot = { git = "https://github.com/vsvictor/JSON-RPC-2-GATEWAY.git", branch = "master", default-features = false, features = ["mqtt", "amqp"] }
 rcgen = "0.13"

@@ -38,17 +38,14 @@ pub mod transports {
     #[cfg(all(feature = "websocket", feature = "mqtt"))]
     pub mod mqtt {
         pub use crate::client::transports::mqtt::*;
-        pub use crate::server::transports::mqtt::*;
     }
     #[cfg(all(feature = "websocket", feature = "coap"))]
     pub mod coap {
         pub use crate::client::transports::coap::*;
-        pub use crate::server::transports::coap::*;
     }
     #[cfg(all(feature = "websocket", feature = "amqp"))]
     pub mod amqp {
         pub use crate::client::transports::amqp::*;
-        pub use crate::server::transports::amqp::*;
     }
 
     #[cfg(all(feature = "websocket", feature = "rtp"))]

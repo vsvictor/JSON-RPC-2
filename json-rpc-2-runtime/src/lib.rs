@@ -20,10 +20,6 @@ pub use json_rpc_2_transport::{
 pub type TransportLimits = ServerLimits;
 
 pub mod multi;
-#[cfg(feature = "amqp")]
-pub use multi::AmqpConfig;
-#[cfg(feature = "mqtt")]
-pub use multi::MqttConfig;
 
 pub use multi::{
     HasBind, HasTransport, HealthHandle, HealthSnapshot, MissingBind, MultiTransportServer,

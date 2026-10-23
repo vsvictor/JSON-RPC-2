@@ -186,6 +186,7 @@ bytes. Missing external executable skips only that test, not native SRT.
 
 The native datagram suite also verifies stream-ID selection/rejection before
 session lifecycle callbacks and limits on caller stream IDs. Shared public
-ports and UDP relay policy are gateway responsibilities; the relay and its
-encrypted raw/WS-SRT, peer-bound, idle-eviction and shutdown regressions live
-in `JsonRPCLoadBalanser/crates/json-rpc-gateway/src/ingress`.
+ports, protocol demultiplexing, and any UDP relay policy belong to the
+application gateway. Gateway-specific relay behavior and shared-listener
+regressions should be tested by the gateway implementation; this library tests
+only the reusable SRT transport and framing contracts.

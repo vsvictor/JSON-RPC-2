@@ -45,18 +45,12 @@ impl Drop for WebSocketSessionGuard {
     }
 }
 
-#[cfg(all(feature = "websocket", feature = "amqp"))]
-pub mod amqp;
-#[cfg(all(feature = "websocket", feature = "coap"))]
-pub mod coap;
 #[cfg(all(feature = "websocket", feature = "dccp"))]
 pub mod dccp;
 #[cfg(all(feature = "websocket", feature = "http1"))]
 pub mod http1;
 #[cfg(all(feature = "websocket", feature = "http3"))]
 pub mod http3;
-#[cfg(all(feature = "websocket", feature = "mqtt"))]
-pub mod mqtt;
 #[cfg(all(feature = "websocket", feature = "quic"))]
 pub mod quic;
 #[cfg(all(feature = "websocket", feature = "rtp"))]
@@ -129,181 +123,7 @@ impl Drop for AdaptedSession {
     }
 }
 
-#[cfg(any(feature = "mqtt", feature = "amqp"))]
-async fn handle_broker_message(
-    protocol: &dyn WebSocketProtocol,
-    message: WebSocketMessage,
-    transport: &str,
-    context: &TransportContext,
-) -> Option<WebSocketMessage> {
-    let request = message_bytes_for_log(&message);
-    let started = std::time::Instant::now();
-    let response = protocol.handle_message_with_context(message, context).await;
-    let response_bytes = response
-        .as_ref()
-        .map(json_rpc_2_core::websocket_message_bytes);
-    let transport = match transport {
-        "ws-mqtt" => "WebSocket/MQTT",
-        "ws-amqp" => "WebSocket/AMQP",
-        other => other,
-    };
-    json_rpc_2_transport::log_json_rpc(
-        transport,
-        "external",
-        &request,
-        response_bytes,
-        started.elapsed(),
-    );
-    response
-}
-
-#[cfg(any(feature = "mqtt", feature = "amqp"))]
-pub(super) struct BrokerWebSocketAdapter {
-    protocol: Arc<dyn WebSocketProtocol>,
-    kind: &'static str,
-    sessions: std::sync::Mutex<std::collections::HashMap<String, BrokerWebSocketSession>>,
-}
-
-#[cfg(any(feature = "mqtt", feature = "amqp"))]
-struct BrokerWebSocketSession {
-    context: TransportContext,
-    _guard: WebSocketSessionGuard,
-    relay: tokio::task::JoinHandle<()>,
-    closing: bool,
-}
-
-#[cfg(any(feature = "mqtt", feature = "amqp"))]
-impl Drop for BrokerWebSocketSession {
-    fn drop(&mut self) {
-        self.relay.abort();
-    }
-}
-
-#[cfg(any(feature = "mqtt", feature = "amqp"))]
-impl BrokerWebSocketAdapter {
-    pub fn new(protocol: Arc<dyn WebSocketProtocol>, kind: &'static str) -> Self {
-        Self {
-            protocol,
-            kind,
-            sessions: std::sync::Mutex::new(Default::default()),
-        }
-    }
-}
-
-#[cfg(any(feature = "mqtt", feature = "amqp"))]
-impl JsonRpcProtocol for BrokerWebSocketAdapter {
-    fn handle_message<'a>(&'a self, message: &'a [u8]) -> json_rpc_2_transport::ProtocolFuture<'a> {
-        Box::pin(async move {
-            let context = TransportSession::stateless(self.kind);
-            self.handle_message_with_context(message, &context).await
-        })
-    }
-
-    fn handle_message_with_context<'a>(
-        &'a self,
-        message: &'a [u8],
-        context: &'a TransportContext,
-    ) -> json_rpc_2_transport::ProtocolFuture<'a> {
-        let context = self
-            .sessions
-            .lock()
-            .unwrap()
-            .get(&context.connection_id)
-            .map(|session| session.context.clone())
-            .unwrap_or_else(|| TransportContext {
-                transport: self.kind.to_owned(),
-                push_sender: None,
-                ..context.clone()
-            });
-        Box::pin(async move {
-            let message = match json_rpc_2_core::decode_websocket_message(message) {
-                Ok(message) => message,
-                Err(error) => {
-                    json_rpc_2_transport::log_transport_error(
-                        self.kind,
-                        &context.connection_id,
-                        "decode frame",
-                        &error,
-                    );
-                    None
-                }
-            };
-            let Some(message) = message else {
-                if let Some(session) = self
-                    .sessions
-                    .lock()
-                    .unwrap()
-                    .get_mut(&context.connection_id)
-                {
-                    session.closing = true;
-                }
-                return None;
-            };
-            let response =
-                handle_broker_message(self.protocol.as_ref(), message, self.kind, &context).await?;
-            json_rpc_2_core::encode_websocket_message(&response)
-                .ok()
-                .map(Bytes::from)
-        })
-    }
-
-    fn session_opened(&self, context: &TransportContext) {
-        let mut translated = context.clone();
-        translated.transport = self.kind.to_owned();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let raw_sender = context.push_sender.clone();
-        translated.push_sender = raw_sender.as_ref().map(|_| sender);
-        let guard = WebSocketSessionGuard::new(self.protocol.clone(), translated.clone());
-        let relay = tokio::spawn(async move {
-            while let Some(payload) = receiver.recv().await {
-                let frame = match json_rpc_2_core::encode_websocket_message(&push_message(payload))
-                {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        json_rpc_2_transport::log_transport_error(
-                            "WebSocket",
-                            "session",
-                            "encode push",
-                            &error,
-                        );
-                        break;
-                    }
-                };
-                if raw_sender
-                    .as_ref()
-                    .is_none_or(|sender| sender.send(Bytes::from(frame)).is_err())
-                {
-                    break;
-                }
-            }
-        });
-        self.sessions.lock().unwrap().insert(
-            context.connection_id.clone(),
-            BrokerWebSocketSession {
-                context: translated,
-                _guard: guard,
-                relay,
-                closing: false,
-            },
-        );
-    }
-
-    fn session_closed(&self, context: &TransportContext) {
-        self.sessions.lock().unwrap().remove(&context.connection_id);
-    }
-
-    fn session_close_requested(&self, context: &TransportContext) -> bool {
-        self.sessions
-            .lock()
-            .unwrap()
-            .get(&context.connection_id)
-            .is_some_and(|session| session.closing)
-    }
-}
-
 #[cfg(any(
-    feature = "mqtt",
-    feature = "amqp",
     all(
         feature = "websocket",
         any(
@@ -465,8 +285,6 @@ impl JsonRpcProtocol for WebSocketJsonRpcAdapter {
 
 #[cfg(any(
     test,
-    feature = "mqtt",
-    feature = "amqp",
     feature = "sctp",
     feature = "srt",
     feature = "dccp",
@@ -545,7 +363,7 @@ pub trait WebSocketTransport: Send + 'static {
         shutdown: CancellationToken,
     ) -> WebSocketTransportFuture;
 
-    /// Run the transport in a background task that can be closed later.
+    /// Run the transport in a background docs that can be closed later.
     fn start(self, protocol: Arc<dyn WebSocketProtocol>) -> RunningTransport
     where
         Self: Sized,

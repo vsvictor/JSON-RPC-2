@@ -46,7 +46,6 @@ async fn runtime_binds_a_native_srt_listener_and_shuts_it_down() {
         .address(TransportKind::Srt, IpAddr::V4(Ipv4Addr::LOCALHOST))
         .unwrap();
     assert_ne!(address.port(), 0);
-    assert_eq!(running.broker_transports().count(), 0);
     let transport = SrtClientTransport::connect(address, "test-passphrase")
         .await
         .unwrap();

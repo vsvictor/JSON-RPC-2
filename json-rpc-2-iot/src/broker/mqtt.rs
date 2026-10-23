@@ -1,23 +1,28 @@
 use super::*;
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, Outgoing, QoS, SubscribeReasonCode};
 use std::collections::VecDeque;
+use tokio::sync::oneshot;
+
 struct Publish {
     destination: String,
     data: Vec<u8>,
-    done: oneshot::Sender<Result<(), TransportError>>,
+    done: oneshot::Sender<Result<(), json_rpc_2_transport::TransportError>>,
 }
+
 pub(super) struct Session {
     pub reply_to: String,
     commands: mpsc::Sender<Publish>,
     stop: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
+
 impl Drop for Session {
     fn drop(&mut self) {
         self.stop.cancel();
         self.task.abort();
     }
 }
+
 impl Session {
     pub async fn publish(
         &self,
@@ -27,15 +32,15 @@ impl Session {
         correlation_id: String,
         control: bool,
         metadata: Metadata,
-    ) -> Result<(), TransportError> {
-        let data = serde_json::to_vec(&BrokerEnvelope {
+    ) -> Result<(), json_rpc_2_transport::TransportError> {
+        let data = serde_json::to_vec(&Envelope {
             payload: payload.to_vec(),
             reply_to,
             correlation_id,
             control,
             metadata,
         })
-        .map_err(|_| TransportError::new("MQTT envelope encoding failed"))?;
+        .map_err(|_| json_rpc_2_transport::TransportError::new("MQTT envelope encoding failed"))?;
         let (done, wait) = oneshot::channel();
         self.commands
             .send(Publish {
@@ -44,10 +49,11 @@ impl Session {
                 done,
             })
             .await
-            .map_err(|_| closed())?;
-        wait.await.map_err(|_| closed())?
+            .map_err(|_| json_rpc_2_transport::closed())?;
+        wait.await.map_err(|_| json_rpc_2_transport::closed())?
     }
-    pub async fn close(&self) -> Result<(), TransportError> {
+
+    pub async fn close(&self) -> Result<(), json_rpc_2_transport::TransportError> {
         self.stop.cancel();
         while !self.task.is_finished() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -55,17 +61,19 @@ impl Session {
         Ok(())
     }
 }
+
 pub(super) async fn open(
     config: &MqttConfig,
-    server: bool,
-) -> Result<(super::Session, mpsc::Receiver<Message>), TransportError> {
+) -> Result<(super::Session, mpsc::Receiver<Message>), json_rpc_2_transport::TransportError> {
     if config.request_topic.is_empty() || config.request_topic.contains(['#', '+', '\0']) {
-        return Err(TransportError::new(
+        return Err(json_rpc_2_transport::TransportError::new(
             "MQTT RPC request topic must be a nonempty exact topic",
         ));
     }
     if !(config.broker_url.starts_with("mqtt://") || config.broker_url.starts_with("mqtts://")) {
-        return Err(TransportError::new("MQTT URL must use mqtt:// or mqtts://"));
+        return Err(json_rpc_2_transport::TransportError::new(
+            "MQTT URL must use mqtt:// or mqtts://",
+        ));
     }
     let id = uuid::Uuid::new_v4().simple().to_string();
     let separator = if config.broker_url.contains('?') {
@@ -74,11 +82,10 @@ pub(super) async fn open(
         '?'
     };
     let url = format!("{}{separator}client_id=rpc-{id}", config.broker_url);
-    let mut options =
-        MqttOptions::parse_url(url).map_err(|_| TransportError::new("invalid MQTT broker URL"))?;
+    let mut options = MqttOptions::parse_url(url)
+        .map_err(|_| json_rpc_2_transport::TransportError::new("invalid MQTT broker URL"))?;
     options.set_clean_session(true);
     options.set_keep_alive(Duration::from_secs(15));
-    // JSON byte arrays can expand each payload byte to four characters.
     let packet_limit = config
         .max_payload_bytes
         .saturating_mul(4)
@@ -86,23 +93,21 @@ pub(super) async fn open(
     options.set_max_packet_size(packet_limit, packet_limit);
     if let Some(ca) = &config.ca_certificate {
         if !config.broker_url.starts_with("mqtts://") {
-            return Err(TransportError::new("MQTT CA requires mqtts://"));
+            return Err(json_rpc_2_transport::TransportError::new(
+                "MQTT CA requires mqtts://",
+            ));
         }
         options.set_transport(rumqttc::Transport::tls(ca.clone(), None, None));
     }
     let (client, mut eventloop) = AsyncClient::new(options, 256);
     let reply_to = format!("json-rpc-2/replies/{id}");
-    let subscription = if server {
-        config.request_topic.clone()
-    } else {
-        reply_to.clone()
-    };
     let (incoming, receiver) = mpsc::channel(256);
     let (commands, mut command_rx) = mpsc::channel::<Publish>(64);
     let (ready, ready_rx) = oneshot::channel();
     let mut ready = Some(ready);
     let stop = CancellationToken::new();
     let cancel = stop.clone();
+    let subscription = reply_to.clone();
     let max_payload = config.max_payload_bytes;
     let task = tokio::spawn(async move {
         let mut waiting = VecDeque::new();
@@ -112,7 +117,9 @@ pub(super) async fn open(
                 _ = cancel.cancelled() => {
                     let _ = client.disconnect().await;
                     let _ = tokio::time::timeout(Duration::from_secs(1), async {
-                        while let Ok(event) = eventloop.poll().await { if matches!(event, Event::Outgoing(Outgoing::Disconnect)) { break; } }
+                        while let Ok(event) = eventloop.poll().await {
+                            if matches!(event, Event::Outgoing(Outgoing::Disconnect)) { break; }
+                        }
                     }).await;
                     break;
                 },
@@ -142,19 +149,21 @@ pub(super) async fn open(
                     },
                     Ok(Event::Incoming(Incoming::Publish(packet))) => {
                         if packet.retain { continue; }
-                        if let Ok(envelope) = serde_json::from_slice::<BrokerEnvelope>(&packet.payload) {
+                        if let Ok(envelope) = serde_json::from_slice::<Envelope>(&packet.payload) {
                             if envelope.payload.len() > max_payload || envelope.correlation_id.len() > 256 { continue; }
                             if envelope.reply_to.as_ref().is_some_and(|topic| !topic.starts_with("json-rpc-2/replies/") || topic.contains(['#', '+', '\0'])) { continue; }
                             if envelope.metadata.session.as_ref().is_some_and(|session| !session.push_to.starts_with("json-rpc-2/replies/") || session.push_to.contains(['#', '+', '\0'])) { continue; }
-                            let message = Message { payload: envelope.payload.into(), reply_to: envelope.reply_to, correlation_id: envelope.correlation_id, control: envelope.control, metadata: envelope.metadata,
-                                #[cfg(feature = "amqp")] ack: None };
-                            // A full dispatch queue must not block network polling / PUBACKs.
+                            let message = Message {
+                                payload: envelope.payload.into(),
+                                correlation_id: envelope.correlation_id,
+                                metadata: envelope.metadata,
+                                #[cfg(feature = "amqp")]
+                                ack: None,
+                            };
                             if incoming.try_send(message).is_err() { break; }
                         }
                     },
                     Ok(_) => {},
-                    // Fail pending exchanges on loss; explicit client reconnect and
-                    // server reopen recreate subscriptions without replaying RPCs.
                     Err(_) => break,
                 },
             }
@@ -166,10 +175,10 @@ pub(super) async fn open(
         stop,
         task,
     };
-    bounded(config.operation_timeout, async {
-        ready_rx
-            .await
-            .map_err(|_| TransportError::new("MQTT connect or subscribe failed"))
+    super::bounded(config.operation_timeout, async {
+        ready_rx.await.map_err(|_| {
+            json_rpc_2_transport::TransportError::new("MQTT connect or subscribe failed")
+        })
     })
     .await?;
     Ok((super::Session::Mqtt(session), receiver))

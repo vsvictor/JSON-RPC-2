@@ -16,6 +16,32 @@ use std::{
 const PUSH: &[u8] = b"\xff\0unsolicited\npush";
 
 #[cfg(feature = "mqtt")]
+fn mqtt_server_config(config: &json_rpc_2_iot::MqttConfig) -> gateway_iot::MqttConfig {
+    gateway_iot::MqttConfig {
+        broker_url: config.broker_url.clone(),
+        request_topic: config.request_topic.clone(),
+        operation_timeout: config.operation_timeout,
+        response_timeout: config.response_timeout,
+        max_payload_bytes: config.max_payload_bytes,
+        ca_certificate: config.ca_certificate.clone(),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "amqp")]
+fn amqp_server_config(config: &json_rpc_2_iot::AmqpConfig) -> gateway_iot::AmqpConfig {
+    gateway_iot::AmqpConfig {
+        broker_url: config.broker_url.clone(),
+        request_queue: config.request_queue.clone(),
+        operation_timeout: config.operation_timeout,
+        response_timeout: config.response_timeout,
+        max_payload_bytes: config.max_payload_bytes,
+        prefetch: config.prefetch,
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "mqtt")]
 #[derive(Default)]
 struct SaturatedSessions {
     sessions: Sessions,
@@ -59,10 +85,8 @@ impl JsonRpcProtocol for SaturatedSessions {
 #[tokio::test]
 #[ignore = "requires MQTT_BROKER_URL; verifies the real lease under saturated dispatch"]
 async fn mqtt_saturated_dispatch_keeps_close_heartbeat_and_expiration_live() {
-    use json_rpc_2_iot::{
-        MqttConfig, client::transports::mqtt::MqttClientTransport,
-        server::transports::mqtt::MqttTransport,
-    };
+    use gateway_iot::server::transports::mqtt::MqttTransport;
+    use json_rpc_2_iot::{MqttConfig, client::transports::mqtt::MqttClientTransport};
     use std::sync::atomic::Ordering;
     tokio::time::timeout(Duration::from_secs(65), async {
         let config = MqttConfig {
@@ -75,7 +99,7 @@ async fn mqtt_saturated_dispatch_keeps_close_heartbeat_and_expiration_live() {
         let protocol = Arc::new(SaturatedSessions::default());
         let mut runtime = json_rpc_2_transport::TransportRuntime::default();
         runtime.limits.max_concurrent_requests = 1;
-        let server = MqttTransport::connect(config.clone())
+        let server = MqttTransport::connect(mqtt_server_config(&config))
             .await
             .unwrap()
             .with_runtime(Arc::new(runtime))
@@ -410,10 +434,8 @@ async fn exercise_lease(
 #[tokio::test]
 #[ignore = "requires MQTT_BROKER_URL; exercises the real 45-second session lease"]
 async fn mqtt_abrupt_loss_expires_while_idle_client_heartbeats() {
-    use json_rpc_2_iot::{
-        MqttConfig, client::transports::mqtt::MqttClientTransport,
-        server::transports::mqtt::MqttTransport,
-    };
+    use gateway_iot::server::transports::mqtt::MqttTransport;
+    use json_rpc_2_iot::{MqttConfig, client::transports::mqtt::MqttClientTransport};
     tokio::time::timeout(Duration::from_secs(65), async {
         let config = MqttConfig {
             broker_url: std::env::var("MQTT_BROKER_URL").unwrap(),
@@ -423,7 +445,7 @@ async fn mqtt_abrupt_loss_expires_while_idle_client_heartbeats() {
             ..Default::default()
         };
         let protocol = Arc::new(Sessions::default());
-        let server = MqttTransport::connect(config.clone())
+        let server = MqttTransport::connect(mqtt_server_config(&config))
             .await
             .unwrap()
             .start(protocol.clone());
@@ -443,10 +465,8 @@ async fn mqtt_abrupt_loss_expires_while_idle_client_heartbeats() {
 #[tokio::test]
 #[ignore = "requires AMQP_BROKER_URL; exercises the real 45-second session lease"]
 async fn amqp_abrupt_loss_expires_while_idle_client_heartbeats() {
-    use json_rpc_2_iot::{
-        AmqpConfig, client::transports::amqp::AmqpClientTransport,
-        server::transports::amqp::AmqpTransport,
-    };
+    use gateway_iot::server::transports::amqp::AmqpTransport;
+    use json_rpc_2_iot::{AmqpConfig, client::transports::amqp::AmqpClientTransport};
     tokio::time::timeout(Duration::from_secs(65), async {
         let config = AmqpConfig {
             broker_url: std::env::var("AMQP_BROKER_URL").unwrap(),
@@ -456,7 +476,7 @@ async fn amqp_abrupt_loss_expires_while_idle_client_heartbeats() {
             ..Default::default()
         };
         let protocol = Arc::new(Sessions::default());
-        let server = AmqpTransport::connect(config.clone())
+        let server = AmqpTransport::connect(amqp_server_config(&config))
             .await
             .unwrap()
             .start(protocol.clone());
@@ -476,10 +496,8 @@ async fn amqp_abrupt_loss_expires_while_idle_client_heartbeats() {
 #[tokio::test]
 #[ignore = "requires MQTT_BROKER_URL pointing at an isolated real broker"]
 async fn mqtt_persistent_sessions_and_independent_push() {
-    use json_rpc_2_iot::{
-        MqttConfig, client::transports::mqtt::MqttClientTransport,
-        server::transports::mqtt::MqttTransport,
-    };
+    use gateway_iot::server::transports::mqtt::MqttTransport;
+    use json_rpc_2_iot::{MqttConfig, client::transports::mqtt::MqttClientTransport};
     tokio::time::timeout(Duration::from_secs(20), async {
         let config = MqttConfig {
             broker_url: std::env::var("MQTT_BROKER_URL").unwrap(),
@@ -489,7 +507,7 @@ async fn mqtt_persistent_sessions_and_independent_push() {
             ..Default::default()
         };
         let protocol = Arc::new(Sessions::default());
-        let server = MqttTransport::connect(config.clone())
+        let server = MqttTransport::connect(mqtt_server_config(&config))
             .await
             .unwrap()
             .start(protocol.clone());
@@ -509,10 +527,8 @@ async fn mqtt_persistent_sessions_and_independent_push() {
 #[tokio::test]
 #[ignore = "requires AMQP_BROKER_URL pointing at an isolated real broker"]
 async fn amqp_persistent_sessions_and_independent_push() {
-    use json_rpc_2_iot::{
-        AmqpConfig, client::transports::amqp::AmqpClientTransport,
-        server::transports::amqp::AmqpTransport,
-    };
+    use gateway_iot::server::transports::amqp::AmqpTransport;
+    use json_rpc_2_iot::{AmqpConfig, client::transports::amqp::AmqpClientTransport};
     tokio::time::timeout(Duration::from_secs(20), async {
         let config = AmqpConfig {
             broker_url: std::env::var("AMQP_BROKER_URL").unwrap(),
@@ -522,7 +538,7 @@ async fn amqp_persistent_sessions_and_independent_push() {
             ..Default::default()
         };
         let protocol = Arc::new(Sessions::default());
-        let server = AmqpTransport::connect(config.clone())
+        let server = AmqpTransport::connect(amqp_server_config(&config))
             .await
             .unwrap()
             .start(protocol.clone());

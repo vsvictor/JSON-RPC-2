@@ -27,12 +27,6 @@ use json_rpc_2_datagram::server::transports::dccp::DccpTransport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use json_rpc_2_datagram::server::transports::sctp::SctpTransport;
 use json_rpc_2_datagram::server::transports::udp::UdpTransport;
-#[cfg(feature = "amqp")]
-use json_rpc_2_iot::client::transports::amqp::AmqpClientTransport;
-#[cfg(feature = "coap")]
-use json_rpc_2_iot::client::transports::coap::CoapClientTransport;
-#[cfg(feature = "mqtt")]
-use json_rpc_2_iot::client::transports::mqtt::MqttClientTransport;
 use json_rpc_2_quic::client::transports::{http3::Http3ClientTransport, quic::QuicClientTransport};
 use json_rpc_2_quic::server::transports::{http3::Http3Transport, quic::QuicTransport};
 use json_rpc_2_runtime::{
@@ -46,14 +40,8 @@ use json_rpc_2_tcp::server::transports::{http1::Http1Transport, tcp::TcpTranspor
 use json_rpc_2_tcp::{
     client::transports::tls::TlsClientTransport, server::transports::tls::TlsTransport,
 };
-#[cfg(all(feature = "websocket", feature = "amqp"))]
-use json_rpc_2_websockets::client::transports::amqp::AmqpWebSocketClientTransport;
-#[cfg(all(feature = "websocket", feature = "coap"))]
-use json_rpc_2_websockets::client::transports::coap::CoapWebSocketClientTransport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use json_rpc_2_websockets::client::transports::dccp::DccpWebSocketClientTransport;
-#[cfg(all(feature = "websocket", feature = "mqtt"))]
-use json_rpc_2_websockets::client::transports::mqtt::MqttWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "rtp"))]
 use json_rpc_2_websockets::client::transports::rtp::RtpWebSocketClientTransport;
 #[cfg(all(feature = "websocket", feature = "rudp"))]
@@ -559,12 +547,6 @@ async fn connect(
         TransportKind::Rtp => boxed(RtpClientTransport::connect(to)),
         #[cfg(feature = "rudp")]
         TransportKind::Rudp => boxed(RudpClientTransport::connect(to)),
-        #[cfg(feature = "mqtt")]
-        TransportKind::Mqtt => boxed(MqttClientTransport::connect(to)),
-        #[cfg(feature = "coap")]
-        TransportKind::Coap => boxed(CoapClientTransport::connect(to)),
-        #[cfg(feature = "amqp")]
-        TransportKind::Amqp => boxed(AmqpClientTransport::connect(to)),
         #[cfg(feature = "srt")]
         TransportKind::Srt => boxed(SrtClientTransport::connect(to, "test-passphrase")),
         #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
@@ -590,12 +572,6 @@ async fn connect(
         TransportKind::WebSocketRtp => boxed(RtpWebSocketClientTransport::connect(to)),
         #[cfg(all(feature = "websocket", feature = "rudp"))]
         TransportKind::WebSocketRudp => boxed(RudpWebSocketClientTransport::connect(to)),
-        #[cfg(all(feature = "websocket", feature = "mqtt"))]
-        TransportKind::WebSocketMqtt => boxed(MqttWebSocketClientTransport::connect(to)),
-        #[cfg(all(feature = "websocket", feature = "coap"))]
-        TransportKind::WebSocketCoap => boxed(CoapWebSocketClientTransport::connect(to)),
-        #[cfg(all(feature = "websocket", feature = "amqp"))]
-        TransportKind::WebSocketAmqp => boxed(AmqpWebSocketClientTransport::connect(to)),
         #[cfg(all(feature = "websocket", feature = "srt"))]
         TransportKind::WebSocketSrt => {
             boxed(SrtWebSocketClientTransport::connect(to, "test-passphrase"))
@@ -648,6 +624,7 @@ async fn connect(
                 Http3WebSocketClientTransport::connect(endpoint, to, &server_name, "/ws").await
             })
         }
+        _ => panic!("IoT client transports are tested outside the server runtime"),
     };
     connect.await.unwrap()
 }
@@ -681,10 +658,6 @@ async fn serves_every_transport_on_every_bind_address() {
     let builder = builder.set_rtp_port(0);
     #[cfg(feature = "rudp")]
     let builder = builder.set_rudp_port(0).set_ws_rudp_port(0);
-    #[cfg(feature = "coap")]
-    let builder = builder.set_coap_port(0);
-    #[cfg(all(feature = "websocket", feature = "coap"))]
-    let builder = builder.set_ws_coap_port(0);
     #[cfg(feature = "srt")]
     let builder = builder
         .set_srt_config(SrtConfig {
@@ -725,7 +698,7 @@ async fn serves_every_transport_on_every_bind_address() {
         ADDRESS_FAMILIES.len()
             * TransportKind::ALL
                 .iter()
-                .filter(|kind| !kind.is_broker())
+                .filter(|kind| !kind.is_iot())
                 .filter(|kind| dccp || !matches!(kind.id(), "dccp" | "ws-dccp"))
                 .count()
     );
@@ -734,7 +707,7 @@ async fn serves_every_transport_on_every_bind_address() {
         for kind in TransportKind::ALL
             .iter()
             .copied()
-            .filter(|kind| !kind.is_broker())
+            .filter(|kind| !kind.is_iot())
             .filter(|kind| dccp || !matches!(kind.id(), "dccp" | "ws-dccp"))
         {
             let to = running.address(kind, ip).unwrap();

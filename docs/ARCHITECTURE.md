@@ -28,6 +28,7 @@ flowchart TD
     Facade --> QUIC["json-rpc-2-quic"]
     Facade --> IoT["json-rpc-2-iot"]
     Facade --> WS["json-rpc-2-websockets"]
+    GatewayIot["gateway-iot (gateway workspace)"]
 
     Client --> Core
     Client --> Transport
@@ -38,13 +39,11 @@ flowchart TD
     Runtime -.-> TCP
     Runtime -.-> Datagram
     Runtime -.-> QUIC
-    Runtime -.-> IoT
     Runtime -.-> WS
 
     WS --> TCP
     WS --> Datagram
     WS --> QUIC
-    WS --> IoT
     WS --> Core
     WS --> Transport
     TCP --> Core
@@ -55,6 +54,8 @@ flowchart TD
     QUIC --> Transport
     IoT --> Core
     IoT --> Transport
+    GatewayIot --> Core
+    GatewayIot --> Transport
 ```
 
 **Головний інваріант:** `json-rpc-2-core` містить wire/protocol типи;
@@ -220,9 +221,10 @@ classDiagram
 
 ## 5. Реалізації транспортів
 
-Кожен рядок представляє пару клієнтського та серверного об'єктів.
-Клієнтські реалізації виконують контракт `RpcClientTransport`,
-серверні non-WebSocket реалізації — контракт `Transport`.
+Кожен рядок представляє реалізацію клієнта й, де доступно в цьому workspace,
+серверний відповідник. Клієнти виконують контракт `RpcClientTransport`,
+серверні non-WebSocket реалізації — контракт `Transport`. Для IoT серверна
+реалізація вказує на адаптер у зовнішньому `gateway-iot`.
 
 | Крейт | Протокол / носій | Клієнтський об'єкт | Серверний об'єкт |
 |---|---|---|---|
@@ -237,13 +239,13 @@ classDiagram
 | `json-rpc-2-datagram` | SCTP | `SctpClientTransport` | `SctpTransport` |
 | `json-rpc-2-quic` | QUIC | `QuicClientTransport` | `QuicTransport` |
 | `json-rpc-2-quic` | HTTP/3 | `Http3ClientTransport` | `Http3Transport` |
-| `json-rpc-2-iot` | MQTT | `MqttClientTransport` | `MqttTransport` |
-| `json-rpc-2-iot` | CoAP | `CoapClientTransport` | `CoapTransport` |
-| `json-rpc-2-iot` | AMQP | `AmqpClientTransport` | `AmqpTransport` |
+| `json-rpc-2-iot` | MQTT | `MqttClientTransport` | `gateway-iot` |
+| `json-rpc-2-iot` | CoAP | `CoapClientTransport` | `gateway-iot` |
+| `json-rpc-2-iot` | AMQP | `AmqpClientTransport` | `gateway-iot` |
 
-Реальні файли розташовані у
-`<family-crate>/src/client/transports/<protocol>.rs` та
-`<family-crate>/src/server/transports/<protocol>.rs`.
+Клієнтські файли розташовані у
+`<family-crate>/src/client/transports/<protocol>.rs`; IoT server adapters
+розташовані у `gateway-iot/src/server/transports/`.
 Доступність залежить від Cargo features та підтримки ОС; зокрема,
 UDP-Lite обмежений Linux/Android.
 
@@ -273,7 +275,7 @@ UDP-Lite обмежений Linux/Android.
 flowchart LR
     Client["RpcClient + MqttClientTransport / AmqpClientTransport"]
     Broker["Зовнішній MQTT 3.1.1 / AMQP 0-9-1 broker"]
-    Service["MqttTransport / AmqpTransport"]
+    Service["gateway-iot MqttTransport / AmqpTransport"]
     Protocol["RpcServer / JsonRpcProtocol"]
     Client -->|request route| Broker
     Broker -->|subscription / consumer| Service
@@ -285,8 +287,9 @@ flowchart LR
 
 Клієнт і сервіс під'єднуються до брокера назовні. `MqttConfig` /
 `AmqpConfig` задають broker endpoint та application route; локальний
-`TcpListener` не є брокером. `MultiTransportServer` керує життєвим циклом
-цих підписок/consumer так само, як життєвим циклом socket-транспортів.
+`TcpListener` не є брокером. `GatewayIotIngress` у `gateway-iot` керує
+життєвим циклом цих підписок/consumer; `MultiTransportServer` не містить
+IoT server orchestration.
 
 ## 6. Окремий рівень WebSocket
 
@@ -342,8 +345,9 @@ classDiagram
 Ці чотири типи є aliases для `WebSocketClientTransport<C>`.
 Для UDP, RTP, RUDP, SRT, UDP-Lite, DCCP, SCTP, MQTT, CoAP та AMQP
 є окремі типи `<Carrier>WebSocketClientTransport`.
-Серверні типи для всіх 14 носіїв мають назви
-`<Carrier>WebSocketTransport` і реалізують `WebSocketTransport`.
+Серверні типи в цьому workspace мають назви `<Carrier>WebSocketTransport`
+і реалізують `WebSocketTransport`. IoT server variants реалізовані окремо у
+`gateway-iot`.
 
 Файли адаптерів: `json-rpc-2-websockets/src/{client,server}/transports/`.
 Публічний шлях `client::transports::websocket` або

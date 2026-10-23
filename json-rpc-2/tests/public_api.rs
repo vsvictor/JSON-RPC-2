@@ -109,17 +109,14 @@ fn family_types_keep_transport_contracts() {
     #[cfg(feature = "mqtt")]
     {
         client_contract::<json_rpc_2::client::transports::mqtt::MqttClientTransport>();
-        server_contract::<json_rpc_2::server::transports::mqtt::MqttTransport>();
     }
     #[cfg(feature = "coap")]
     {
         client_contract::<json_rpc_2::client::transports::coap::CoapClientTransport>();
-        server_contract::<json_rpc_2::server::transports::coap::CoapTransport>();
     }
     #[cfg(feature = "amqp")]
     {
         client_contract::<json_rpc_2::client::transports::amqp::AmqpClientTransport>();
-        server_contract::<json_rpc_2::server::transports::amqp::AmqpTransport>();
     }
     #[cfg(all(feature = "udplite", any(target_os = "linux", target_os = "android")))]
     {

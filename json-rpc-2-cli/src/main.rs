@@ -221,6 +221,13 @@ fn configured_server(
     tls: &Tls,
     rpc: Arc<dyn JsonRpcProtocol>,
 ) -> AppResult<MultiTransportServer> {
+    if let Some(kind) = options.transports.iter().find(|kind| kind.is_iot()) {
+        return Err(format!(
+            "{} server transport is provided by gateway-iot",
+            kind.name()
+        )
+        .into());
+    }
     let mut server = MultiTransportServer::new(rpc);
     server
         .set_bind(options.bind.iter().copied())
@@ -231,22 +238,7 @@ fn configured_server(
     if let Some(srt) = &options.srt {
         server.set_srt_config(srt.clone());
     }
-    if options.transports.contains(&Kind::Mqtt) {
-        server.set_mqtt_config(options.mqtt_config(false)?);
-    }
-    if options.transports.contains(&Kind::WebSocketMqtt) {
-        server.set_ws_mqtt_config(options.mqtt_config(true)?);
-    }
-    if options.transports.contains(&Kind::Amqp) {
-        server.set_amqp_config(options.amqp_config(false));
-    }
-    if options.transports.contains(&Kind::WebSocketAmqp) {
-        server.set_ws_amqp_config(options.amqp_config(true));
-    }
     for kind in options.transports.iter().copied() {
-        if kind.is_broker() {
-            continue;
-        }
         let port = options.port(kind);
         match kind {
             Kind::Tcp => {
@@ -271,11 +263,6 @@ fn configured_server(
             Kind::UdpLite => {
                 server.set_udplite_port(port);
             }
-            Kind::Mqtt => {}
-            Kind::Coap => {
-                server.set_coap_port(port);
-            }
-            Kind::Amqp => {}
             #[cfg(any(target_os = "linux", target_os = "android"))]
             Kind::Dccp => {
                 server.set_dccp_port(port);
@@ -312,11 +299,6 @@ fn configured_server(
             Kind::WebSocketUdpLite => {
                 server.set_ws_udplite_port(port);
             }
-            Kind::WebSocketMqtt => {}
-            Kind::WebSocketCoap => {
-                server.set_ws_coap_port(port);
-            }
-            Kind::WebSocketAmqp => {}
             #[cfg(any(target_os = "linux", target_os = "android"))]
             Kind::WebSocketDccp => {
                 server.set_ws_dccp_port(port);
@@ -337,6 +319,7 @@ fn configured_server(
             Kind::WebSocketHttp3 => {
                 server.set_ws_http3_port(port);
             }
+            _ => unreachable!("IoT transports are rejected before server configuration"),
         };
     }
     if let Some(key) = &tls.key {
@@ -351,25 +334,15 @@ async fn start_server(server: MultiTransportServer) -> AppResult<RunningServer> 
     for (kind, address) in running.listeners() {
         println!("  {:<19} listening on {address}", kind.name());
     }
-    for kind in running.broker_transports() {
-        println!(
-            "  {:<19} external broker service connected (no local listener)",
-            kind.name()
-        );
-    }
     Ok(running)
 }
 
 async fn close_all(running: RunningServer) -> AppResult<()> {
     println!("\n== Closing ==");
     let listeners: Vec<_> = running.listeners().collect();
-    let brokers: Vec<_> = running.broker_transports().collect();
     running.close().await?;
     for (kind, address) in listeners {
         println!("  {} {address}: closed", kind.name());
-    }
-    for kind in brokers {
-        println!("  {} external broker service: closed", kind.name());
     }
     Ok(())
 }
@@ -738,15 +711,6 @@ async fn demo(options: RuntimeOptions) -> AppResult<()> {
     let mut server = configured_server(&options, &tls, rpc_server()?)?;
     server.set_bind(ips.iter().copied());
     let listening = start_server(server).await?;
-    for kind in listening.broker_transports() {
-        let to = SocketAddr::from(([127, 0, 0, 1], 0));
-        tokio::time::timeout(
-            client_call_timeout(kind, &options),
-            call(kind, &tls, to, None, &options),
-        )
-        .await
-        .map_err(|_| format!("{} external broker service timed out", kind.name()))??;
-    }
     for &ip in &ips {
         println!(
             "\n== {SERVER_HOST} ({ip}), {}: client per transport ==",

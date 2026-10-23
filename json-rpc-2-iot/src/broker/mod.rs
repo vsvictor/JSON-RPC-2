@@ -1,28 +1,20 @@
-//! Broker-backed RPC. MQTT uses a JSON application envelope; AMQP uses native
-//! reply-to/correlation-id properties. Neither adapter implements a broker.
 use bytes::Bytes;
-pub use gateway_sessions::{BrokerEnvelope, MessageKind};
-use gateway_sessions::{
-    BrokerSessionPolicy, MessageMetadata as Metadata, SessionDispatch, SessionIdentity,
-    SessionRuntime,
-};
-use json_rpc_2_transport::{CancellationToken, TransportError, closed};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     future::Future,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "amqp")]
 mod amqp;
 #[cfg(feature = "mqtt")]
 mod mqtt;
 
-/// MQTT 3.1.1 broker settings. URLs support credentials and `mqtts://` TLS.
-/// Debug deliberately omits URLs, which may contain passwords.
 #[cfg(feature = "mqtt")]
 #[derive(Clone)]
 pub struct MqttConfig {
@@ -31,10 +23,10 @@ pub struct MqttConfig {
     pub operation_timeout: Duration,
     pub response_timeout: Duration,
     pub max_payload_bytes: usize,
-    pub sessions: BrokerSessionPolicy,
-    /// PEM CA bundle; None uses the system trust store.
+    pub heartbeat_interval: Duration,
     pub ca_certificate: Option<Vec<u8>>,
 }
+
 #[cfg(feature = "mqtt")]
 impl Default for MqttConfig {
     fn default() -> Self {
@@ -44,11 +36,12 @@ impl Default for MqttConfig {
             operation_timeout: Duration::from_secs(10),
             response_timeout: Duration::from_secs(30),
             max_payload_bytes: 1024 * 1024,
-            sessions: BrokerSessionPolicy::default(),
+            heartbeat_interval: Duration::from_secs(10),
             ca_certificate: None,
         }
     }
 }
+
 #[cfg(feature = "mqtt")]
 impl MqttConfig {
     pub fn for_address(address: SocketAddr) -> Self {
@@ -58,6 +51,7 @@ impl MqttConfig {
         }
     }
 }
+
 #[cfg(feature = "mqtt")]
 impl std::fmt::Debug for MqttConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -67,12 +61,11 @@ impl std::fmt::Debug for MqttConfig {
             .field("operation_timeout", &self.operation_timeout)
             .field("response_timeout", &self.response_timeout)
             .field("max_payload_bytes", &self.max_payload_bytes)
+            .field("heartbeat_interval", &self.heartbeat_interval)
             .finish_non_exhaustive()
     }
 }
 
-/// AMQP 0-9-1 broker settings. `amqps://` validates TLS using system roots;
-/// URL credentials and virtual hosts are handled by lapin.
 #[cfg(feature = "amqp")]
 #[derive(Clone)]
 pub struct AmqpConfig {
@@ -81,9 +74,10 @@ pub struct AmqpConfig {
     pub operation_timeout: Duration,
     pub response_timeout: Duration,
     pub max_payload_bytes: usize,
-    pub sessions: BrokerSessionPolicy,
+    pub heartbeat_interval: Duration,
     pub prefetch: u16,
 }
+
 #[cfg(feature = "amqp")]
 impl Default for AmqpConfig {
     fn default() -> Self {
@@ -93,20 +87,22 @@ impl Default for AmqpConfig {
             operation_timeout: Duration::from_secs(10),
             response_timeout: Duration::from_secs(30),
             max_payload_bytes: 1024 * 1024,
-            sessions: BrokerSessionPolicy::default(),
+            heartbeat_interval: Duration::from_secs(10),
             prefetch: 64,
         }
     }
 }
+
 #[cfg(feature = "amqp")]
 impl AmqpConfig {
     pub fn for_address(address: SocketAddr) -> Self {
         Self {
-            broker_url: format!("amqp://guest:guest@{address}/%2f"),
+            broker_url: format!("amqp://{address}/%2f"),
             ..Self::default()
         }
     }
 }
+
 #[cfg(feature = "amqp")]
 impl std::fmt::Debug for AmqpConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -116,106 +112,157 @@ impl std::fmt::Debug for AmqpConfig {
             .field("operation_timeout", &self.operation_timeout)
             .field("response_timeout", &self.response_timeout)
             .field("max_payload_bytes", &self.max_payload_bytes)
+            .field("heartbeat_interval", &self.heartbeat_interval)
             .field("prefetch", &self.prefetch)
             .finish()
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MessageKind {
+    #[default]
+    Rpc,
+    Open,
+    Close,
+    Heartbeat,
+    Push,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct SessionIdentity {
+    id: String,
+    push_to: String,
+}
+
+impl SessionIdentity {
+    fn new(push_to: String) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            push_to,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+struct Metadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session: Option<SessionIdentity>,
+    #[serde(default)]
+    kind: MessageKind,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct Envelope {
+    payload: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reply_to: Option<String>,
+    correlation_id: String,
+    #[serde(default)]
+    control: bool,
+    #[serde(default)]
+    metadata: Metadata,
+}
+
 #[derive(Clone)]
-pub(crate) enum Config {
+pub enum Config {
     #[cfg(feature = "mqtt")]
     Mqtt(MqttConfig),
     #[cfg(feature = "amqp")]
     Amqp(AmqpConfig),
 }
-impl Config {
-    fn sessions(&self) -> BrokerSessionPolicy {
-        match self {
-            #[cfg(feature = "mqtt")]
-            Self::Mqtt(config) => config.sessions,
-            #[cfg(feature = "amqp")]
-            Self::Amqp(config) => config.sessions,
-        }
-    }
 
+impl Config {
     fn operation_timeout(&self) -> Duration {
         match self {
             #[cfg(feature = "mqtt")]
-            Self::Mqtt(c) => c.operation_timeout,
+            Self::Mqtt(config) => config.operation_timeout,
             #[cfg(feature = "amqp")]
-            Self::Amqp(c) => c.operation_timeout,
+            Self::Amqp(config) => config.operation_timeout,
         }
     }
+
     fn response_timeout(&self) -> Duration {
         match self {
             #[cfg(feature = "mqtt")]
-            Self::Mqtt(c) => c.response_timeout,
+            Self::Mqtt(config) => config.response_timeout,
             #[cfg(feature = "amqp")]
-            Self::Amqp(c) => c.response_timeout,
+            Self::Amqp(config) => config.response_timeout,
         }
     }
+
     fn max_payload(&self) -> usize {
         match self {
             #[cfg(feature = "mqtt")]
-            Self::Mqtt(c) => c.max_payload_bytes,
+            Self::Mqtt(config) => config.max_payload_bytes,
             #[cfg(feature = "amqp")]
-            Self::Amqp(c) => c.max_payload_bytes,
+            Self::Amqp(config) => config.max_payload_bytes,
         }
     }
+
+    fn heartbeat_interval(&self) -> Duration {
+        match self {
+            #[cfg(feature = "mqtt")]
+            Self::Mqtt(config) => config.heartbeat_interval,
+            #[cfg(feature = "amqp")]
+            Self::Amqp(config) => config.heartbeat_interval,
+        }
+    }
+
     fn request_address(&self) -> &str {
         match self {
             #[cfg(feature = "mqtt")]
-            Self::Mqtt(c) => &c.request_topic,
+            Self::Mqtt(config) => &config.request_topic,
             #[cfg(feature = "amqp")]
-            Self::Amqp(c) => &c.request_queue,
+            Self::Amqp(config) => &config.request_queue,
         }
     }
+
     async fn open(
         &self,
-        server: bool,
-    ) -> Result<(Session, mpsc::Receiver<Message>), TransportError> {
-        self.sessions()
-            .validate()
-            .map_err(|error| TransportError::new(error.to_string()))?;
+    ) -> Result<(Session, mpsc::Receiver<Message>), json_rpc_2_transport::TransportError> {
         if self.operation_timeout().is_zero()
             || self.response_timeout().is_zero()
             || self.max_payload() == 0
+            || self.heartbeat_interval().is_zero()
         {
-            return Err(TransportError::new("broker limits must be nonzero"));
+            return Err(json_rpc_2_transport::TransportError::new(
+                "broker client limits must be nonzero",
+            ));
         }
         match self {
             #[cfg(feature = "mqtt")]
-            Self::Mqtt(c) => mqtt::open(c, server).await,
+            Self::Mqtt(config) => mqtt::open(config).await,
             #[cfg(feature = "amqp")]
-            Self::Amqp(c) => amqp::open(c, server).await,
+            Self::Amqp(config) => amqp::open(config).await,
         }
     }
 }
 
 pub(crate) async fn bounded<T>(
     duration: Duration,
-    future: impl Future<Output = Result<T, TransportError>>,
-) -> Result<T, TransportError> {
+    future: impl Future<Output = Result<T, json_rpc_2_transport::TransportError>>,
+) -> Result<T, json_rpc_2_transport::TransportError> {
     tokio::time::timeout(duration, future)
         .await
-        .map_err(|_| TransportError::new("broker operation timed out"))?
+        .map_err(|_| json_rpc_2_transport::TransportError::new("broker operation timed out"))?
 }
 
 pub(crate) struct Message {
-    pub payload: Bytes,
-    pub reply_to: Option<String>,
-    pub correlation_id: String,
-    pub control: bool,
-    pub metadata: Metadata,
+    payload: Bytes,
+    correlation_id: String,
+    metadata: Metadata,
     #[cfg(feature = "amqp")]
-    pub ack: Option<lapin::Acker>,
+    ack: Option<lapin::Acker>,
 }
+
 enum Session {
     #[cfg(feature = "mqtt")]
     Mqtt(mqtt::Session),
     #[cfg(feature = "amqp")]
-    Amqp(Box<amqp::Session>),
+    Amqp(amqp::Session),
 }
+
 impl Session {
     async fn publish(
         &self,
@@ -225,76 +272,85 @@ impl Session {
         correlation_id: String,
         control: bool,
         metadata: Metadata,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), json_rpc_2_transport::TransportError> {
         match self {
             #[cfg(feature = "mqtt")]
-            Self::Mqtt(s) => {
-                s.publish(
-                    destination,
-                    payload,
-                    reply_to,
-                    correlation_id,
-                    control,
-                    metadata,
-                )
-                .await
+            Self::Mqtt(session) => {
+                session
+                    .publish(
+                        destination,
+                        payload,
+                        reply_to,
+                        correlation_id,
+                        control,
+                        metadata,
+                    )
+                    .await
             }
             #[cfg(feature = "amqp")]
-            Self::Amqp(s) => {
-                s.publish(
-                    destination,
-                    payload,
-                    reply_to,
-                    correlation_id,
-                    control,
-                    metadata,
-                )
-                .await
+            Self::Amqp(session) => {
+                session
+                    .publish(
+                        destination,
+                        payload,
+                        reply_to,
+                        correlation_id,
+                        control,
+                        metadata,
+                    )
+                    .await
             }
         }
     }
+
     fn reply_to(&self) -> &str {
         match self {
             #[cfg(feature = "mqtt")]
-            Self::Mqtt(s) => &s.reply_to,
+            Self::Mqtt(session) => &session.reply_to,
             #[cfg(feature = "amqp")]
-            Self::Amqp(s) => &s.reply_to,
+            Self::Amqp(session) => &session.reply_to,
         }
     }
-    async fn close(&self) -> Result<(), TransportError> {
+
+    async fn close(&self) -> Result<(), json_rpc_2_transport::TransportError> {
         match self {
             #[cfg(feature = "mqtt")]
-            Self::Mqtt(s) => s.close().await,
+            Self::Mqtt(session) => session.close().await,
             #[cfg(feature = "amqp")]
-            Self::Amqp(s) => s.close().await,
+            Self::Amqp(session) => session.close().await,
         }
     }
 }
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Bytes>>>>;
+
 struct PendingGuard {
     pending: Pending,
     id: String,
 }
+
 impl Drop for PendingGuard {
     fn drop(&mut self) {
         self.pending.lock().unwrap().remove(&self.id);
     }
 }
+
 struct Connection {
     session: Arc<Session>,
     identity: SessionIdentity,
     reader: tokio::task::JoinHandle<()>,
     heartbeat: tokio::task::JoinHandle<()>,
 }
-pub(crate) struct Client {
+
+pub struct Client {
     config: Config,
     connection: RwLock<Option<Connection>>,
     pending: Pending,
     push: tokio::sync::Mutex<mpsc::Receiver<Bytes>>,
 }
+
 impl Client {
-    pub async fn connect(config: Config) -> Result<Self, TransportError> {
+    pub async fn connect(config: Config) -> Result<Self, json_rpc_2_transport::TransportError> {
         let (_, push) = mpsc::channel(256);
         let this = Self {
             config,
@@ -305,7 +361,9 @@ impl Client {
         this.reconnect().await?;
         Ok(this)
     }
-    pub async fn reconnect(&self) -> Result<(), TransportError> {
+
+    pub async fn reconnect(&self) -> Result<(), json_rpc_2_transport::TransportError> {
+        use json_rpc_2_transport::CancellationToken;
         let mut connection = self.connection.write().await;
         if let Some(old) = connection.take() {
             old.heartbeat.abort();
@@ -315,10 +373,9 @@ impl Client {
             let _ = bounded(self.config.operation_timeout(), old.session.close()).await;
         }
         self.pending.lock().unwrap().clear();
-        let (session, mut incoming) = self.config.open(false).await?;
+        let (session, mut incoming) = self.config.open().await?;
         let session = Arc::new(session);
-        let identity = SessionIdentity::generate(session.reply_to().to_owned())
-            .map_err(|error| TransportError::new(error.to_string()))?;
+        let identity = SessionIdentity::new(session.reply_to().to_owned());
         bounded(
             self.config.operation_timeout(),
             session.publish(
@@ -354,7 +411,6 @@ impl Client {
                     }
                     break;
                 } else if message.metadata.kind == MessageKind::Push {
-                    // Never let a slow push consumer block RPC replies and acknowledgements.
                     if push.try_send(message.payload).is_err() {
                         break;
                     }
@@ -378,7 +434,7 @@ impl Client {
         let heartbeat_identity = identity.clone();
         let config = self.config.clone();
         let heartbeat = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(config.sessions().heartbeat_interval);
+            let mut interval = tokio::time::interval(config.heartbeat_interval());
             interval.tick().await;
             loop {
                 tokio::select! {
@@ -414,11 +470,12 @@ impl Client {
         });
         Ok(())
     }
+
     async fn lifecycle(
         &self,
         connection: &Connection,
         kind: MessageKind,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), json_rpc_2_transport::TransportError> {
         bounded(
             self.config.operation_timeout(),
             connection.session.publish(
@@ -435,19 +492,26 @@ impl Client {
         )
         .await
     }
-    /// Receive an unsolicited push independently of pending RPC exchanges.
-    /// A full 256-message queue closes the reader; reconnect starts a fresh queue.
-    pub async fn receive_push(&self) -> Result<Bytes, TransportError> {
-        self.push.lock().await.recv().await.ok_or_else(closed)
+
+    pub async fn receive_push(&self) -> Result<Bytes, json_rpc_2_transport::TransportError> {
+        self.push
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or_else(json_rpc_2_transport::closed)
     }
+
     pub async fn send(
         &self,
         payload: Bytes,
         expects_response: bool,
         control: bool,
-    ) -> Result<Option<Bytes>, TransportError> {
+    ) -> Result<Option<Bytes>, json_rpc_2_transport::TransportError> {
         if payload.len() > self.config.max_payload() {
-            return Err(TransportError::new("broker payload limit exceeded"));
+            return Err(json_rpc_2_transport::TransportError::new(
+                "broker payload limit exceeded",
+            ));
         }
         let id = uuid::Uuid::new_v4().to_string();
         let (sender, receiver) = oneshot::channel();
@@ -460,9 +524,11 @@ impl Client {
         }
         let (session, reply_to, metadata) = {
             let connection = self.connection.read().await;
-            let connection = connection.as_ref().ok_or_else(closed)?;
+            let connection = connection
+                .as_ref()
+                .ok_or_else(json_rpc_2_transport::closed)?;
             if connection.reader.is_finished() {
-                return Err(TransportError::new(
+                return Err(json_rpc_2_transport::TransportError::new(
                     "broker connection lost; reconnect required",
                 ));
             }
@@ -495,11 +561,12 @@ impl Client {
             receiver
                 .await
                 .map(Some)
-                .map_err(|_| TransportError::new("broker connection lost"))
+                .map_err(|_| json_rpc_2_transport::TransportError::new("broker connection lost"))
         })
         .await
     }
-    pub async fn close(&self) -> Result<(), TransportError> {
+
+    pub async fn close(&self) -> Result<(), json_rpc_2_transport::TransportError> {
         let mut connection = self.connection.write().await;
         if let Some(old) = connection.take() {
             old.heartbeat.abort();
@@ -512,343 +579,47 @@ impl Client {
         Ok(())
     }
 }
+
 impl Drop for Client {
     fn drop(&mut self) {
-        if let Some(c) = self.connection.get_mut().take() {
-            c.heartbeat.abort();
-            c.reader.abort();
+        if let Some(connection) = self.connection.get_mut().take() {
+            connection.heartbeat.abort();
+            connection.reader.abort();
         }
     }
 }
 
-struct IngressSession {
-    guard: json_rpc_2_transport::ProtocolSessionGuard,
-    push: tokio::task::JoinHandle<()>,
-}
-impl Drop for IngressSession {
-    fn drop(&mut self) {
-        self.push.abort();
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn ingress_session(
-    config: &Config,
-    protocol: Arc<dyn json_rpc_2_transport::JsonRpcProtocol>,
-    session: Arc<Session>,
-    identity: &SessionIdentity,
-) -> IngressSession {
-    let transport = match config {
-        #[cfg(feature = "mqtt")]
-        Config::Mqtt(_) => "mqtt",
-        #[cfg(feature = "amqp")]
-        Config::Amqp(_) => "amqp",
-    };
-    let mut ingress = json_rpc_2_transport::TransportSession::new(transport, true);
-    let guard = json_rpc_2_transport::ProtocolSessionGuard::new(protocol, ingress.context);
-    let push_to = identity.push_to.clone();
-    let destination = push_to.clone();
-    let config = config.clone();
-    let push = tokio::spawn(async move {
-        while let Some(payload) = ingress.push_receiver.recv().await {
-            if payload.len() > config.max_payload() {
-                break;
-            }
-            if bounded(
-                config.operation_timeout(),
-                session.publish(
-                    &destination,
-                    payload,
-                    None,
-                    String::new(),
-                    false,
-                    Metadata {
-                        session: None,
-                        kind: MessageKind::Push,
-                    },
-                ),
-            )
-            .await
-            .is_err()
-            {
-                break;
-            }
-        }
-    });
-    IngressSession { guard, push }
-}
-
-pub(crate) struct Prepared {
-    session: Session,
-    incoming: mpsc::Receiver<Message>,
-}
-pub(crate) async fn prepare(config: &Config) -> std::io::Result<Prepared> {
-    let (session, incoming) = config.open(true).await.map_err(std::io::Error::other)?;
-    Ok(Prepared { session, incoming })
-}
-
-pub(crate) async fn serve(
-    config: Config,
-    mut prepared: Option<Prepared>,
-    protocol: Arc<dyn json_rpc_2_transport::JsonRpcProtocol>,
-    shutdown: CancellationToken,
-    runtime: Arc<json_rpc_2_transport::TransportRuntime>,
-) -> std::io::Result<()> {
-    let mut workers = tokio::task::JoinSet::<Option<String>>::new();
-    let mut connected_once = prepared.is_some();
-    loop {
-        let opened = if let Some(prepared) = prepared.take() {
-            Ok((prepared.session, prepared.incoming))
-        } else {
-            tokio::select! { _ = shutdown.cancelled() => break, result = config.open(true) => result }
+    #[test]
+    fn envelope_preserves_gateway_session_wire_format() {
+        let envelope = Envelope {
+            payload: vec![0, 255],
+            reply_to: Some("json-rpc-2/replies/client".into()),
+            correlation_id: "request-1".into(),
+            control: false,
+            metadata: Metadata {
+                session: Some(SessionIdentity {
+                    id: "550e8400-e29b-41d4-a716-446655440000".into(),
+                    push_to: "json-rpc-2/replies/client".into(),
+                }),
+                kind: MessageKind::Open,
+            },
         };
-        let (session, mut incoming) = match opened {
-            Ok(connection) => {
-                connected_once = true;
-                connection
-            }
-            Err(error) if !connected_once => return Err(std::io::Error::other(error)),
-            Err(error) => {
-                json_rpc_2_transport::log_transport_error(
-                    "broker",
-                    "external",
-                    "reconnect",
-                    &error,
-                );
-                tokio::select! { _ = shutdown.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(1)) => {} }
-                continue;
-            }
-        };
-        let session = Arc::new(session);
-        let policy = config.sessions();
-        let mut sessions =
-            SessionRuntime::<IngressSession>::new(policy, runtime.limits.max_connections.max(1))
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let mut leases = tokio::time::interval(policy.heartbeat_interval);
-        let worker_limit = runtime
-            .limits
-            .max_connections
-            .min(runtime.limits.max_concurrent_requests)
-            .max(1);
-        loop {
-            let message = tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = leases.tick() => {
-                    drop(sessions.expire(Instant::now()));
-                    drop(sessions.remove_failed(Instant::now(), |session| session.push.is_finished()));
-                    continue;
-                },
-                result = workers.join_next(), if !workers.is_empty() => {
-                    if let Some(Ok(Some(id))) = result {
-                        drop(sessions.close(&id, Instant::now()));
-                    }
-                    continue;
-                },
-                message = incoming.recv() => match message { Some(m) => m, None => break },
-            };
-            let mut context = None;
-            let active_request = match sessions.dispatch(
-                &message.metadata,
-                Instant::now(),
-                |identity: &SessionIdentity| {
-                    ingress_session(&config, protocol.clone(), session.clone(), identity)
-                },
-            ) {
-                SessionDispatch::Rpc { identity, request } => {
-                    if let Some(identity) = identity {
-                        if let Some(ingress) = sessions.get(&identity) {
-                            context = Some(ingress.guard.context().clone());
-                        } else {
-                            #[cfg(feature = "amqp")]
-                            if let Some(ack) = message.ack {
-                                let _ = tokio::time::timeout(
-                                    config.operation_timeout(),
-                                    ack.ack(lapin::options::BasicAckOptions::default()),
-                                )
-                                .await;
-                            }
-                            continue;
-                        }
-                    }
-                    request
-                }
-                SessionDispatch::Lifecycle => {
-                    #[cfg(feature = "amqp")]
-                    if let Some(ack) = message.ack {
-                        let _ = tokio::time::timeout(
-                            config.operation_timeout(),
-                            ack.ack(lapin::options::BasicAckOptions::default()),
-                        )
-                        .await;
-                    }
-                    continue;
-                }
-            };
-            if workers.len() >= worker_limit {
-                // Do not queue application work or stop reading the shared
-                // route: lifecycle traffic and lease sweeps must remain live.
-                #[cfg(feature = "amqp")]
-                if let Some(ack) = message.ack {
-                    let _ = tokio::time::timeout(
-                        config.operation_timeout(),
-                        ack.nack(lapin::options::BasicNackOptions {
-                            requeue: false,
-                            multiple: false,
-                        }),
-                    )
-                    .await;
-                }
-                json_rpc_2_transport::log_transport_error(
-                    "broker",
-                    "external",
-                    "admission",
-                    &TransportError::new(
-                        "broker request concurrency limit exceeded; request not dispatched",
-                    ),
-                );
-                continue;
-            }
-            // An admitted long-running handler retains its session until it
-            // completes or reaches the configured response timeout.
-            let activity = active_request;
-            let session = session.clone();
-            let protocol = protocol.clone();
-            let config = config.clone();
-            workers.spawn(async move {
-                let _activity = activity;
-                let mut close_session = false;
-                let result = bounded(config.response_timeout(), async {
-                    let transport = match &config {
-                        #[cfg(feature = "mqtt")]
-                        Config::Mqtt(_) => "MQTT",
-                        #[cfg(feature = "amqp")]
-                        Config::Amqp(_) => "AMQP",
-                    };
-                    let started = Instant::now();
-                    let response = if message.control {
-                        json_rpc_2_transport::log_control(transport, "external", "ping", "pong");
-                        Some(Bytes::from_static(b"pong"))
-                    } else {
-                        let context = context.unwrap_or_else(|| {
-                            json_rpc_2_transport::TransportSession::stateless(
-                                transport.to_ascii_lowercase(),
-                            )
-                        });
-                        let response = protocol
-                            .handle_owned_message(message.payload.clone(), &context)
-                            .await
-                            .map(json_rpc_2_transport::TransportMessage::into_bytes);
-                        close_session = protocol.session_close_requested(&context);
-                        if close_session && let Some(identity) = &message.metadata.session {
-                            bounded(
-                                config.operation_timeout(),
-                                session.publish(
-                                    &identity.push_to,
-                                    Bytes::new(),
-                                    None,
-                                    String::new(),
-                                    false,
-                                    Metadata {
-                                        session: None,
-                                        kind: MessageKind::Close,
-                                    },
-                                ),
-                            )
-                            .await?;
-                        }
-                        json_rpc_2_transport::log_json_rpc(
-                            transport,
-                            "external",
-                            &message.payload,
-                            response.as_deref(),
-                            started.elapsed(),
-                        );
-                        response
-                    };
-                    if let (Some(response), Some(reply_to)) = (response, message.reply_to) {
-                        if response.len() > config.max_payload() {
-                            return Err(TransportError::new(
-                                "broker response payload limit exceeded",
-                            ));
-                        }
-                        bounded(
-                            config.operation_timeout(),
-                            session.publish(
-                                &reply_to,
-                                response,
-                                None,
-                                message.correlation_id,
-                                message.control,
-                                Metadata::default(),
-                            ),
-                        )
-                        .await?;
-                    }
-                    Ok(())
-                })
-                .await;
-                #[cfg(feature = "amqp")]
-                if let Some(ack) = message.ack {
-                    let acknowledged = bounded(config.operation_timeout(), async {
-                        if result.is_ok() {
-                            ack.ack(lapin::options::BasicAckOptions::default()).await
-                        } else {
-                            ack.nack(lapin::options::BasicNackOptions {
-                                requeue: false,
-                                multiple: false,
-                            })
-                            .await
-                        }
-                        .map_err(|_| TransportError::new("AMQP acknowledgement failed"))
-                    })
-                    .await;
-                    if let Err(error) = acknowledged {
-                        json_rpc_2_transport::log_transport_error(
-                            "AMQP",
-                            "external",
-                            "acknowledge",
-                            &error,
-                        );
-                    }
-                }
-                if let Err(error) = result {
-                    json_rpc_2_transport::log_transport_error(
-                        "broker", "external", "handle", &error,
-                    );
-                }
-                if close_session {
-                    message.metadata.session.map(|identity| identity.id)
-                } else {
-                    None
-                }
-            });
-        }
-        if shutdown.is_cancelled() {
-            let drained = tokio::time::timeout(runtime.shutdown.close_timeout, async {
-                while workers.join_next().await.is_some() {}
-            })
-            .await;
-            if drained.is_err() {
-                workers.abort_all();
-                while workers.join_next().await.is_some() {}
-            }
-        } else {
-            workers.abort_all();
-            while workers.join_next().await.is_some() {}
-        }
-        drop(sessions);
-        let _ = bounded(
-            config
-                .operation_timeout()
-                .min(runtime.shutdown.close_timeout),
-            session.close(),
-        )
-        .await;
-        if shutdown.is_cancelled() {
-            break;
-        }
-        tokio::select! { _ = shutdown.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(1)) => {} }
+
+        let value = serde_json::to_value(envelope).unwrap();
+        assert_eq!(value["payload"], serde_json::json!([0, 255]));
+        assert_eq!(value["correlation_id"], "request-1");
+        assert_eq!(value["metadata"]["kind"], "open");
+        assert_eq!(
+            value["metadata"]["session"]["id"],
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+        assert_eq!(
+            value["metadata"]["session"]["push_to"],
+            "json-rpc-2/replies/client"
+        );
     }
-    workers.abort_all();
-    while workers.join_next().await.is_some() {}
-    Ok(())
 }

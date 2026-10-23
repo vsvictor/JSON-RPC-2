@@ -4,10 +4,7 @@
     feature = "udp",
     feature = "rtp",
     feature = "rudp",
-    feature = "srt",
-    feature = "mqtt",
-    feature = "coap",
-    feature = "amqp"
+    feature = "srt"
 ))]
 
 use std::{
@@ -36,30 +33,6 @@ struct ServerContext {
     notification_count: Arc<AtomicUsize>,
     slow_call_count: Arc<AtomicUsize>,
     address: SocketAddr,
-}
-
-#[cfg(feature = "mqtt")]
-fn mqtt_config(kind: TransportKind) -> json_rpc_2::MqttConfig {
-    json_rpc_2::MqttConfig {
-        broker_url: std::env::var("JSON_RPC_TEST_MQTT_URL")
-            .expect("set JSON_RPC_TEST_MQTT_URL to an external MQTT broker"),
-        request_topic: format!(
-            "json-rpc-2/contract/{}/{}/requests",
-            std::process::id(),
-            kind.id()
-        ),
-        ..Default::default()
-    }
-}
-
-#[cfg(feature = "amqp")]
-fn amqp_config(kind: TransportKind) -> json_rpc_2::AmqpConfig {
-    json_rpc_2::AmqpConfig {
-        broker_url: std::env::var("JSON_RPC_TEST_AMQP_URL")
-            .expect("set JSON_RPC_TEST_AMQP_URL to an external AMQP broker"),
-        request_queue: format!("json-rpc-2.contract.{}.{}", std::process::id(), kind.id()),
-        ..Default::default()
-    }
 }
 
 async fn start_server(kind: TransportKind) -> ServerContext {
@@ -104,28 +77,12 @@ async fn start_server(kind: TransportKind) -> ServerContext {
         .set_srt_config(json_rpc_2::SrtConfig {
             passphrase: TEST_PASSPHRASE.to_owned(),
         });
-    let builder = match kind {
-        #[cfg(feature = "mqtt")]
-        TransportKind::Mqtt => builder.set_mqtt_config(mqtt_config(kind)),
-        #[cfg(feature = "amqp")]
-        TransportKind::Amqp => builder.set_amqp_config(amqp_config(kind)),
-        #[cfg(all(feature = "mqtt", feature = "websocket"))]
-        TransportKind::WebSocketMqtt => builder.set_ws_mqtt_config(mqtt_config(kind)),
-        #[cfg(all(feature = "amqp", feature = "websocket"))]
-        TransportKind::WebSocketAmqp => builder.set_ws_amqp_config(amqp_config(kind)),
-        _ => builder,
-    };
     let running = builder.start().await.expect("start transport server");
-    let address = if let Some((_, address)) = running.listeners().next() {
-        address
-    } else {
-        assert_eq!(
-            running.broker_transports().count(),
-            1,
-            "started broker consumer"
-        );
-        SocketAddr::new(LOCALHOST, 0)
-    };
+    let address = running
+        .listeners()
+        .next()
+        .expect("started local listener")
+        .1;
 
     ServerContext {
         running,
@@ -234,7 +191,7 @@ async fn exercise_transport<T, Start, StartFuture, Connect, ConnectFuture>(
     let timed = tokio::time::timeout(OUTER_TIMEOUT, timed_call)
         .await
         .expect("client timeout was not bounded by the outer timeout")
-        .expect("timeout request task panicked");
+        .expect("timeout request docs panicked");
     assert!(
         matches!(timed, Err(RpcClientError::Timeout { ref method, .. }) if method == "slow"),
         "expected a client-side request timeout, got {timed:?}"
@@ -282,7 +239,7 @@ async fn exercise_transport<T, Start, StartFuture, Connect, ConnectFuture>(
         assert!(
             pending
                 .await
-                .expect_err("cancelled task should stop")
+                .expect_err("cancelled docs should stop")
                 .is_cancelled()
         );
 
@@ -382,26 +339,7 @@ async fn rudp_transport_contract() {
     .await;
 }
 
-#[cfg(feature = "coap")]
-#[tokio::test]
-async fn coap_transport_contract() {
-    use json_rpc_2::client::transports::coap::CoapClientTransport;
-
-    exercise_transport(
-        TransportKind::Coap,
-        start_server,
-        |address| async move { CoapClientTransport::connect(address).await.unwrap() },
-        true,
-    )
-    .await;
-}
-
-#[cfg(any(
-    feature = "mqtt",
-    feature = "amqp",
-    feature = "srt",
-    feature = "websocket"
-))]
+#[cfg(any(feature = "srt", feature = "websocket"))]
 macro_rules! contract_case {
     (#[ignore = $reason:literal] $name:ident, $kind:ident, $connect:expr, $cancel:expr) => {
         #[tokio::test]
@@ -417,36 +355,6 @@ macro_rules! contract_case {
         }
     };
 }
-
-#[cfg(feature = "mqtt")]
-contract_case!(
-    #[ignore = "requires an external MQTT broker; run broker integration tests"]
-    mqtt_transport_contract,
-    Mqtt,
-    |_address| async move {
-        json_rpc_2::client::transports::mqtt::MqttClientTransport::connect_with_config(mqtt_config(
-            TransportKind::Mqtt,
-        ))
-        .await
-        .unwrap()
-    },
-    false
-);
-
-#[cfg(feature = "amqp")]
-contract_case!(
-    #[ignore = "requires an external AMQP broker; run broker integration tests"]
-    amqp_transport_contract,
-    Amqp,
-    |_address| async move {
-        json_rpc_2::client::transports::amqp::AmqpClientTransport::connect_with_config(amqp_config(
-            TransportKind::Amqp,
-        ))
-        .await
-        .unwrap()
-    },
-    false
-);
 
 #[cfg(feature = "srt")]
 contract_case!(
@@ -530,49 +438,6 @@ contract_case!(
     true
 );
 
-#[cfg(all(feature = "websocket", feature = "coap"))]
-contract_case!(
-    ws_coap_transport_contract,
-    WebSocketCoap,
-    |address| async move {
-        json_rpc_2::client::transports::websocket::coap::CoapWebSocketClientTransport::connect(
-            address,
-        )
-        .await
-        .unwrap()
-    },
-    true
-);
-
-#[cfg(all(feature = "websocket", feature = "mqtt"))]
-contract_case!(
-    #[ignore = "requires an external MQTT broker; run broker integration tests"]
-    ws_mqtt_transport_contract,
-    WebSocketMqtt,
-    |_address| async move {
-        json_rpc_2::client::transports::websocket::mqtt::MqttWebSocketClientTransport::connect_with_config(
-            mqtt_config(TransportKind::WebSocketMqtt),
-        )
-        .await
-        .unwrap()
-    },
-    false
-);
-
-#[cfg(all(feature = "websocket", feature = "amqp"))]
-contract_case!(
-    #[ignore = "requires an external AMQP broker; run broker integration tests"]
-    ws_amqp_transport_contract,
-    WebSocketAmqp,
-    |_address| async move {
-        json_rpc_2::client::transports::websocket::amqp::AmqpWebSocketClientTransport::connect_with_config(
-            amqp_config(TransportKind::WebSocketAmqp),
-        )
-        .await
-        .unwrap()
-    },
-    false
-);
 
 #[cfg(all(feature = "websocket", feature = "srt"))]
 contract_case!(

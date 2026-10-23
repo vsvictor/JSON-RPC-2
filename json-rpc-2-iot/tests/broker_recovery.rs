@@ -62,10 +62,8 @@ async fn recovery(
 #[tokio::test]
 #[ignore = "disruptive: requires real compose brokers, MQTT_BROKER_URL, and Docker"]
 async fn mqtt_subscription_recovers_after_broker_restart() {
-    use json_rpc_2_iot::{
-        MqttConfig, client::transports::mqtt::MqttClientTransport,
-        server::transports::mqtt::MqttTransport,
-    };
+    use gateway_iot::server::transports::mqtt::MqttTransport;
+    use json_rpc_2_iot::{MqttConfig, client::transports::mqtt::MqttClientTransport};
     let config = MqttConfig {
         broker_url: std::env::var("MQTT_BROKER_URL").expect("MQTT_BROKER_URL"),
         request_topic: format!("json-rpc-2/restart/{}", uuid::Uuid::new_v4()),
@@ -73,7 +71,16 @@ async fn mqtt_subscription_recovers_after_broker_restart() {
         response_timeout: Duration::from_secs(2),
         ..Default::default()
     };
-    let server = MqttTransport::new(config.clone()).start(Arc::new(Echo));
+    let server_config = gateway_iot::MqttConfig {
+        broker_url: config.broker_url.clone(),
+        request_topic: config.request_topic.clone(),
+        operation_timeout: config.operation_timeout,
+        response_timeout: config.response_timeout,
+        max_payload_bytes: config.max_payload_bytes,
+        ca_certificate: config.ca_certificate.clone(),
+        ..Default::default()
+    };
+    let server = MqttTransport::new(server_config).start(Arc::new(Echo));
     let client = Arc::new(
         MqttClientTransport::connect_with_config(config)
             .await
@@ -86,10 +93,8 @@ async fn mqtt_subscription_recovers_after_broker_restart() {
 #[tokio::test]
 #[ignore = "disruptive: requires real compose brokers, AMQP_BROKER_URL, and Docker"]
 async fn amqp_consumer_recovers_after_broker_restart() {
-    use json_rpc_2_iot::{
-        AmqpConfig, client::transports::amqp::AmqpClientTransport,
-        server::transports::amqp::AmqpTransport,
-    };
+    use gateway_iot::server::transports::amqp::AmqpTransport;
+    use json_rpc_2_iot::{AmqpConfig, client::transports::amqp::AmqpClientTransport};
     let config = AmqpConfig {
         broker_url: std::env::var("AMQP_BROKER_URL").expect("AMQP_BROKER_URL"),
         request_queue: format!("json-rpc-2.restart.{}", uuid::Uuid::new_v4()),
@@ -97,7 +102,16 @@ async fn amqp_consumer_recovers_after_broker_restart() {
         response_timeout: Duration::from_secs(2),
         ..Default::default()
     };
-    let server = AmqpTransport::new(config.clone()).start(Arc::new(Echo));
+    let server_config = gateway_iot::AmqpConfig {
+        broker_url: config.broker_url.clone(),
+        request_queue: config.request_queue.clone(),
+        operation_timeout: config.operation_timeout,
+        response_timeout: config.response_timeout,
+        max_payload_bytes: config.max_payload_bytes,
+        prefetch: config.prefetch,
+        ..Default::default()
+    };
+    let server = AmqpTransport::new(server_config).start(Arc::new(Echo));
     let client = Arc::new(
         AmqpClientTransport::connect_with_config(config)
             .await

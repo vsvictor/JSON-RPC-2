@@ -105,8 +105,8 @@ Status notation:
 | `websocket-over-udplite` | done | WebSocket-style framing now also runs over the UDP-Lite carrier through dedicated client/server transports, shared WebSocket crate wiring, config/env support, Linux/Android socket support, tests, and FFI entry points. |
 | `dccp-transports` | done | Raw DCCP and WebSocket-over-DCCP transports were added with platform-aware socket support, builder/config/env wiring, tests, docs, tools, and FFI exposure on Linux/Android. |
 | `sctp-transports` | done | Raw SCTP and WebSocket-over-SCTP transports were added with platform-aware socket support, builder/config/env wiring, tests, docs, tools, and FFI exposure on Linux/Android. |
-| `iot-transports` | done | `json-rpc-2-iot` owns MQTT 3.1.1 and AMQP 0-9-1 external-broker clients/services plus the limited CoAP adapter, with runtime/config/FFI wiring. RPC services subscribe/consume instead of pretending to be brokers. |
-| `websocket-over-iot` | done | WebSocket-style framing now also runs over the MQTT, CoAP, and AMQP carriers through dedicated client/server transports, shared WebSocket crate wiring, config/env support, tests, and FFI entry points. |
+| `iot-transports` | done | `json-rpc-2-iot` owns MQTT 3.1.1 and AMQP 0-9-1 clients and the CoAP client adapter; all IoT server adapters and ingress lifecycle are owned by the separate `gateway-iot` crate. |
+| `websocket-over-iot` | done | WebSocket-style IoT clients remain in the JSON-RPC-2 workspace; WebSocket-style server adapters and broker ingress lifecycle live in `gateway-iot`. |
 | `ffi-config-redesign` | done | FFI now exposes clearer transport-specific connection options and explicit typed connect entry points. |
 | `docs-contracts-ffi` | done | FFI and transport semantics are documented alongside the richer runtime contracts and feature model. |
 
@@ -160,11 +160,11 @@ Status notation:
   - standard libsrt listener and JSON-RPC message dispatch
 - `json-rpc-2-datagram/src/server/transports/udplite.rs`
   - UDP-Lite server transport with deduplication and cached-response replay
-- `json-rpc-2-iot/src/server/transports/mqtt.rs`
+- `gateway-iot/src/server/transports/mqtt.rs`
   - MQTT broker subscriber with request/reply topic routing
-- `json-rpc-2-iot/src/server/transports/coap.rs`
+- `gateway-iot/src/server/transports/coap.rs`
   - CoAP server transport with request/response correlation over UDP
-- `json-rpc-2-iot/src/server/transports/amqp.rs`
+- `gateway-iot/src/server/transports/amqp.rs`
   - AMQP broker consumer with queue routing and response correlation
 - `json-rpc-2-websockets/src/client/transports/udp.rs`
   - WebSocket-style framing over reliable UDP on the client
@@ -178,14 +178,16 @@ Status notation:
   - WebSocket-style framing over standard libsrt messages on the server
 - `json-rpc-2-websockets/src/server/transports/udplite.rs`
   - WebSocket-style framing over UDP-Lite on the server
-- `json-rpc-2-websockets/src/server/transports/mqtt.rs`
+- `gateway-iot/src/server/transports/mqtt_websocket.rs`
   - WebSocket-style framing over MQTT on the server
-- `json-rpc-2-websockets/src/server/transports/coap.rs`
+- `gateway-iot/src/server/transports/coap_websocket.rs`
   - WebSocket-style framing over CoAP on the server
-- `json-rpc-2-websockets/src/server/transports/amqp.rs`
+- `gateway-iot/src/server/transports/amqp_websocket.rs`
   - WebSocket-style framing over AMQP on the server
+- `gateway-iot/src/server/mod.rs`
+  - gateway-owned IoT ingress lifecycle and broker adapter startup/shutdown
 - `json-rpc-2-iot/src/lib.rs`
-  - dedicated transport-family crate owning MQTT/CoAP/AMQP client and server adapters
+  - client-only IoT transport family
 - `json-rpc-2-websockets/src/client/transports/rudp.rs`
   - public WebSocket-over-RUDP client wrapper
 - `json-rpc-2-websockets/src/client/transports/srt.rs`

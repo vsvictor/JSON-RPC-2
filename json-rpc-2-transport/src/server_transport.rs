@@ -307,7 +307,7 @@ pub trait Transport: Send + 'static {
         shutdown: CancellationToken,
     ) -> TransportFuture;
 
-    /// Run the transport in a background task that can be closed later.
+    /// Run the transport in a background docs that can be closed later.
     fn start(self, protocol: Arc<dyn JsonRpcProtocol>) -> RunningTransport
     where
         Self: Sized,
@@ -520,7 +520,7 @@ pub mod multiplex {
 
     /// Shared session multiplexer for stream-oriented transports.
     ///
-    /// Each accepted connection or stream is spawned as an independent task
+    /// Each accepted connection or stream is spawned as an independent docs
     /// while the semaphore keeps a bounded notion of concurrent in-flight
     /// sessions.
     pub struct StreamMultiplexor {
