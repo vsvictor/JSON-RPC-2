@@ -12,6 +12,8 @@ const WS_FRAME_HEADER_LEN: usize = 10;
 pub enum WebSocketMessage {
     Text(String),
     Binary(Bytes),
+    Ping(Bytes),
+    Pong(Bytes),
 }
 
 /// Future returned while a WebSocket data message is handled.
@@ -29,6 +31,8 @@ pub enum WebSocketFrameKind {
     Text = 1,
     Binary = 2,
     Close = 3,
+    Ping = 4,
+    Pong = 5,
 }
 
 impl WebSocketFrameKind {
@@ -37,6 +41,8 @@ impl WebSocketFrameKind {
             1 => Some(Self::Text),
             2 => Some(Self::Binary),
             3 => Some(Self::Close),
+            4 => Some(Self::Ping),
+            5 => Some(Self::Pong),
             _ => None,
         }
     }
@@ -70,14 +76,31 @@ impl WebSocketFrame {
             payload: Vec::new(),
         }
     }
+
+    pub fn ping(payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            kind: WebSocketFrameKind::Ping,
+            payload: payload.into(),
+        }
+    }
+
+    pub fn pong(payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            kind: WebSocketFrameKind::Pong,
+            payload: payload.into(),
+        }
+    }
 }
 
 pub fn encode_websocket_frame(frame: &WebSocketFrame) -> Result<Vec<u8>, String> {
+    validate_control_frame(frame)?;
+    let payload_len = u32::try_from(frame.payload.len())
+        .map_err(|_| "WebSocket frame payload exceeds the protocol limit".to_owned())?;
     let mut bytes = Vec::with_capacity(WS_FRAME_HEADER_LEN + frame.payload.len());
     bytes.extend_from_slice(&WS_FRAME_MAGIC);
     bytes.push(WS_FRAME_VERSION);
     bytes.push(frame.kind as u8);
-    bytes.extend_from_slice(&(frame.payload.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&payload_len.to_be_bytes());
     bytes.extend_from_slice(&frame.payload);
     Ok(bytes)
 }
@@ -102,16 +125,32 @@ pub fn decode_websocket_frame(packet: &[u8]) -> Result<WebSocketFrame, String> {
             "WebSocket payload length mismatch (header {payload_len}, actual {remaining})"
         ));
     }
-    Ok(WebSocketFrame {
+    let frame = WebSocketFrame {
         kind,
         payload: packet[WS_FRAME_HEADER_LEN..].to_vec(),
-    })
+    };
+    validate_control_frame(&frame)?;
+    Ok(frame)
+}
+
+fn validate_control_frame(frame: &WebSocketFrame) -> Result<(), String> {
+    if matches!(
+        frame.kind,
+        WebSocketFrameKind::Close | WebSocketFrameKind::Ping | WebSocketFrameKind::Pong
+    ) && (frame.payload.len() > 125
+        || (frame.kind == WebSocketFrameKind::Close && frame.payload.len() == 1))
+    {
+        return Err("invalid WebSocket control frame payload length".to_owned());
+    }
+    Ok(())
 }
 
 pub fn encode_websocket_message(message: &WebSocketMessage) -> Result<Vec<u8>, String> {
     let frame = match message {
         WebSocketMessage::Text(text) => WebSocketFrame::text(text.as_bytes()),
         WebSocketMessage::Binary(bytes) => WebSocketFrame::binary(bytes.to_vec()),
+        WebSocketMessage::Ping(bytes) => WebSocketFrame::ping(bytes.to_vec()),
+        WebSocketMessage::Pong(bytes) => WebSocketFrame::pong(bytes.to_vec()),
     };
     encode_websocket_frame(&frame)
 }
@@ -130,6 +169,8 @@ pub fn decode_websocket_message(packet: &[u8]) -> Result<Option<WebSocketMessage
             Ok(Some(WebSocketMessage::Binary(Bytes::from(frame.payload))))
         }
         WebSocketFrameKind::Close => Ok(None),
+        WebSocketFrameKind::Ping => Ok(Some(WebSocketMessage::Ping(Bytes::from(frame.payload)))),
+        WebSocketFrameKind::Pong => Ok(Some(WebSocketMessage::Pong(Bytes::from(frame.payload)))),
     }
 }
 
@@ -137,6 +178,7 @@ pub fn websocket_message_bytes(message: &WebSocketMessage) -> &[u8] {
     match message {
         WebSocketMessage::Text(text) => text.as_bytes(),
         WebSocketMessage::Binary(bytes) => bytes.as_ref(),
+        WebSocketMessage::Ping(bytes) | WebSocketMessage::Pong(bytes) => bytes.as_ref(),
     }
 }
 
@@ -149,4 +191,39 @@ pub fn encode_websocket_udp_frame(frame: &WebSocketUdpFrame) -> Result<Vec<u8>, 
 
 pub fn decode_websocket_udp_frame(packet: &[u8]) -> Result<WebSocketUdpFrame, String> {
     decode_websocket_frame(packet)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ping_and_pong_control_frames_round_trip() {
+        let payload = b"alive".to_vec();
+        for frame in [
+            WebSocketFrame::ping(payload.clone()),
+            WebSocketFrame::pong(payload.clone()),
+        ] {
+            let encoded = encode_websocket_frame(&frame).unwrap();
+            assert_eq!(decode_websocket_frame(&encoded).unwrap(), frame);
+            assert_eq!(
+                websocket_message_bytes(&decode_websocket_message(&encoded).unwrap().unwrap()),
+                payload
+            );
+        }
+    }
+
+    #[test]
+    fn control_frames_obey_websocket_payload_limits() {
+        for frame in [
+            WebSocketFrame::ping(vec![0; 126]),
+            WebSocketFrame::pong(vec![0; 126]),
+            WebSocketFrame {
+                kind: WebSocketFrameKind::Close,
+                payload: vec![0],
+            },
+        ] {
+            assert!(encode_websocket_frame(&frame).is_err());
+        }
+    }
 }

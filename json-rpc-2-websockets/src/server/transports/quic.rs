@@ -314,6 +314,8 @@ async fn run_websocket_session(
                     );
                     Message::Binary(data)
                 }
+                WebSocketMessage::Ping(data) => Message::Ping(data),
+                WebSocketMessage::Pong(data) => Message::Pong(data),
             };
             if let Err(error) = websocket.send(response).await {
                 log_transport_error("WebSocket/QUIC", peer, "response", &error);

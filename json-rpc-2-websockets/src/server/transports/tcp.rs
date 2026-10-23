@@ -263,6 +263,8 @@ async fn run_websocket_session<S>(
                     );
                     Message::Binary(data)
                 }
+                WebSocketMessage::Ping(data) => Message::Ping(data),
+                WebSocketMessage::Pong(data) => Message::Pong(data),
             };
             if websocket.send(response).await.is_err() {
                 return;

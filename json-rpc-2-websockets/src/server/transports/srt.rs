@@ -56,7 +56,9 @@ mod tests {
             Box::pin(async move {
                 let payload = match &message {
                     WebSocketMessage::Text(text) => text.as_bytes(),
-                    WebSocketMessage::Binary(bytes) => bytes.as_ref(),
+                    WebSocketMessage::Binary(bytes)
+                    | WebSocketMessage::Ping(bytes)
+                    | WebSocketMessage::Pong(bytes) => bytes.as_ref(),
                 };
                 json_rpc_2_transport::expects_response(payload).then_some(message)
             })

@@ -181,6 +181,9 @@ mod srt {
             let payload = match &message {
                 WebSocketMessage::Text(text) => Bytes::copy_from_slice(text.as_bytes()),
                 WebSocketMessage::Binary(payload) => payload.clone(),
+                WebSocketMessage::Ping(_) | WebSocketMessage::Pong(_) => {
+                    panic!("control frames are not pushed as business messages")
+                }
             };
             context.push_sender.as_ref().unwrap().send(payload).unwrap();
             pushed.push((bounded(client.recv_push()).await.unwrap(), message));
@@ -336,6 +339,16 @@ mod sctp {
         let server = listener.start(protocol);
         let mut stream = connect(address).await;
         let context = events.opened("ws-sctp").await;
+        let ping = WebSocketMessage::Ping(Bytes::from_static(b"sctp-ping"));
+        send(&mut stream, &encode_websocket_message(&ping).unwrap()).await;
+        assert_eq!(
+            receive(&mut stream).await,
+            WebSocketMessage::Pong(Bytes::from_static(b"sctp-ping"))
+        );
+        assert!(
+            events.handled.try_recv().is_err(),
+            "Ping is not a business message"
+        );
         for message in opaque_messages() {
             send(&mut stream, &encode_websocket_message(&message).unwrap()).await;
             assert_eq!(receive(&mut stream).await, message);
@@ -346,6 +359,9 @@ mod sctp {
             let payload = match &message {
                 WebSocketMessage::Text(text) => Bytes::copy_from_slice(text.as_bytes()),
                 WebSocketMessage::Binary(payload) => payload.clone(),
+                WebSocketMessage::Ping(_) | WebSocketMessage::Pong(_) => {
+                    panic!("control frames are not pushed as business messages")
+                }
             };
             context.push_sender.as_ref().unwrap().send(payload).unwrap();
             pushed.push((receive(&mut stream).await, message));

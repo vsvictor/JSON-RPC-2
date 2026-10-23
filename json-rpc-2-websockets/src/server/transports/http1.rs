@@ -458,6 +458,8 @@ async fn websocket_session(
                 );
                 Message::Binary(data)
             }
+            Some(WebSocketMessage::Ping(data)) => Message::Ping(data),
+            Some(WebSocketMessage::Pong(data)) => Message::Pong(data),
             None => {
                 log_json_rpc(
                     "WebSocket/HTTP/1.1",

@@ -18,6 +18,12 @@ impl MqttWebSocketClientTransport {
         match json_rpc_2_core::decode_websocket_message(&frame).map_err(TransportError::new)? {
             Some(json_rpc_2_core::WebSocketMessage::Binary(payload)) => Ok(payload),
             Some(json_rpc_2_core::WebSocketMessage::Text(payload)) => Ok(payload.into()),
+            Some(
+                json_rpc_2_core::WebSocketMessage::Ping(_)
+                | json_rpc_2_core::WebSocketMessage::Pong(_),
+            ) => Err(TransportError::new(
+                "unexpected WebSocket control frame in push",
+            )),
             None => Err(TransportError::new(
                 "WebSocket/MQTT peer closed the session",
             )),

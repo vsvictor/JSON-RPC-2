@@ -141,7 +141,9 @@ fn message_bytes_for_log(message: &WebSocketMessage) -> Bytes {
     // Retain binary payloads without copying while the protocol owns the message.
     match message {
         WebSocketMessage::Text(text) => Bytes::copy_from_slice(text.as_bytes()),
-        WebSocketMessage::Binary(bytes) => bytes.clone(),
+        WebSocketMessage::Binary(bytes)
+        | WebSocketMessage::Ping(bytes)
+        | WebSocketMessage::Pong(bytes) => bytes.clone(),
     }
 }
 
@@ -161,6 +163,11 @@ async fn handle_stateless_message(
     message: WebSocketMessage,
     kind: &str,
 ) -> Option<WebSocketMessage> {
+    let message = match message {
+        WebSocketMessage::Ping(payload) => return Some(WebSocketMessage::Pong(payload)),
+        WebSocketMessage::Pong(_) => return None,
+        message @ (WebSocketMessage::Text(_) | WebSocketMessage::Binary(_)) => message,
+    };
     let context = TransportSession::stateless(kind);
     protocol
         .handle_message_with_context(message, &context)
@@ -171,12 +178,53 @@ async fn handle_stateless_message(
 impl JsonRpcProtocol for WebSocketJsonRpcAdapter {
     fn handle_message<'a>(&'a self, message: &'a [u8]) -> json_rpc_2_transport::ProtocolFuture<'a> {
         Box::pin(async move {
-            let inbound = json_rpc_2_core::decode_websocket_message(message).ok()??;
+            let inbound = match json_rpc_2_core::decode_websocket_message(message) {
+                Ok(Some(inbound)) => inbound,
+                Ok(None) => return None,
+                Err(error) => {
+                    json_rpc_2_transport::log_transport_error(
+                        self.kind,
+                        "stateless",
+                        "decode frame",
+                        &error,
+                    );
+                    return None;
+                }
+            };
+            let inbound = match inbound {
+                WebSocketMessage::Ping(payload) => {
+                    return match json_rpc_2_core::encode_websocket_message(&WebSocketMessage::Pong(
+                        payload,
+                    )) {
+                        Ok(frame) => Some(Bytes::from(frame)),
+                        Err(error) => {
+                            json_rpc_2_transport::log_transport_error(
+                                self.kind,
+                                "stateless",
+                                "encode pong",
+                                &error,
+                            );
+                            None
+                        }
+                    };
+                }
+                WebSocketMessage::Pong(_) => return None,
+                message @ (WebSocketMessage::Text(_) | WebSocketMessage::Binary(_)) => message,
+            };
             let outbound =
                 handle_stateless_message(self.protocol.as_ref(), inbound, self.kind).await?;
-            json_rpc_2_core::encode_websocket_message(&outbound)
-                .ok()
-                .map(Bytes::from)
+            match json_rpc_2_core::encode_websocket_message(&outbound) {
+                Ok(frame) => Some(Bytes::from(frame)),
+                Err(error) => {
+                    json_rpc_2_transport::log_transport_error(
+                        self.kind,
+                        "stateless",
+                        "encode response",
+                        &error,
+                    );
+                    None
+                }
+            }
         })
     }
 
@@ -199,6 +247,15 @@ impl JsonRpcProtocol for WebSocketJsonRpcAdapter {
         Box::pin(async move {
             let inbound = match json_rpc_2_core::decode_websocket_message(message) {
                 Ok(Some(inbound)) => inbound,
+                Ok(None) => {
+                    if let Some(session) = self.sessions.lock().unwrap().get(&context.connection_id)
+                    {
+                        session
+                            .closing
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    return None;
+                }
                 result => {
                     if let Err(error) = result {
                         json_rpc_2_transport::log_transport_error(
@@ -217,13 +274,42 @@ impl JsonRpcProtocol for WebSocketJsonRpcAdapter {
                     return None;
                 }
             };
+            let inbound = match inbound {
+                WebSocketMessage::Ping(payload) => {
+                    return match json_rpc_2_core::encode_websocket_message(&WebSocketMessage::Pong(
+                        payload,
+                    )) {
+                        Ok(frame) => Some(Bytes::from(frame)),
+                        Err(error) => {
+                            json_rpc_2_transport::log_transport_error(
+                                self.kind,
+                                &context.connection_id,
+                                "encode pong",
+                                &error,
+                            );
+                            None
+                        }
+                    };
+                }
+                WebSocketMessage::Pong(_) => return None,
+                message @ (WebSocketMessage::Text(_) | WebSocketMessage::Binary(_)) => message,
+            };
             let outbound = self
                 .protocol
                 .handle_message_with_context(inbound, &context)
                 .await?;
-            json_rpc_2_core::encode_websocket_message(&outbound)
-                .ok()
-                .map(Bytes::from)
+            match json_rpc_2_core::encode_websocket_message(&outbound) {
+                Ok(frame) => Some(Bytes::from(frame)),
+                Err(error) => {
+                    json_rpc_2_transport::log_transport_error(
+                        self.kind,
+                        &context.connection_id,
+                        "encode response",
+                        &error,
+                    );
+                    None
+                }
+            }
         })
     }
 
@@ -322,6 +408,10 @@ impl JsonRpcWebSocket {
             let (bytes, is_text) = match message {
                 WebSocketMessage::Text(text) => (Bytes::from(text.into_bytes()), true),
                 WebSocketMessage::Binary(bytes) => (bytes, false),
+                WebSocketMessage::Ping(payload) => {
+                    return Some(WebSocketMessage::Pong(payload));
+                }
+                WebSocketMessage::Pong(_) => return None,
             };
             let fallback_context;
             let context = match context {
@@ -489,5 +579,78 @@ mod tests {
                 )))
             );
         }
+    }
+
+    struct RejectControl;
+
+    impl WebSocketProtocol for RejectControl {
+        fn handle_message<'a>(&'a self, _: WebSocketMessage) -> WebSocketFuture<'a> {
+            panic!("WebSocket control frames must not reach the application protocol")
+        }
+    }
+
+    #[tokio::test]
+    async fn stateless_control_ping_echoes_pong_without_calling_protocol() {
+        let payload = Bytes::from_static(b"health-check");
+        assert_eq!(
+            handle_stateless_message(
+                &RejectControl,
+                WebSocketMessage::Ping(payload.clone()),
+                "ws-udp",
+            )
+            .await,
+            Some(WebSocketMessage::Pong(payload.clone()))
+        );
+        assert_eq!(
+            handle_stateless_message(&RejectControl, WebSocketMessage::Pong(payload), "ws-udp",)
+                .await,
+            None
+        );
+    }
+
+    struct RejectRpc;
+
+    impl JsonRpcProtocol for RejectRpc {
+        fn handle_message<'a>(&'a self, _: &'a [u8]) -> json_rpc_2_transport::ProtocolFuture<'a> {
+            panic!("WebSocket control frames must not reach the JSON-RPC protocol")
+        }
+    }
+
+    #[tokio::test]
+    async fn session_adapter_echoes_control_ping_without_calling_protocol() {
+        let protocol = JsonRpcWebSocket::new(Arc::new(RejectRpc));
+        let payload = Bytes::from_static(b"session-ping");
+        assert_eq!(
+            protocol
+                .handle_message(WebSocketMessage::Ping(payload.clone()))
+                .await,
+            Some(WebSocketMessage::Pong(payload.clone()))
+        );
+        assert_eq!(
+            protocol
+                .handle_message(WebSocketMessage::Pong(payload))
+                .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn session_adapter_marks_close_control_frame_for_cleanup() {
+        let protocol = WebSocketJsonRpcAdapter {
+            protocol: Arc::new(RejectControl),
+            kind: "ws-sctp",
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        let session = TransportSession::new("ws-sctp", true);
+        protocol.session_opened(&session.context);
+        let close = json_rpc_2_core::encode_websocket_close_frame().unwrap();
+        assert!(
+            protocol
+                .handle_message_with_context(&close, &session.context)
+                .await
+                .is_none()
+        );
+        assert!(protocol.session_close_requested(&session.context));
+        protocol.session_closed(&session.context);
     }
 }

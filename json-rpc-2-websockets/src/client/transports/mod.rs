@@ -143,6 +143,9 @@ impl<T> DatagramWebSocketClientTransport<T> {
         match decode_websocket_message(&message).map_err(TransportError::new)? {
             Some(WebSocketMessage::Text(text)) => Ok(Some(Bytes::from(text.into_bytes()))),
             Some(WebSocketMessage::Binary(bytes)) => Ok(Some(bytes)),
+            Some(WebSocketMessage::Ping(_) | WebSocketMessage::Pong(_)) => Err(
+                TransportError::new("unexpected WebSocket control frame in RPC response"),
+            ),
             None => Err(TransportError::new(self.closed_message)),
         }
     }
@@ -289,7 +292,27 @@ where
     }
 
     fn transport_ping<'a>(&'a self) -> ClientPingFuture<'a> {
-        self.inner.transport_ping()
+        Box::pin(async move {
+            let ping =
+                encode_websocket_message(&WebSocketMessage::Ping(Bytes::from_static(PING_PAYLOAD)))
+                    .map(Bytes::from)
+                    .map_err(TransportError::new)?;
+            let response = self.inner.send_with_expectation(ping, true).await?;
+            let response = response.ok_or_else(|| {
+                TransportError::new("WebSocket peer returned no response to control ping")
+            })?;
+            match decode_websocket_message(&response).map_err(TransportError::new)? {
+                Some(WebSocketMessage::Pong(payload)) if payload.as_ref() == PING_PAYLOAD => Ok(()),
+                Some(WebSocketMessage::Pong(_)) => Err(TransportError::new(
+                    "WebSocket pong payload did not match ping",
+                )),
+                Some(WebSocketMessage::Text(_) | WebSocketMessage::Binary(_))
+                | Some(WebSocketMessage::Ping(_))
+                | None => Err(TransportError::new(
+                    "unexpected WebSocket response to control ping",
+                )),
+            }
+        })
     }
 
     fn reconnect<'a>(&'a self) -> ClientRecoverFuture<'a> {
@@ -482,6 +505,20 @@ mod tests {
                 Some(response)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn datagram_transport_ping_uses_wsu2_control_frames() {
+        let payload = Bytes::from_static(PING_PAYLOAD);
+        let transport = DatagramWebSocketClientTransport::new(
+            FramedPeer {
+                request: WebSocketMessage::Ping(payload.clone()),
+                response: WebSocketMessage::Pong(payload),
+            },
+            "ws-test",
+            "closed",
+        );
+        transport.transport_ping().await.unwrap();
     }
 
     #[tokio::test]
