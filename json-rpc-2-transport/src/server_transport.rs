@@ -346,11 +346,19 @@ pub fn log_json_rpc(
     debug!(
         transport,
         peer = %peer,
+        request_direction = "peer_to_server",
+        response_direction = if response.is_some() {
+            "server_to_peer"
+        } else {
+            "none"
+        },
         request_bytes = request.len(),
         response_bytes = response.map_or(0, <[u8]>::len),
+        request_payload = %String::from_utf8_lossy(request),
+        response_payload = %response.map(String::from_utf8_lossy).unwrap_or_default(),
         latency_ms = latency.as_millis() as u64,
         notification = response.is_none(),
-        "handled opaque message"
+        "handled JSON-RPC message"
     );
 }
 
@@ -358,6 +366,8 @@ pub fn log_control(transport: &str, peer: impl Display, action: &str, response: 
     debug!(
         transport,
         peer = %peer,
+        request_direction = "peer_to_server",
+        response_direction = "server_to_peer",
         action,
         response,
         "handled control traffic"

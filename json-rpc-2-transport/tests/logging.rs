@@ -36,7 +36,7 @@ fn capture(level: Level, run: impl FnOnce()) -> String {
 }
 
 #[test]
-fn debug_logs_opaque_message_metadata_without_payloads() {
+fn debug_logs_full_request_and_response_payloads() {
     let request = br#"{"jsonrpc":"2.0","method":"echo","params":["hello"],"id":1}"#;
     let response = br#"{"jsonrpc":"2.0","result":["hello"],"id":1}"#;
     let notification = br#"{"jsonrpc":"2.0","method":"notify","params":["notice"]}"#;
@@ -63,10 +63,12 @@ fn debug_logs_opaque_message_metadata_without_payloads() {
         batch_response,
     ] {
         assert!(
-            !output.contains(std::str::from_utf8(payload).unwrap()),
+            output.contains(std::str::from_utf8(payload).unwrap()),
             "{output}"
         );
     }
+    assert!(output.contains("request_direction=\"peer_to_server\""));
+    assert!(output.contains("response_direction=\"server_to_peer\""));
     assert!(output.contains(&format!("request_bytes={}", request.len())));
     assert!(output.contains(&format!("response_bytes={}", response.len())));
     assert!(output.contains("notification=true"));
@@ -77,7 +79,7 @@ fn debug_logs_opaque_message_metadata_without_payloads() {
 }
 
 #[test]
-fn debug_does_not_log_large_payloads() {
+fn debug_logs_large_payloads() {
     let payload = format!(
         r#"{{"jsonrpc":"2.0","method":"echo","params":["{}"],"id":1}}"#,
         "x".repeat(32_768)
@@ -91,13 +93,13 @@ fn debug_does_not_log_large_payloads() {
             Duration::ZERO,
         );
     });
-    assert!(!output.contains(&payload));
+    assert!(output.contains(&payload));
     assert!(output.contains(&format!("request_bytes={}", payload.len())));
     assert!(output.contains(&format!("response_bytes={}", payload.len())));
 }
 
 #[test]
-fn info_does_not_log_payloads_or_control_events() {
+fn info_does_not_log_debug_payloads_or_control_events() {
     let output = capture(Level::INFO, || {
         log_json_rpc(
             "TCP",

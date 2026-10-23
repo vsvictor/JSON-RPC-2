@@ -1097,6 +1097,21 @@ async fn run_session<T>(
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
+                    let request_id = command
+                        .context
+                        .request_id
+                        .as_ref()
+                        .map(serialize_request_id)
+                        .unwrap_or_else(|| "notification".to_owned());
+                    debug!(
+                        transport = transport.kind(),
+                        peer = %transport.peer().unwrap_or_else(|| "unknown".to_owned()),
+                        request_id,
+                        method = command.context.method,
+                        direction = "client_to_peer",
+                        payload = %String::from_utf8_lossy(&command.payload),
+                        "sending JSON-RPC request"
+                    );
                     let request = transport.send_cancelable(
                         command.payload,
                         command.expects_response,
@@ -1209,11 +1224,12 @@ fn log_client_completion(
                 peer,
                 request_id,
                 method = context.method,
+                direction = "peer_to_client",
+                payload = %String::from_utf8_lossy(response),
                 latency_ms = latency.as_millis() as u64,
                 response_code,
                 "json-rpc call completed"
             );
-            trace!(transport, peer, payload = %String::from_utf8_lossy(response), "json-rpc response payload");
         }
         Ok(None) => {
             debug!(
@@ -1221,6 +1237,7 @@ fn log_client_completion(
                 peer,
                 request_id,
                 method = context.method,
+                direction = "peer_to_client",
                 latency_ms = latency.as_millis() as u64,
                 "json-rpc notification completed"
             );
@@ -1231,6 +1248,7 @@ fn log_client_completion(
                 peer,
                 request_id,
                 method = context.method,
+                direction = "peer_to_client",
                 latency_ms = latency.as_millis() as u64,
                 response_code = error.code,
                 "remote json-rpc error"
@@ -1242,6 +1260,7 @@ fn log_client_completion(
                 peer,
                 request_id,
                 method = context.method,
+                direction = "client_transport_error",
                 latency_ms = latency.as_millis() as u64,
                 error = %error,
                 "json-rpc request failed"
