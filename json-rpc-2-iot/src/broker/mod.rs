@@ -3,7 +3,8 @@
 use bytes::Bytes;
 pub use gateway_sessions::{BrokerEnvelope, MessageKind};
 use gateway_sessions::{
-    BrokerSessionPolicy, MessageMetadata as Metadata, SessionError, SessionIdentity,
+    BrokerSessionPolicy, MessageMetadata as Metadata, SessionDispatch, SessionIdentity,
+    SessionRuntime,
 };
 use json_rpc_2_transport::{CancellationToken, TransportError, closed};
 use std::{
@@ -618,10 +619,9 @@ pub(crate) async fn serve(
             }
         };
         let session = Arc::new(session);
-        let mut sessions: HashMap<String, IngressSession> = HashMap::new();
         let policy = config.sessions();
-        let session_registry =
-            gateway_sessions::SessionRegistry::new(policy, runtime.limits.max_connections.max(1))
+        let mut sessions =
+            SessionRuntime::<IngressSession>::new(policy, runtime.limits.max_connections.max(1))
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
         let mut leases = tokio::time::interval(policy.heartbeat_interval);
         let worker_limit = runtime
@@ -633,97 +633,45 @@ pub(crate) async fn serve(
             let message = tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = leases.tick() => {
-                    for identity in session_registry.expire(Instant::now()) {
-                        sessions.remove(&identity.id);
-                    }
-                    let failed_push_sessions: Vec<_> = sessions
-                        .iter()
-                        .filter(|(_, session)| session.push.is_finished())
-                        .map(|(id, _)| id.clone())
-                        .collect();
-                    for id in failed_push_sessions {
-                        session_registry.close(&id, Instant::now());
-                        sessions.remove(&id);
-                    }
+                    drop(sessions.expire(Instant::now()));
+                    drop(sessions.remove_failed(Instant::now(), |session| session.push.is_finished()));
                     continue;
                 },
                 result = workers.join_next(), if !workers.is_empty() => {
                     if let Some(Ok(Some(id))) = result {
-                        session_registry.close(&id, Instant::now());
-                        sessions.remove(&id);
+                        drop(sessions.close(&id, Instant::now()));
                     }
                     continue;
                 },
                 message = incoming.recv() => match message { Some(m) => m, None => break },
             };
             let mut context = None;
-            let mut active_request = None;
-            if let Some(identity) = &message.metadata.session {
-                let valid_identity = identity.validate().is_ok();
-                match message.metadata.kind {
-                    MessageKind::Close if valid_identity => {
-                        if session_registry
-                            .close_identity(identity, Instant::now())
-                            .is_some()
-                        {
-                            sessions.remove(&identity.id);
+            let active_request = match sessions.dispatch(
+                &message.metadata,
+                Instant::now(),
+                |identity: &SessionIdentity| {
+                    ingress_session(&config, protocol.clone(), session.clone(), identity)
+                },
+            ) {
+                SessionDispatch::Rpc { identity, request } => {
+                    if let Some(identity) = identity {
+                        if let Some(ingress) = sessions.get(&identity) {
+                            context = Some(ingress.guard.context().clone());
+                        } else {
+                            #[cfg(feature = "amqp")]
+                            if let Some(ack) = message.ack {
+                                let _ = tokio::time::timeout(
+                                    config.operation_timeout(),
+                                    ack.ack(lapin::options::BasicAckOptions::default()),
+                                )
+                                .await;
+                            }
+                            continue;
                         }
                     }
-                    MessageKind::Heartbeat if valid_identity => {
-                        session_registry.heartbeat(identity, Instant::now());
-                    }
-                    MessageKind::Open if valid_identity => {
-                        match session_registry.open(identity.clone(), Instant::now()) {
-                            Ok(()) => {
-                                sessions.entry(identity.id.clone()).or_insert_with(|| {
-                                    ingress_session(
-                                        &config,
-                                        protocol.clone(),
-                                        session.clone(),
-                                        identity,
-                                    )
-                                });
-                            }
-                            Err(SessionError::Retired) => {
-                                sessions.remove(&identity.id);
-                            }
-                            Err(_) => {}
-                        }
-                    }
-                    MessageKind::Rpc if valid_identity => {
-                        // Keep compatibility with clients that attach identity to
-                        // their first RPC without a preceding Open control frame.
-                        match session_registry.open(identity.clone(), Instant::now()) {
-                            Ok(()) => {
-                                sessions.entry(identity.id.clone()).or_insert_with(|| {
-                                    ingress_session(
-                                        &config,
-                                        protocol.clone(),
-                                        session.clone(),
-                                        identity,
-                                    )
-                                });
-                                if let Some(ingress) = sessions.get(&identity.id) {
-                                    active_request =
-                                        session_registry.begin_request(identity, Instant::now());
-                                    if active_request.is_some() {
-                                        context = Some(ingress.guard.context().clone());
-                                    }
-                                }
-                            }
-                            Err(SessionError::Retired) => {
-                                sessions.remove(&identity.id);
-                            }
-                            Err(_) => {}
-                        }
-                    }
-                    MessageKind::Rpc
-                    | MessageKind::Open
-                    | MessageKind::Close
-                    | MessageKind::Heartbeat
-                    | MessageKind::Push => {}
+                    request
                 }
-                if message.metadata.kind != MessageKind::Rpc || context.is_none() {
+                SessionDispatch::Lifecycle => {
                     #[cfg(feature = "amqp")]
                     if let Some(ack) = message.ack {
                         let _ = tokio::time::timeout(
@@ -734,17 +682,7 @@ pub(crate) async fn serve(
                     }
                     continue;
                 }
-            } else if message.metadata.kind != MessageKind::Rpc {
-                #[cfg(feature = "amqp")]
-                if let Some(ack) = message.ack {
-                    let _ = tokio::time::timeout(
-                        config.operation_timeout(),
-                        ack.ack(lapin::options::BasicAckOptions::default()),
-                    )
-                    .await;
-                }
-                continue;
-            }
+            };
             if workers.len() >= worker_limit {
                 // Do not queue application work or stop reading the shared
                 // route: lifecycle traffic and lease sweeps must remain live.

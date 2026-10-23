@@ -1200,7 +1200,7 @@ dependencies = [
 [[package]]
 name = "gateway-sessions"
 version = "0.1.0"
-source = "git+https://github.com/vsvictor/JSON-RPC-2-GATEWAY.git?branch=master#005f37b6347021f780bdae50d3fb757f112ea4dc"
+source = "git+https://github.com/vsvictor/JSON-RPC-2-GATEWAY.git?branch=master#e6ae9878f533fd5d639370dcebb1a544a527080d"
 dependencies = [
  "serde",
  "thiserror 2.0.21",

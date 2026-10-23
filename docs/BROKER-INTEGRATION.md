@@ -86,12 +86,13 @@ or AMQP-over-WebSocket connections. Give them separate namespaces from raw RPC.
 
 The built-in broker clients register a transport session after establishing their
 private receive route. The `gateway-sessions` crate owns the session identity,
-wire metadata, lifecycle kinds, lease policy, and bounded session registry;
-JSON-RPC-2 broker adapters retain broker I/O and apply registry decisions to
-transport session guards. Identity and push route are transport metadata,
-including on notifications; they are never extracted from business JSON or RPC
-IDs. The client creates a UUID identity, and the server allocates a transport
-context once per registered client, calls `session_opened`, reuses it for
+wire metadata, lifecycle kinds, lease policy, event dispatch, bounded lease
+registry, and ownership of active session resources through `SessionRuntime`.
+JSON-RPC-2 broker adapters retain broker I/O and provide a factory for
+transport-specific session guards and push relays. Identity and push route are
+transport metadata, including on notifications; they are never extracted from
+business JSON or RPC IDs. The client creates a UUID identity, and the server
+allocates a transport context once per registered client, calls `session_opened`, reuses it for
 requests and notifications, and calls
 `session_closed` on explicit client close, reconnect, lease expiration, broker
 connection loss, or server shutdown. Reconnect creates a new client route and
@@ -116,10 +117,8 @@ application frame and the client API decodes text/binary frames before returning
 the payload. Context transport names are `mqtt`, `amqp`, `ws-mqtt`, and `ws-amqp`.
 An incoming WebSocket Close envelope retires the broker session immediately.
 The server sends transport `close` metadata to stop the client's receive loop
-and heartbeat; a short-lived, bounded retirement set prevents queued heartbeats
-from recreating that closed session. The registry retains closed identities for
-the lease-plus-heartbeat window, with tombstone capacity bounded by the configured
-session limit.
+and heartbeat; the runtime retains closed identities for the lease-plus-heartbeat
+window, with tombstone capacity bounded by the configured session limit.
 
 The receive queue holds 256 pushes. Overflow terminates the client reader rather
 than blocking RPC replies; draining then returns a closed error, and explicit
