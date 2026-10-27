@@ -41,6 +41,48 @@ binding, and datagram/broker WebSocket adapters use a private message envelope,
 not RFC 6455 over UDP or MQTT-over-WebSocket. See the conformance matrix before
 connecting an external peer.
 
+## Method discovery
+
+`RpcServer::method_names()` returns a sorted snapshot of registered handlers
+and aliases, including the built-in `rpc.list_methods`. The JSON-RPC request
+`{"jsonrpc":"2.0","id":1,"method":"rpc.list_methods"}` returns that array in
+`result`; omitted or empty params are accepted. Notifications produce no
+response, including in batches.
+Discovery follows the same dispatch permits and metrics as other methods.
+
+With `params:{"describe":true}`, `rpc.list_methods` returns descriptions
+instead of names: `{name, params_schema, example_request}`.
+`RpcServer::document_method(name, schema, example_params)` attaches a JSON
+Schema and synthetic params to an existing handler at startup. Call it before
+`register_alias` so aliases copy the documentation and receive their own
+method name in `example_request`. `method_descriptions()` exposes the same
+catalog locally. Undocumented handlers return null schema/example rather
+than claiming to take no parameters. Handlers accepting dynamic JSON cannot
+be reflected automatically; embedding applications must document them.
+Never use real credentials or user records as example values.
+Omitted params, `{}`, `[]` and `{"describe":false}` preserve the name-only
+response; other nonempty params produce `-32602`.
+
+`register_alias(alias, target)` shares an existing handler under another name,
+including explicit legacy `rpc.*` names. It rejects missing targets, duplicate
+names and overriding `rpc.list_methods`. Ordinary `register` still rejects
+all `rpc.*` names. Install handlers and aliases at startup before concurrent
+registration; discovery reads an immutable registry snapshot.
+
+## CLI logging
+
+`JSON_RPC_2` installs a nonblocking tracing writer: a dedicated stdout worker
+and a bounded 1024-record queue. `RUST_LOG` retains its existing default filter;
+an explicitly invalid filter now fails startup instead of silently using the
+default. Formatting remains on the emitting thread. If stdout is slow and the
+queue fills, new records at any level are discarded without blocking RPC I/O.
+At shutdown, a stderr summary reports queue losses (if any); this CLI does not
+provide a Prometheus logging exporter. The worker guard attempts a bounded
+drain on normal return and on server Ctrl+C/Unix SIGTERM. Forced termination
+can lose buffered records. Plain CLI `println!` output is not tracing output
+and remains synchronous. Library crates do not install global subscribers;
+embedding applications must configure their own writer.
+
 ## Build the workspace
 
 From the repository root, run `tools/build-all.sh` (or

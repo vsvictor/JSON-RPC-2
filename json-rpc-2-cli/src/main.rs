@@ -1,3 +1,5 @@
+mod logging;
+
 use std::{
     error::Error,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -755,7 +757,7 @@ async fn server(options: RuntimeOptions) -> AppResult<()> {
     };
     let listening = start_server(configured_server(&options, &tls, rpc_server()?)?).await?;
     println!("\nServing, press Ctrl+C to stop.");
-    tokio::signal::ctrl_c().await?;
+    shutdown_signal().await?;
     close_all(listening).await
 }
 
@@ -853,18 +855,25 @@ async fn client(options: RuntimeOptions) -> AppResult<()> {
     Ok(())
 }
 
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
+}
+
 #[tokio::main]
-async fn main() -> AppResult<()> {
+async fn main() -> AppResult<std::process::ExitCode> {
     load_env()?;
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "json_rpc_2=debug,json_rpc_2_client=debug,json_rpc_2_server=debug".into()
-            }),
-        )
-        .with_target(false)
-        .try_init();
-    match parse_command(std::env::args().skip(1)) {
+    let _log_guard = logging::init()?;
+    let result = match parse_command(std::env::args().skip(1)) {
         Ok(CommandConfig::Demo(options)) => demo(options).await,
         Ok(CommandConfig::Server(options)) => server(options).await,
         Ok(CommandConfig::Client(options)) => client(options).await,
@@ -874,7 +883,9 @@ async fn main() -> AppResult<()> {
         }
         Err(error) => {
             eprintln!("error: {error}\n\n{USAGE}");
-            std::process::exit(2);
+            return Ok(std::process::ExitCode::from(2));
         }
-    }
+    };
+    result?;
+    Ok(std::process::ExitCode::SUCCESS)
 }
