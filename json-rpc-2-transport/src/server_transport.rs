@@ -59,6 +59,15 @@ pub trait JsonRpcProtocol: Send + Sync + 'static {
 
     fn session_closed(&self, _context: &TransportContext) {}
 
+    /// Resolves when this session must be torn down, including while idle.
+    /// Shared carriers may also query a stateless context before session_opened.
+    fn session_cancelled<'a>(
+        &'a self,
+        _context: &'a TransportContext,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(std::future::pending())
+    }
+
     /// Carrier adapters may request connection teardown after a control frame.
     fn session_close_requested(&self, _context: &TransportContext) -> bool {
         false
@@ -323,6 +332,17 @@ pub struct RunningTransport {
 }
 
 impl RunningTransport {
+    /// Abort a listener and its owned tasks without draining application work.
+    pub async fn abort(self) -> io::Result<()> {
+        self.shutdown.cancel();
+        self.task.abort();
+        match self.task.await {
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(io::Error::other(error)),
+            Ok(result) => result,
+        }
+    }
+
     pub fn spawn(run: impl FnOnce(CancellationToken) -> TransportFuture) -> Self {
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(run(shutdown.clone()));

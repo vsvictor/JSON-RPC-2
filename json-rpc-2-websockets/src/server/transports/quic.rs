@@ -103,33 +103,44 @@ pub async fn serve_connection(
     let multiplexor =
         StreamMultiplexor::with_limit(runtime.limits.max_connections, runtime.metrics.clone());
     let sessions = multiplexor.handle();
-    loop {
-        let accepted = tokio::select! {
-            accepted = connection.accept_bi() => accepted,
-            _ = shutdown.cancelled() => break,
-        };
-        let Ok((send_stream, recv_stream)) = accepted else {
-            break;
-        };
-        let protocol = protocol.clone();
-        let shutdown = shutdown.clone();
-        let runtime = runtime.clone();
-        if sessions
-            .spawn(async move {
-                if let Err(error) =
-                    handle_stream(send_stream, recv_stream, peer, protocol, shutdown, runtime).await
-                {
-                    log_transport_error("WebSocket/QUIC", peer, "stream", error.as_ref());
-                }
-            })
-            .await
-            .is_err()
-        {
-            break;
+    let context = TransportSession::stateless("ws-quic");
+    let disabled = protocol.session_cancelled(&context);
+    tokio::pin!(disabled);
+    let serving = async {
+        loop {
+            let accepted = tokio::select! {
+                accepted = connection.accept_bi() => accepted,
+                _ = shutdown.cancelled() => break,
+            };
+            let Ok((send_stream, recv_stream)) = accepted else {
+                break;
+            };
+            let protocol = protocol.clone();
+            let shutdown = shutdown.clone();
+            let runtime = runtime.clone();
+            if sessions
+                .spawn(async move {
+                    if let Err(error) =
+                        handle_stream(send_stream, recv_stream, peer, protocol, shutdown, runtime)
+                            .await
+                    {
+                        log_transport_error("WebSocket/QUIC", peer, "stream", error.as_ref());
+                    }
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
+    };
+    tokio::select! {
+        biased;
+        _ = &mut disabled => {},
+        _ = serving => {},
     }
-    multiplexor.close().await;
     connection.close(QUIC_NO_ERROR.into(), b"server shutdown");
+    multiplexor.close().await;
 }
 
 async fn handle_stream(
@@ -142,14 +153,14 @@ async fn handle_stream(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (ws_io, bridge_io) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
     let (mut bridge_reader, mut bridge_writer) = tokio::io::split(bridge_io);
-    let mut incoming = tokio::spawn(async move {
+    let mut incoming = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         while let Some(chunk) = recv_stream.read_chunk(16 * 1024, true).await? {
             bridge_writer.write_all(&chunk.bytes).await?;
         }
         let _ = bridge_writer.shutdown().await;
         Ok::<(), io::Error>(())
-    });
-    let mut outgoing = tokio::spawn(async move {
+    }));
+    let mut outgoing = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         let mut buffer = [0; 16 * 1024];
         loop {
             let count = bridge_reader.read(&mut buffer).await?;
@@ -161,7 +172,7 @@ async fn handle_stream(
         send_stream.finish()?;
         let _ = send_stream.stopped().await;
         Ok::<(), io::Error>(())
-    });
+    }));
 
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_WS_MESSAGE_BYTES))
@@ -199,137 +210,149 @@ async fn run_websocket_session(
         protocol.clone(),
         session.context.clone(),
     ));
-    loop {
-        let message = tokio::select! {
-            message = websocket.next() => message,
-            payload = session.push_receiver.recv() => {
-                let Some(payload) = payload else { return };
-                if payload.len() > MAX_WS_MESSAGE_BYTES {
-                    guard.take();
-                    close_session(websocket, CloseCode::Size, "push message too large", runtime.close_timeout()).await;
-                    return;
+    let cancellation_protocol = protocol.clone();
+    let cancellation_context = session.context.clone();
+    let serving = async {
+        loop {
+            let message = tokio::select! {
+                biased;
+                _ = protocol.session_cancelled(&session.context) => return,
+                message = websocket.next() => message,
+                payload = session.push_receiver.recv() => {
+                    let Some(payload) = payload else { return };
+                    if payload.len() > MAX_WS_MESSAGE_BYTES {
+                        guard.take();
+                        close_session(websocket, CloseCode::Size, "push message too large", runtime.close_timeout()).await;
+                        return;
+                    }
+                    let message = match std::str::from_utf8(&payload) {
+                            Ok(text) => Message::Text(text.to_owned().into()),
+                            Err(_) => Message::Binary(payload),
+                        };
+                    if let Err(error) = websocket.send(message).await {
+                        log_transport_error("WebSocket/QUIC", peer, "push", &error);
+                        return;
+                    }
+                    log_control("WebSocket/QUIC", peer, "server_push", "sent");
+                    continue;
                 }
-                let message = match std::str::from_utf8(&payload) {
-                        Ok(text) => Message::Text(text.to_owned().into()),
-                        Err(_) => Message::Binary(payload),
-                    };
-                if let Err(error) = websocket.send(message).await {
-                    log_transport_error("WebSocket/QUIC", peer, "push", &error);
-                    return;
-                }
-                log_control("WebSocket/QUIC", peer, "server_push", "sent");
-                continue;
-            }
-            _ = shutdown.cancelled() => {
-                guard.take();
-                close_session(
-                    websocket,
-                    CloseCode::Away,
-                    "server shutdown",
-                    runtime.close_timeout(),
-                )
-                .await;
-                return;
-            }
-        };
-        let message = match message {
-            Some(Ok(message)) => message,
-            None => return,
-            Some(Err(error)) => {
-                log_transport_error("WebSocket/QUIC", peer, "frame", &error);
-                return;
-            }
-        };
-        let request = match message {
-            Message::Text(text) => {
-                if text.len() > MAX_WS_MESSAGE_BYTES {
+                _ = shutdown.cancelled() => {
                     guard.take();
                     close_session(
                         websocket,
-                        CloseCode::Size,
-                        "message too large",
+                        CloseCode::Away,
+                        "server shutdown",
                         runtime.close_timeout(),
                     )
                     .await;
                     return;
                 }
-                WebSocketMessage::Text(text.to_string())
-            }
-            Message::Binary(data) => {
-                if data.len() > MAX_WS_MESSAGE_BYTES {
-                    guard.take();
-                    close_session(
-                        websocket,
-                        CloseCode::Size,
-                        "message too large",
-                        runtime.close_timeout(),
-                    )
-                    .await;
-                    return;
-                }
-                WebSocketMessage::Binary(data)
-            }
-            Message::Ping(payload) => {
-                log_control("WebSocket/QUIC", peer, "ping", "pong");
-                if let Err(error) = websocket.send(Message::Pong(payload)).await {
-                    log_transport_error("WebSocket/QUIC", peer, "pong", &error);
-                    return;
-                }
-                continue;
-            }
-            Message::Close(_) => {
-                guard.take();
-                if let Err(error) = websocket.flush().await {
-                    log_transport_error("WebSocket/QUIC", peer, "close reply", &error);
-                }
-                return;
-            }
-            Message::Pong(_) | Message::Frame(_) => continue,
-        };
-
-        let request_bytes = super::message_bytes_for_log(&request);
-        let started = Instant::now();
-        if let Some(response) = protocol
-            .handle_message_with_context(request, &session.context)
-            .await
-        {
-            let response = match response {
-                WebSocketMessage::Text(text) => {
-                    log_json_rpc(
-                        "WebSocket/QUIC",
-                        peer,
-                        &request_bytes,
-                        Some(text.as_bytes()),
-                        started.elapsed(),
-                    );
-                    Message::Text(text.into())
-                }
-                WebSocketMessage::Binary(data) => {
-                    log_json_rpc(
-                        "WebSocket/QUIC",
-                        peer,
-                        &request_bytes,
-                        Some(data.as_ref()),
-                        started.elapsed(),
-                    );
-                    Message::Binary(data)
-                }
-                WebSocketMessage::Ping(data) => Message::Ping(data),
-                WebSocketMessage::Pong(data) => Message::Pong(data),
             };
-            if let Err(error) = websocket.send(response).await {
-                log_transport_error("WebSocket/QUIC", peer, "response", &error);
-                return;
+            let message = match message {
+                Some(Ok(message)) => message,
+                None => return,
+                Some(Err(error)) => {
+                    log_transport_error("WebSocket/QUIC", peer, "frame", &error);
+                    return;
+                }
+            };
+            let request = match message {
+                Message::Text(text) => {
+                    if text.len() > MAX_WS_MESSAGE_BYTES {
+                        guard.take();
+                        close_session(
+                            websocket,
+                            CloseCode::Size,
+                            "message too large",
+                            runtime.close_timeout(),
+                        )
+                        .await;
+                        return;
+                    }
+                    WebSocketMessage::Text(text.to_string())
+                }
+                Message::Binary(data) => {
+                    if data.len() > MAX_WS_MESSAGE_BYTES {
+                        guard.take();
+                        close_session(
+                            websocket,
+                            CloseCode::Size,
+                            "message too large",
+                            runtime.close_timeout(),
+                        )
+                        .await;
+                        return;
+                    }
+                    WebSocketMessage::Binary(data)
+                }
+                Message::Ping(payload) => {
+                    log_control("WebSocket/QUIC", peer, "ping", "pong");
+                    if let Err(error) = websocket.send(Message::Pong(payload)).await {
+                        log_transport_error("WebSocket/QUIC", peer, "pong", &error);
+                        return;
+                    }
+                    continue;
+                }
+                Message::Close(_) => {
+                    guard.take();
+                    if let Err(error) = websocket.flush().await {
+                        log_transport_error("WebSocket/QUIC", peer, "close reply", &error);
+                    }
+                    return;
+                }
+                Message::Pong(_) | Message::Frame(_) => continue,
+            };
+
+            let request_bytes = super::message_bytes_for_log(&request);
+            let started = Instant::now();
+            if let Some(response) = tokio::select! {
+                biased;
+                _ = protocol.session_cancelled(&session.context) => return,
+                response = protocol.handle_message_with_context(request, &session.context) => response,
+            } {
+                let response = match response {
+                    WebSocketMessage::Text(text) => {
+                        log_json_rpc(
+                            "WebSocket/QUIC",
+                            peer,
+                            &request_bytes,
+                            Some(text.as_bytes()),
+                            started.elapsed(),
+                        );
+                        Message::Text(text.into())
+                    }
+                    WebSocketMessage::Binary(data) => {
+                        log_json_rpc(
+                            "WebSocket/QUIC",
+                            peer,
+                            &request_bytes,
+                            Some(data.as_ref()),
+                            started.elapsed(),
+                        );
+                        Message::Binary(data)
+                    }
+                    WebSocketMessage::Ping(data) => Message::Ping(data),
+                    WebSocketMessage::Pong(data) => Message::Pong(data),
+                };
+                if let Err(error) = websocket.send(response).await {
+                    log_transport_error("WebSocket/QUIC", peer, "response", &error);
+                    return;
+                }
+            } else {
+                log_json_rpc(
+                    "WebSocket/QUIC",
+                    peer,
+                    &request_bytes,
+                    None,
+                    started.elapsed(),
+                );
             }
-        } else {
-            log_json_rpc(
-                "WebSocket/QUIC",
-                peer,
-                &request_bytes,
-                None,
-                started.elapsed(),
-            );
         }
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation_protocol.session_cancelled(&cancellation_context) => {},
+        _ = serving => {},
     }
 }
 

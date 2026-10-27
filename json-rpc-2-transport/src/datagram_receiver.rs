@@ -6,9 +6,10 @@ use tokio::{net::UdpSocket, sync::mpsc};
 pub type OwnedDatagram = (Bytes, SocketAddr);
 
 /// Either the socket's sole reader or an owned packet lane from a demultiplexer.
+#[derive(Clone)]
 pub struct DatagramReceiver {
     socket: Arc<UdpSocket>,
-    lane: Option<mpsc::Receiver<OwnedDatagram>>,
+    lane: Option<Arc<tokio::sync::Mutex<mpsc::Receiver<OwnedDatagram>>>>,
 }
 
 pub enum ReceivedDatagram<'a> {
@@ -45,7 +46,7 @@ impl DatagramReceiver {
     pub fn shared(socket: Arc<UdpSocket>, lane: mpsc::Receiver<OwnedDatagram>) -> Self {
         Self {
             socket,
-            lane: Some(lane),
+            lane: Some(Arc::new(tokio::sync::Mutex::new(lane))),
         }
     }
 
@@ -53,9 +54,23 @@ impl DatagramReceiver {
         self.socket.clone()
     }
 
+    /// Clear buffered packets when replacing a shared profile's session state.
+    pub async fn discard_pending(&self) {
+        if let Some(lane) = &self.lane {
+            let mut lane = lane.lock().await;
+            for _ in 0..lane.len() {
+                if lane.try_recv().is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
     pub async fn receive<'a>(&mut self, buffer: &'a mut [u8]) -> io::Result<ReceivedDatagram<'a>> {
         if let Some(lane) = &mut self.lane {
-            lane.recv()
+            lane.lock()
+                .await
+                .recv()
                 .await
                 .map(ReceivedDatagram::Owned)
                 .ok_or_else(|| {

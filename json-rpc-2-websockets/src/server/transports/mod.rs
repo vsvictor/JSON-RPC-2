@@ -25,6 +25,13 @@ pub trait WebSocketProtocol: Send + Sync + 'static {
     fn session_opened(&self, _context: &TransportContext) {}
 
     fn session_closed(&self, _context: &TransportContext) {}
+
+    fn session_cancelled<'a>(
+        &'a self,
+        _context: &'a TransportContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(std::future::pending())
+    }
 }
 
 pub struct WebSocketSessionGuard {
@@ -176,6 +183,15 @@ async fn handle_stateless_message(
 
 #[cfg(any(feature = "dccp", feature = "sctp", feature = "srt"))]
 impl JsonRpcProtocol for WebSocketJsonRpcAdapter {
+    fn session_cancelled<'a>(
+        &'a self,
+        context: &'a TransportContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        let mut context = context.clone();
+        context.transport = self.kind.to_owned();
+        Box::pin(async move { self.protocol.session_cancelled(&context).await })
+    }
+
     fn handle_message<'a>(&'a self, message: &'a [u8]) -> json_rpc_2_transport::ProtocolFuture<'a> {
         Box::pin(async move {
             let inbound = match json_rpc_2_core::decode_websocket_message(message) {
@@ -377,6 +393,13 @@ fn push_message(payload: Bytes) -> WebSocketMessage {
 }
 
 impl WebSocketProtocol for JsonRpcWebSocket {
+    fn session_cancelled<'a>(
+        &'a self,
+        context: &'a TransportContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        self.protocol.session_cancelled(context)
+    }
+
     fn handle_message<'a>(&'a self, message: WebSocketMessage) -> WebSocketFuture<'a> {
         self.process_message(message, None)
     }

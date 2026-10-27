@@ -228,16 +228,16 @@ where
     let (send_stream, recv_stream) = stream.split();
     let (ws_io, bridge_io) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
     let (ws_reader, ws_writer) = tokio::io::split(bridge_io);
-    let mut recv_task = tokio::spawn(async move {
+    let mut recv_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         if let Err(error) = copy_h3_to_io(recv_stream, ws_writer).await {
             log_transport_error("WebSocket/HTTP/3", peer, "recv-bridge", error.as_ref());
         }
-    });
-    let mut send_task = tokio::spawn(async move {
+    }));
+    let mut send_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         if let Err(error) = copy_io_to_h3(ws_reader, send_stream).await {
             log_transport_error("WebSocket/HTTP/3", peer, "send-bridge", error.as_ref());
         }
-    });
+    }));
 
     // The session drops its end of the duplex when it returns, so the send
     // bridge flushes the final Close frame, finishes the H3 stream and exits.
@@ -340,139 +340,150 @@ async fn run_websocket_session(
         protocol.clone(),
         session.context.clone(),
     ));
-
-    loop {
-        let message = tokio::select! {
-            message = websocket.next() => message,
-            payload = session.push_receiver.recv() => {
-                let Some(payload) = payload else { return };
-                if payload.len() > MAX_WS_MESSAGE_BYTES {
-                    guard.take();
-                    close_session(websocket, CloseCode::Size, "push message too large", runtime.close_timeout()).await;
-                    return;
+    let cancellation_protocol = protocol.clone();
+    let cancellation_context = session.context.clone();
+    let serving = async {
+        loop {
+            let message = tokio::select! {
+                biased;
+                _ = protocol.session_cancelled(&session.context) => return,
+                message = websocket.next() => message,
+                payload = session.push_receiver.recv() => {
+                    let Some(payload) = payload else { return };
+                    if payload.len() > MAX_WS_MESSAGE_BYTES {
+                        guard.take();
+                        close_session(websocket, CloseCode::Size, "push message too large", runtime.close_timeout()).await;
+                        return;
+                    }
+                    let message = match std::str::from_utf8(&payload) {
+                            Ok(text) => Message::Text(text.to_owned().into()),
+                            Err(_) => Message::Binary(payload),
+                        };
+                    if let Err(error) = websocket.send(message).await {
+                        log_transport_error("WebSocket/HTTP/3", peer, "push", &error);
+                        return;
+                    }
+                    log_control("WebSocket/HTTP/3", peer, "server_push", "sent");
+                    continue;
                 }
-                let message = match std::str::from_utf8(&payload) {
-                        Ok(text) => Message::Text(text.to_owned().into()),
-                        Err(_) => Message::Binary(payload),
-                    };
-                if let Err(error) = websocket.send(message).await {
-                    log_transport_error("WebSocket/HTTP/3", peer, "push", &error);
-                    return;
-                }
-                log_control("WebSocket/HTTP/3", peer, "server_push", "sent");
-                continue;
-            }
-            _ = shutdown.cancelled() => {
-                guard.take();
-                close_session(
-                    websocket,
-                    CloseCode::Away,
-                    "server shutdown",
-                    runtime.close_timeout(),
-                )
-                .await;
-                return;
-            }
-        };
-        let message = match message {
-            Some(Ok(message)) => message,
-            // End of stream: the closing handshake is complete.
-            None => return,
-            Some(Err(error)) => {
-                log_transport_error("WebSocket/HTTP/3", peer, "frame", &error);
-                return;
-            }
-        };
-        let request = match message {
-            Message::Text(text) => {
-                if text.len() > MAX_WS_MESSAGE_BYTES {
+                _ = shutdown.cancelled() => {
                     guard.take();
                     close_session(
                         websocket,
-                        CloseCode::Size,
-                        "message too large",
+                        CloseCode::Away,
+                        "server shutdown",
                         runtime.close_timeout(),
                     )
                     .await;
                     return;
                 }
-                WebSocketMessage::Text(text.to_string())
-            }
-            Message::Binary(data) => {
-                if data.len() > MAX_WS_MESSAGE_BYTES {
-                    guard.take();
-                    close_session(
-                        websocket,
-                        CloseCode::Size,
-                        "message too large",
-                        runtime.close_timeout(),
-                    )
-                    .await;
-                    return;
-                }
-                WebSocketMessage::Binary(data)
-            }
-            Message::Ping(payload) => {
-                log_control("WebSocket/HTTP/3", peer, "ping", "pong");
-                if let Err(error) = websocket.send(Message::Pong(payload)).await {
-                    log_transport_error("WebSocket/HTTP/3", peer, "pong", &error);
-                    return;
-                }
-                continue;
-            }
-            Message::Close(_) => {
-                guard.take();
-                if let Err(error) = websocket.flush().await {
-                    log_transport_error("WebSocket/HTTP/3", peer, "close reply", &error);
-                }
-                return;
-            }
-            Message::Pong(_) | Message::Frame(_) => continue,
-        };
-
-        let request_bytes = super::message_bytes_for_log(&request);
-        let started = Instant::now();
-        if let Some(response) = protocol
-            .handle_message_with_context(request, &session.context)
-            .await
-        {
-            let response = match response {
-                WebSocketMessage::Text(text) => {
-                    log_json_rpc(
-                        "WebSocket/HTTP/3",
-                        peer,
-                        &request_bytes,
-                        Some(text.as_bytes()),
-                        started.elapsed(),
-                    );
-                    Message::Text(text.into())
-                }
-                WebSocketMessage::Binary(data) => {
-                    log_json_rpc(
-                        "WebSocket/HTTP/3",
-                        peer,
-                        &request_bytes,
-                        Some(data.as_ref()),
-                        started.elapsed(),
-                    );
-                    Message::Binary(data)
-                }
-                WebSocketMessage::Ping(data) => Message::Ping(data),
-                WebSocketMessage::Pong(data) => Message::Pong(data),
             };
-            if let Err(error) = websocket.send(response).await {
-                log_transport_error("WebSocket/HTTP/3", peer, "response", &error);
-                return;
+            let message = match message {
+                Some(Ok(message)) => message,
+                // End of stream: the closing handshake is complete.
+                None => return,
+                Some(Err(error)) => {
+                    log_transport_error("WebSocket/HTTP/3", peer, "frame", &error);
+                    return;
+                }
+            };
+            let request = match message {
+                Message::Text(text) => {
+                    if text.len() > MAX_WS_MESSAGE_BYTES {
+                        guard.take();
+                        close_session(
+                            websocket,
+                            CloseCode::Size,
+                            "message too large",
+                            runtime.close_timeout(),
+                        )
+                        .await;
+                        return;
+                    }
+                    WebSocketMessage::Text(text.to_string())
+                }
+                Message::Binary(data) => {
+                    if data.len() > MAX_WS_MESSAGE_BYTES {
+                        guard.take();
+                        close_session(
+                            websocket,
+                            CloseCode::Size,
+                            "message too large",
+                            runtime.close_timeout(),
+                        )
+                        .await;
+                        return;
+                    }
+                    WebSocketMessage::Binary(data)
+                }
+                Message::Ping(payload) => {
+                    log_control("WebSocket/HTTP/3", peer, "ping", "pong");
+                    if let Err(error) = websocket.send(Message::Pong(payload)).await {
+                        log_transport_error("WebSocket/HTTP/3", peer, "pong", &error);
+                        return;
+                    }
+                    continue;
+                }
+                Message::Close(_) => {
+                    guard.take();
+                    if let Err(error) = websocket.flush().await {
+                        log_transport_error("WebSocket/HTTP/3", peer, "close reply", &error);
+                    }
+                    return;
+                }
+                Message::Pong(_) | Message::Frame(_) => continue,
+            };
+
+            let request_bytes = super::message_bytes_for_log(&request);
+            let started = Instant::now();
+            if let Some(response) = tokio::select! {
+                biased;
+                _ = protocol.session_cancelled(&session.context) => return,
+                response = protocol.handle_message_with_context(request, &session.context) => response,
+            } {
+                let response = match response {
+                    WebSocketMessage::Text(text) => {
+                        log_json_rpc(
+                            "WebSocket/HTTP/3",
+                            peer,
+                            &request_bytes,
+                            Some(text.as_bytes()),
+                            started.elapsed(),
+                        );
+                        Message::Text(text.into())
+                    }
+                    WebSocketMessage::Binary(data) => {
+                        log_json_rpc(
+                            "WebSocket/HTTP/3",
+                            peer,
+                            &request_bytes,
+                            Some(data.as_ref()),
+                            started.elapsed(),
+                        );
+                        Message::Binary(data)
+                    }
+                    WebSocketMessage::Ping(data) => Message::Ping(data),
+                    WebSocketMessage::Pong(data) => Message::Pong(data),
+                };
+                if let Err(error) = websocket.send(response).await {
+                    log_transport_error("WebSocket/HTTP/3", peer, "response", &error);
+                    return;
+                }
+            } else {
+                log_json_rpc(
+                    "WebSocket/HTTP/3",
+                    peer,
+                    &request_bytes,
+                    None,
+                    started.elapsed(),
+                );
             }
-        } else {
-            log_json_rpc(
-                "WebSocket/HTTP/3",
-                peer,
-                &request_bytes,
-                None,
-                started.elapsed(),
-            );
         }
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation_protocol.session_cancelled(&cancellation_context) => {},
+        _ = serving => {},
     }
 }
 

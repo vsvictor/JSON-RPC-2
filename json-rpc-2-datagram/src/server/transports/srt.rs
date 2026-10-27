@@ -137,6 +137,7 @@ async fn serve_session(
             tokio::pin!(receive);
             let frame = loop { tokio::select! {
                 biased;
+                _ = protocol.session_cancelled(&session.context) => return Err(io::Error::new(io::ErrorKind::Interrupted, "session disabled")),
                 _ = shutdown.cancelled() => break 'receiving,
                 Some(result) = handlers.join_next(), if !handlers.is_empty() => {
                     result.map_err(io::Error::other)??;

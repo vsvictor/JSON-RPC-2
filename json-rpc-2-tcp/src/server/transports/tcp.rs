@@ -123,46 +123,53 @@ where
         mut push_receiver,
     } = TransportSession::new(kind, true);
     let session = ProtocolSessionGuard::new(protocol.clone(), context);
-    loop {
-        let event = tokio::select! {
-            line = read_frame(&mut reader, &mut buffer, protocol.stream_framing()) => ReadEvent::Line(line),
-            push = push_receiver.recv() => ReadEvent::Push(push),
-            _ = shutdown.cancelled() => break,
-        };
-        let line = match event {
-            ReadEvent::Push(Some(push)) => {
-                write_half.write_all(&push).await?;
+    let serving = async {
+        loop {
+            let event = tokio::select! {
+                line = read_frame(&mut reader, &mut buffer, protocol.stream_framing()) => ReadEvent::Line(line),
+                push = push_receiver.recv() => ReadEvent::Push(push),
+                _ = shutdown.cancelled() => break,
+            };
+            let line = match event {
+                ReadEvent::Push(Some(push)) => {
+                    write_half.write_all(&push).await?;
+                    write_half.write_all(b"\n").await?;
+                    write_half.flush().await?;
+                    continue;
+                }
+                ReadEvent::Push(None) | ReadEvent::Line(Ok(None)) => break,
+                ReadEvent::Line(Err(error)) => return Err(error),
+                ReadEvent::Line(Ok(Some(line))) => line,
+            };
+            if line == CONTROL_PING {
+                log_control(
+                    if kind == "tls" { "TLS" } else { "TCP" },
+                    peer,
+                    "ping",
+                    "pong",
+                );
+                write_half.write_all(CONTROL_PONG).await?;
                 write_half.write_all(b"\n").await?;
                 write_half.flush().await?;
                 continue;
             }
-            ReadEvent::Push(None) | ReadEvent::Line(Ok(None)) => break,
-            ReadEvent::Line(Err(error)) => return Err(error),
-            ReadEvent::Line(Ok(Some(line))) => line,
-        };
-        if line == CONTROL_PING {
-            log_control(
-                if kind == "tls" { "TLS" } else { "TCP" },
+            process_message(
+                &protocol,
+                &mut write_half,
                 peer,
-                "ping",
-                "pong",
-            );
-            write_half.write_all(CONTROL_PONG).await?;
-            write_half.write_all(b"\n").await?;
-            write_half.flush().await?;
-            continue;
+                line,
+                session.context(),
+                kind,
+            )
+            .await?;
         }
-        process_message(
-            &protocol,
-            &mut write_half,
-            peer,
-            line,
-            session.context(),
-            kind,
-        )
-        .await?;
+        write_half.shutdown().await
+    };
+    tokio::select! {
+        biased;
+        _ = protocol.session_cancelled(session.context()) => Ok(()),
+        result = serving => result,
     }
-    write_half.shutdown().await
 }
 
 enum ReadEvent {
@@ -199,6 +206,63 @@ async fn process_message<W: AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     use json_rpc_2_transport::ProtocolFuture;
+
+    #[tokio::test]
+    async fn cancellation_closes_an_idle_stream_and_releases_its_session() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Gate {
+            disabled: CancellationToken,
+            opened: tokio::sync::Notify,
+            closed: AtomicUsize,
+        }
+        impl JsonRpcProtocol for Gate {
+            fn handle_message<'a>(&'a self, _: &'a [u8]) -> ProtocolFuture<'a> {
+                panic!("idle stream must not dispatch")
+            }
+            fn session_opened(&self, _: &json_rpc_2_transport::TransportContext) {
+                self.opened.notify_one();
+            }
+            fn session_closed(&self, _: &json_rpc_2_transport::TransportContext) {
+                self.closed.fetch_add(1, Ordering::SeqCst);
+            }
+            fn session_cancelled<'a>(
+                &'a self,
+                _: &'a json_rpc_2_transport::TransportContext,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+                Box::pin(async move { self.disabled.cancelled().await })
+            }
+        }
+        let protocol = Arc::new(Gate {
+            disabled: CancellationToken::new(),
+            opened: tokio::sync::Notify::new(),
+            closed: AtomicUsize::new(0),
+        });
+        let (mut client, server) = tokio::io::duplex(128);
+        let (reader, writer) = tokio::io::split(server);
+        let task = tokio::spawn(serve_stream(
+            reader,
+            writer,
+            protocol.clone(),
+            CancellationToken::new(),
+            "127.0.0.1:12345".parse().unwrap(),
+            "tcp",
+        ));
+        protocol.opened.notified().await;
+        protocol.disabled.cancel();
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                tokio::io::AsyncReadExt::read(&mut client, &mut byte)
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            0
+        );
+        task.await.unwrap().unwrap();
+        assert_eq!(protocol.closed.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn dispatch_preserves_the_owned_input_allocation() {

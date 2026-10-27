@@ -90,40 +90,47 @@ async fn handle_connection(
     let session = json_rpc_2_transport::TransportSession::new("dccp", false);
     let _guard =
         json_rpc_2_transport::ProtocolSessionGuard::new(protocol.clone(), session.context.clone());
-    loop {
-        let message = tokio::select! {
-            message = stream.recv() => message,
-            _ = shutdown.cancelled() => break,
-        }?;
-        if message.is_empty() {
-            break;
+    let serving = async {
+        loop {
+            let message = tokio::select! {
+                message = stream.recv() => message,
+                _ = shutdown.cancelled() => break,
+            }?;
+            if message.is_empty() {
+                break;
+            }
+            if message.as_slice() == CONTROL_PING {
+                log_control("DCCP", peer, "ping", "pong");
+                stream.send(CONTROL_PONG).await?;
+                continue;
+            }
+            let started = Instant::now();
+            let message = bytes::Bytes::from(message);
+            let response = protocol
+                .handle_owned_message(message.clone(), &session.context)
+                .await
+                .map(json_rpc_2_transport::TransportMessage::into_bytes);
+            if protocol.session_close_requested(&session.context) {
+                break;
+            }
+            log_json_rpc(
+                "DCCP",
+                peer,
+                &message,
+                response.as_deref(),
+                started.elapsed(),
+            );
+            if let Some(response) = response {
+                stream.send(&response).await?;
+            }
         }
-        if message.as_slice() == CONTROL_PING {
-            log_control("DCCP", peer, "ping", "pong");
-            stream.send(CONTROL_PONG).await?;
-            continue;
-        }
-        let started = Instant::now();
-        let message = bytes::Bytes::from(message);
-        let response = protocol
-            .handle_owned_message(message.clone(), &session.context)
-            .await
-            .map(json_rpc_2_transport::TransportMessage::into_bytes);
-        if protocol.session_close_requested(&session.context) {
-            break;
-        }
-        log_json_rpc(
-            "DCCP",
-            peer,
-            &message,
-            response.as_deref(),
-            started.elapsed(),
-        );
-        if let Some(response) = response {
-            stream.send(&response).await?;
-        }
+        Ok(())
+    };
+    tokio::select! {
+        biased;
+        _ = protocol.session_cancelled(&session.context) => Ok(()),
+        result = serving => result,
     }
-    Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

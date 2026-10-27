@@ -132,18 +132,22 @@ async fn connect_session(
         send_stream.finish().await.map_err(transport_error)
     });
     let incoming = tokio::spawn(async move {
-        while let Some(mut chunk) = recv_stream.recv_data().await.map_err(transport_error)? {
-            let count = chunk.remaining();
-            if bridge_writer
-                .write_all(&chunk.copy_to_bytes(count))
-                .await
-                .is_err()
-            {
-                continue;
+        let result = async {
+            while let Some(mut chunk) = recv_stream.recv_data().await.map_err(transport_error)? {
+                let count = chunk.remaining();
+                if bridge_writer
+                    .write_all(&chunk.copy_to_bytes(count))
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
             }
+            Ok(())
         }
+        .await;
         let _ = bridge_writer.shutdown().await;
-        Ok(())
+        result
     });
 
     let socket = WebSocketStream::from_raw_socket(websocket_io, Role::Client, None).await;

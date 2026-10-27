@@ -71,6 +71,33 @@ The SCTP partial-delivery regression requires kernel support and is run with
 
 Keepalive traffic never enters the JSON-RPC method dispatcher.
 
+## Application-requested session cancellation
+
+`JsonRpcProtocol::session_cancelled(context)` and
+`WebSocketProtocol::session_cancelled(context)` provide an asynchronous
+revocation hook. The default future never resolves, preserving existing
+behavior. Applications implementing a hot transport policy should return
+a future bound to the session's admission generation, not merely the
+current enabled flag. Re-enabling a profile must not revive revoked sessions.
+
+Connection-oriented adapters observe revocation even while idle or blocked
+on request processing or writes. Dropping the session guard invokes
+`session_closed`; QUIC connections are closed before waiting for stream
+workers. Dedicated WebSocket/QUIC sessions belong to individual streams.
+Shared-ingress applications must preserve profile isolation: canceling
+HTTP/3 requests must not close a connection that also carries a different,
+still-enabled profile.
+
+Adapters may query the hook with a stateless context before
+`session_opened`, for example to reject a WebSocket/QUIC connection without
+any streams. The hook must therefore support both stateless admission
+checks and persistent session contexts. `session_close_requested` remains
+the synchronous admission check for datagrams and broker envelopes.
+Datagram ingress supervisors can use `RunningTransport::abort` and
+`DatagramReceiver::discard_pending` to retire a logical lane and its
+reliability state without closing a shared UDP socket. This hook does not
+roll back business operations already forwarded to a backend.
+
 ## Reconnect behavior
 
 - Client liveness checks are configured through `ClientLivenessConfig`.

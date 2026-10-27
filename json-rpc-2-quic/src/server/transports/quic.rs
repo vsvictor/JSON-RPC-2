@@ -97,40 +97,50 @@ pub async fn serve_connection(
     let multiplexor =
         StreamMultiplexor::with_limit(runtime.limits.max_connections, runtime.metrics.clone());
     let streams = multiplexor.handle();
-    loop {
-        let accepted = tokio::select! {
-            accepted = connection.accept_bi() => accepted,
-            Some(push) = session.push_receiver.recv() => {
-                let connection = connection.clone();
-                let stopping = shutdown.clone();
-                if streams.spawn(async move {
-                    let result = async {
-                        let mut send = connection.open_uni().await.map_err(io::Error::other)?;
-                        send.write_all(&push).await.map_err(io::Error::other)?;
-                        send.finish().map_err(io::Error::other)?;
-                        Ok::<_, io::Error>(())
-                    };
-                    tokio::select! {
-                        result = result => if let Err(error) = result {
-                            log_transport_error("QUIC", connection.remote_address(), "push stream", &error);
-                        },
-                        _ = stopping.cancelled() => {},
-                        _ = connection.closed() => {},
+    let cancellation_protocol = protocol.clone();
+    let cancellation_context = session.context.clone();
+    let serving = async {
+        loop {
+            let accepted = tokio::select! {
+                biased;
+                _ = protocol.session_cancelled(&session.context) => break,
+                accepted = connection.accept_bi() => accepted,
+                Some(push) = session.push_receiver.recv() => {
+                    let connection = connection.clone();
+                    let stopping = shutdown.clone();
+                    if streams.spawn(async move {
+                        let result = async {
+                            let mut send = connection.open_uni().await.map_err(io::Error::other)?;
+                            send.write_all(&push).await.map_err(io::Error::other)?;
+                            send.finish().map_err(io::Error::other)?;
+                            Ok::<_, io::Error>(())
+                        };
+                        tokio::select! {
+                            result = result => if let Err(error) = result {
+                                log_transport_error("QUIC", connection.remote_address(), "push stream", &error);
+                            },
+                            _ = stopping.cancelled() => {},
+                            _ = connection.closed() => {},
+                        }
+                    }).await.is_err() {
+                        break;
                     }
-                }).await.is_err() {
-                    break;
+                    continue;
                 }
-                continue;
-            }
-            _ = shutdown.cancelled() => break,
-        };
-        // An error means the client closed the connection.
-        let Ok((send, recv)) = accepted else { break };
-        let protocol = protocol.clone();
-        let context = session.context.clone();
-        if streams
+                _ = shutdown.cancelled() => break,
+            };
+            // An error means the client closed the connection.
+            let Ok((send, recv)) = accepted else { break };
+            let protocol = protocol.clone();
+            let context = session.context.clone();
+            if streams
             .spawn(async move {
-                if let Err(error) = handle_stream(send, recv, peer, protocol, context).await {
+                let result = tokio::select! {
+                    biased;
+                    _ = protocol.session_cancelled(&context) => return,
+                    result = handle_stream(send, recv, peer, protocol.clone(), context.clone()) => result,
+                };
+                if let Err(error) = result {
                     log_transport_error("QUIC", peer, "stream", error.as_ref());
                 }
             })
@@ -139,11 +149,17 @@ pub async fn serve_connection(
         {
             break;
         }
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation_protocol.session_cancelled(&cancellation_context) => {},
+        _ = serving => {},
     }
     drop(guard);
     drop(session.push_receiver);
-    multiplexor.close().await;
     connection.close(QUIC_NO_ERROR.into(), b"server shutdown");
+    multiplexor.close().await;
 }
 
 async fn handle_stream(

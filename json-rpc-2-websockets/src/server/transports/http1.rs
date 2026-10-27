@@ -347,6 +347,8 @@ async fn websocket_session(
     ));
     loop {
         let message = tokio::select! {
+            biased;
+            _ = protocol.session_cancelled(&session.context) => return,
             message = socket.next() => message,
             payload = session.push_receiver.recv() => {
                 let Some(payload) = payload else { return };
@@ -359,7 +361,11 @@ async fn websocket_session(
                         Ok(text) => Message::Text(text.to_owned().into()),
                         Err(_) => Message::Binary(payload),
                     };
-                if let Err(error) = socket.send(message).await {
+                if let Err(error) = tokio::select! {
+                    biased;
+                    _ = protocol.session_cancelled(&session.context) => return,
+                    result = socket.send(message) => result,
+                } {
                     log_transport_error("WebSocket/HTTP/1.1", peer, "push", &error);
                     return;
                 }
@@ -434,10 +440,11 @@ async fn websocket_session(
         };
         let request_bytes = super::message_bytes_for_log(&request);
         let started = Instant::now();
-        let response = match protocol
-            .handle_message_with_context(request, &session.context)
-            .await
-        {
+        let response = match tokio::select! {
+            biased;
+            _ = protocol.session_cancelled(&session.context) => return,
+            response = protocol.handle_message_with_context(request, &session.context) => response,
+        } {
             Some(WebSocketMessage::Text(text)) => {
                 log_json_rpc(
                     "WebSocket/HTTP/1.1",
@@ -471,7 +478,11 @@ async fn websocket_session(
                 continue;
             }
         };
-        if let Err(error) = socket.send(response).await {
+        if let Err(error) = tokio::select! {
+            biased;
+            _ = protocol.session_cancelled(&session.context) => return,
+            result = socket.send(response) => result,
+        } {
             log_transport_error("WebSocket/HTTP/1.1", peer, "response", &error);
             return;
         }

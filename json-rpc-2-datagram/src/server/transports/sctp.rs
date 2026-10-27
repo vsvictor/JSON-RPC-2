@@ -90,45 +90,52 @@ async fn handle_connection(
     let mut session = json_rpc_2_transport::TransportSession::new("sctp", true);
     let _guard =
         json_rpc_2_transport::ProtocolSessionGuard::new(protocol.clone(), session.context.clone());
-    loop {
-        let receive = stream.recv();
-        tokio::pin!(receive);
-        let message = loop {
-            tokio::select! {
-                message = &mut receive => break message?,
-                Some(push) = session.push_receiver.recv() => stream.send(&push).await?,
-                _ = shutdown.cancelled() => return Ok(()),
+    let serving = async {
+        loop {
+            let receive = stream.recv();
+            tokio::pin!(receive);
+            let message = loop {
+                tokio::select! {
+                    message = &mut receive => break message?,
+                    Some(push) = session.push_receiver.recv() => stream.send(&push).await?,
+                    _ = shutdown.cancelled() => return Ok(()),
+                }
+            };
+            if message.is_empty() {
+                break;
             }
-        };
-        if message.is_empty() {
-            break;
+            if message.as_slice() == CONTROL_PING {
+                log_control("SCTP", peer, "ping", "pong");
+                stream.send(CONTROL_PONG).await?;
+                continue;
+            }
+            let started = Instant::now();
+            let message = bytes::Bytes::from(message);
+            let response = protocol
+                .handle_owned_message(message.clone(), &session.context)
+                .await
+                .map(json_rpc_2_transport::TransportMessage::into_bytes);
+            if protocol.session_close_requested(&session.context) {
+                break;
+            }
+            log_json_rpc(
+                "SCTP",
+                peer,
+                &message,
+                response.as_deref(),
+                started.elapsed(),
+            );
+            if let Some(response) = response {
+                stream.send(&response).await?;
+            }
         }
-        if message.as_slice() == CONTROL_PING {
-            log_control("SCTP", peer, "ping", "pong");
-            stream.send(CONTROL_PONG).await?;
-            continue;
-        }
-        let started = Instant::now();
-        let message = bytes::Bytes::from(message);
-        let response = protocol
-            .handle_owned_message(message.clone(), &session.context)
-            .await
-            .map(json_rpc_2_transport::TransportMessage::into_bytes);
-        if protocol.session_close_requested(&session.context) {
-            break;
-        }
-        log_json_rpc(
-            "SCTP",
-            peer,
-            &message,
-            response.as_deref(),
-            started.elapsed(),
-        );
-        if let Some(response) = response {
-            stream.send(&response).await?;
-        }
+        Ok(())
+    };
+    tokio::select! {
+        biased;
+        _ = protocol.session_cancelled(&session.context) => Ok(()),
+        result = serving => result,
     }
-    Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

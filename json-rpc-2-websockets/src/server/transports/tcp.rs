@@ -150,134 +150,141 @@ async fn run_websocket_session<S>(
 {
     let mut session = TransportSession::new(kind, true);
     let _session_guard = WebSocketSessionGuard::new(Arc::clone(&protocol), session.context.clone());
-    loop {
-        let event = tokio::select! {
-            message = websocket.next() => SessionEvent::Frame(message),
-            payload = session.push_receiver.recv() => SessionEvent::Push(payload),
-            _ = shutdown.cancelled() => SessionEvent::Shutdown,
-        };
-        let message = match event {
-            SessionEvent::Shutdown => {
-                close_session(
-                    websocket,
-                    CloseCode::Away,
-                    "server shutdown",
-                    runtime.close_timeout(),
-                )
-                .await;
-                return;
-            }
-            SessionEvent::Push(Some(payload)) => {
-                if payload.len() > MAX_WS_MESSAGE_BYTES {
-                    close_session(
-                        websocket,
-                        CloseCode::Size,
-                        "push message too large",
-                        runtime.close_timeout(),
-                    )
-                    .await;
-                    return;
-                }
-                let message = match std::str::from_utf8(&payload) {
-                    Ok(text) => Message::Text(text.to_owned().into()),
-                    Err(_) => Message::Binary(payload),
-                };
-                if websocket.send(message).await.is_err() {
-                    return;
-                }
-                log_control("WebSocket/TCP", peer, "server_push", "sent");
-                continue;
-            }
-            SessionEvent::Push(None) => return,
-            SessionEvent::Frame(message) => message,
-        };
-        let message = match message {
-            Some(Ok(message)) => message,
-            None => return,
-            Some(Err(error)) => {
-                log_transport_error("WebSocket/TCP", peer, "frame", &error);
-                return;
-            }
-        };
-        let request = match message {
-            Message::Text(text) => {
-                if text.len() > MAX_WS_MESSAGE_BYTES {
-                    close_session(
-                        websocket,
-                        CloseCode::Size,
-                        "message too large",
-                        runtime.close_timeout(),
-                    )
-                    .await;
-                    return;
-                }
-                WebSocketMessage::Text(text.to_string())
-            }
-            Message::Binary(data) => {
-                if data.len() > MAX_WS_MESSAGE_BYTES {
-                    close_session(
-                        websocket,
-                        CloseCode::Size,
-                        "message too large",
-                        runtime.close_timeout(),
-                    )
-                    .await;
-                    return;
-                }
-                WebSocketMessage::Binary(data)
-            }
-            Message::Ping(payload) => {
-                log_control("WebSocket/TCP", peer, "ping", "pong");
-                if websocket.send(Message::Pong(payload)).await.is_err() {
-                    return;
-                }
-                continue;
-            }
-            Message::Pong(_) | Message::Close(_) | Message::Frame(_) => continue,
-        };
-
-        let request_bytes = super::message_bytes_for_log(&request);
-        let started = Instant::now();
-        if let Some(response) = protocol
-            .handle_message_with_context(request, &session.context)
-            .await
-        {
-            let response = match response {
-                WebSocketMessage::Text(text) => {
-                    log_json_rpc(
-                        "WebSocket/TCP",
-                        peer,
-                        &request_bytes,
-                        Some(text.as_bytes()),
-                        started.elapsed(),
-                    );
-                    Message::Text(text.into())
-                }
-                WebSocketMessage::Binary(data) => {
-                    log_json_rpc(
-                        "WebSocket/TCP",
-                        peer,
-                        &request_bytes,
-                        Some(data.as_ref()),
-                        started.elapsed(),
-                    );
-                    Message::Binary(data)
-                }
-                WebSocketMessage::Ping(data) => Message::Ping(data),
-                WebSocketMessage::Pong(data) => Message::Pong(data),
+    let serving = async {
+        loop {
+            let event = tokio::select! {
+                message = websocket.next() => SessionEvent::Frame(message),
+                payload = session.push_receiver.recv() => SessionEvent::Push(payload),
+                _ = shutdown.cancelled() => SessionEvent::Shutdown,
             };
-            if websocket.send(response).await.is_err() {
-                return;
+            let message = match event {
+                SessionEvent::Shutdown => {
+                    close_session(
+                        websocket,
+                        CloseCode::Away,
+                        "server shutdown",
+                        runtime.close_timeout(),
+                    )
+                    .await;
+                    return;
+                }
+                SessionEvent::Push(Some(payload)) => {
+                    if payload.len() > MAX_WS_MESSAGE_BYTES {
+                        close_session(
+                            websocket,
+                            CloseCode::Size,
+                            "push message too large",
+                            runtime.close_timeout(),
+                        )
+                        .await;
+                        return;
+                    }
+                    let message = match std::str::from_utf8(&payload) {
+                        Ok(text) => Message::Text(text.to_owned().into()),
+                        Err(_) => Message::Binary(payload),
+                    };
+                    if websocket.send(message).await.is_err() {
+                        return;
+                    }
+                    log_control("WebSocket/TCP", peer, "server_push", "sent");
+                    continue;
+                }
+                SessionEvent::Push(None) => return,
+                SessionEvent::Frame(message) => message,
+            };
+            let message = match message {
+                Some(Ok(message)) => message,
+                None => return,
+                Some(Err(error)) => {
+                    log_transport_error("WebSocket/TCP", peer, "frame", &error);
+                    return;
+                }
+            };
+            let request = match message {
+                Message::Text(text) => {
+                    if text.len() > MAX_WS_MESSAGE_BYTES {
+                        close_session(
+                            websocket,
+                            CloseCode::Size,
+                            "message too large",
+                            runtime.close_timeout(),
+                        )
+                        .await;
+                        return;
+                    }
+                    WebSocketMessage::Text(text.to_string())
+                }
+                Message::Binary(data) => {
+                    if data.len() > MAX_WS_MESSAGE_BYTES {
+                        close_session(
+                            websocket,
+                            CloseCode::Size,
+                            "message too large",
+                            runtime.close_timeout(),
+                        )
+                        .await;
+                        return;
+                    }
+                    WebSocketMessage::Binary(data)
+                }
+                Message::Ping(payload) => {
+                    log_control("WebSocket/TCP", peer, "ping", "pong");
+                    if websocket.send(Message::Pong(payload)).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                Message::Pong(_) | Message::Close(_) | Message::Frame(_) => continue,
+            };
+
+            let request_bytes = super::message_bytes_for_log(&request);
+            let started = Instant::now();
+            if let Some(response) = protocol
+                .handle_message_with_context(request, &session.context)
+                .await
+            {
+                let response = match response {
+                    WebSocketMessage::Text(text) => {
+                        log_json_rpc(
+                            "WebSocket/TCP",
+                            peer,
+                            &request_bytes,
+                            Some(text.as_bytes()),
+                            started.elapsed(),
+                        );
+                        Message::Text(text.into())
+                    }
+                    WebSocketMessage::Binary(data) => {
+                        log_json_rpc(
+                            "WebSocket/TCP",
+                            peer,
+                            &request_bytes,
+                            Some(data.as_ref()),
+                            started.elapsed(),
+                        );
+                        Message::Binary(data)
+                    }
+                    WebSocketMessage::Ping(data) => Message::Ping(data),
+                    WebSocketMessage::Pong(data) => Message::Pong(data),
+                };
+                if websocket.send(response).await.is_err() {
+                    return;
+                }
+            } else {
+                log_json_rpc(
+                    "WebSocket/TCP",
+                    peer,
+                    &request_bytes,
+                    None,
+                    started.elapsed(),
+                );
             }
-        } else {
-            log_json_rpc(
-                "WebSocket/TCP",
-                peer,
-                &request_bytes,
-                None,
-                started.elapsed(),
-            );
         }
+    };
+    tokio::select! {
+        biased;
+        _ = protocol.session_cancelled(&session.context) => {},
+        _ = serving => {},
     }
 }
 
