@@ -20,13 +20,13 @@
 //! # Ok::<(), json_rpc_2_server::RegistrationError>(())
 //! ```
 
-use std::{borrow::Cow, ops::Deref};
+use std::{borrow::Cow, ops::Deref, sync::Arc};
 
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema, schema_for};
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned, de::Error as _};
 use serde_json::Value;
 
-use crate::{RegistrationError, RpcError, RpcResult, RpcServer};
+use crate::{RateLimiter, RegistrationError, RpcError, RpcResult, RpcServer};
 
 /// Deserializes params; any mismatch is the standard `-32602 Invalid params` error.
 /// Десеріалізує параметри; будь-яка невідповідність дає стандартну помилку `-32602`.
@@ -44,6 +44,31 @@ pub fn params_documentation<P: JsonSchema>() -> (Value, Value) {
         .cloned()
         .unwrap_or(Value::Null);
     (schema, example)
+}
+
+/// Schema for params that are either one `T` object or a non-empty array of at most
+/// `max_items` `T`s (`None` = unbounded). Validation stays with the handler.
+///
+/// Схема параметрів: один об'єкт `T` або непорожній масив не більше ніж `max_items`
+/// елементів `T` (`None` — без обмеження). Перевірку виконує обробник.
+pub fn one_or_many_schema<T: JsonSchema>(max_items: Option<usize>) -> Value {
+    let mut schema = schema_for!(T).to_value();
+    let object = schema
+        .as_object_mut()
+        .expect("generated schema is an object");
+    let mut item = serde_json::Map::new();
+    for key in ["type", "properties", "required", "additionalProperties"] {
+        if let Some(value) = object.remove(key) {
+            item.insert(key.into(), value);
+        }
+    }
+    let item = Value::Object(item);
+    let mut array = serde_json::json!({"type": "array", "items": item, "minItems": 1});
+    if let Some(max_items) = max_items {
+        array["maxItems"] = max_items.into();
+    }
+    object.insert("anyOf".into(), serde_json::json!([item, array]));
+    schema
 }
 
 impl RpcServer {
@@ -66,6 +91,37 @@ impl RpcServer {
         self.register_with(name, state, move |state, params| {
             let handler = handler.clone();
             async move {
+                let result = handler(state, parse_params(params)?).await?;
+                serde_json::to_value(result).map_err(|_| RpcError::internal_error())
+            }
+        })?;
+        self.document_params::<P>(name)
+    }
+
+    /// Like [`register_typed`](Self::register_typed), but first charges `limiter` with the
+    /// top-level string field `key` of the raw params, so invalid requests still consume
+    /// tokens. A missing or blank key is not limited.
+    pub fn register_limited<S, P, R, F, Fut>(
+        &self,
+        name: &str,
+        state: S,
+        limiter: Arc<RateLimiter>,
+        key: &'static str,
+        handler: F,
+    ) -> Result<(), RegistrationError>
+    where
+        S: Clone + Send + Sync + 'static,
+        P: DeserializeOwned + JsonSchema + Send + 'static,
+        R: Serialize,
+        F: Fn(S, P) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = RpcResult<R>> + Send + 'static,
+    {
+        self.register_with(name, (state, limiter), move |(state, limiter), params| {
+            let handler = handler.clone();
+            async move {
+                limiter
+                    .check(params.get(key).and_then(Value::as_str))
+                    .await?;
                 let result = handler(state, parse_params(params)?).await?;
                 serde_json::to_value(result).map_err(|_| RpcError::internal_error())
             }

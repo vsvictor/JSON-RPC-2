@@ -55,7 +55,9 @@ need no logging wrapper.
 (any mismatch is `-32602 Invalid params`) and documents the method with its schema
 and `#[schemars(example = ...)]`. `NonBlank`, `NonNull` and `keep_null` cover common
 field rules; `parse_params` / `document_params` are available when a handler must
-inspect raw params first. `Settings::duration_secs` / `duration_millis` and
+inspect raw params first. `register_limited(name, state, limiter, "key", handler)`
+charges a `RateLimiter` with a raw top-level field before typed parsing;
+`one_or_many_schema::<T>(max)` documents "one object or a bounded array" params. `Settings::duration_secs` / `duration_millis` and
 `RateLimitConfig::from_prefix(settings, "MY_RATE")` read common plugin settings.
 `default_instance_id` sets an id unless `BACKEND_ID` or `instance_id` chose one.
 

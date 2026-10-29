@@ -81,3 +81,70 @@ async fn register_typed_dispatches_and_documents() {
         json!({"name": " Ada ", "time": 1, "extra": null})
     );
 }
+
+#[tokio::test]
+async fn register_limited_charges_raw_key_before_validation() {
+    let server = RpcServer::new();
+    let limiter = Arc::new(RateLimiter::new(crate::RateLimitConfig {
+        per_minute: 1,
+        burst: 1,
+    }));
+    server
+        .register_limited(
+            "hello",
+            (),
+            limiter,
+            "name",
+            |(), params: Params| async move { Ok(params.name) },
+        )
+        .unwrap();
+    let call = |params: Value| {
+        let server = server.clone();
+        let request = json!({"jsonrpc":"2.0","id":1,"method":"hello","params":params});
+        async move {
+            let response = server
+                .handle_bytes(request.to_string().as_bytes())
+                .await
+                .unwrap();
+            serde_json::from_slice::<Value>(&response).unwrap()
+        }
+    };
+    assert_eq!(call(json!({"name": "a"})).await["error"]["code"], -32602);
+    assert_eq!(
+        call(json!({"name": "a", "time": 1})).await["error"]["code"],
+        crate::RATE_LIMIT_ERROR_CODE
+    );
+    assert_eq!(call(json!({"name": "b", "time": 1})).await["result"], "b");
+    assert!(
+        server
+            .method_descriptions()
+            .into_iter()
+            .any(|d| d.name == "hello" && d.example_request.is_some())
+    );
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct Item {
+    id: u32,
+}
+
+#[test]
+fn one_or_many_schema_accepts_object_or_bounded_array() {
+    let schema = one_or_many_schema::<Item>(Some(3));
+    let item = &schema["anyOf"][0];
+    assert_eq!(item["type"], "object");
+    assert_eq!(item["required"], json!(["id"]));
+    assert_eq!(item["additionalProperties"], false);
+    assert_eq!(
+        schema["anyOf"][1],
+        json!({"type": "array", "items": item, "minItems": 1, "maxItems": 3})
+    );
+    assert!(schema.get("type").is_none() && schema.get("properties").is_none());
+    assert!(
+        one_or_many_schema::<Item>(None)["anyOf"][1]
+            .get("maxItems")
+            .is_none()
+    );
+}

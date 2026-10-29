@@ -26,7 +26,9 @@ use serde_json::{Value, json};
 pub use settings::{FromSettings, Settings, process_env};
 mod typed;
 use tokio::sync::Semaphore;
-pub use typed::{NonBlank, NonNull, keep_null, params_documentation, parse_params};
+pub use typed::{
+    NonBlank, NonNull, keep_null, one_or_many_schema, params_documentation, parse_params,
+};
 
 /// Errors encountered while registering a server method.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -55,7 +55,9 @@ impl ServerPlugin for MyPluginConfig {
 (будь-яка невідповідність — `-32602 Invalid params`) і документує метод його схемою
 та `#[schemars(example = ...)]`. `NonBlank`, `NonNull` і `keep_null` покривають типові
 правила полів; `parse_params` / `document_params` доступні, якщо обробник спершу має
-переглянути сирі параметри. `Settings::duration_secs` / `duration_millis` і
+переглянути сирі параметри. `register_limited(name, state, limiter, "key", handler)`
+списує токен `RateLimiter` за сирим полем верхнього рівня до типізованого розбору;
+`one_or_many_schema::<T>(max)` документує параметри «один об'єкт або обмежений масив». `Settings::duration_secs` / `duration_millis` і
 `RateLimitConfig::from_prefix(settings, "MY_RATE")` читають типові налаштування плагінів.
 `default_instance_id` задає id, якщо його не вибрали `BACKEND_ID` чи `instance_id`.
 
