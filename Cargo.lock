@@ -1950,6 +1950,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-rpc-2-gateway"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "json-rpc-2-core 0.1.0",
+ "json-rpc-2-transport 0.1.0",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "json-rpc-2-iot"
 version = "0.1.0"
 dependencies = [
