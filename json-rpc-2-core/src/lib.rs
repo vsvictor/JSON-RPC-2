@@ -3,6 +3,7 @@
 mod amqp;
 mod coap;
 mod mqtt;
+pub mod params;
 mod rtp;
 mod rudp;
 mod srt;
@@ -40,6 +41,16 @@ pub use websocket::{
 
 pub const VERSION: &str = "2.0";
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Application storage failure, distinct from the protocol's internal error.
+/// Помилка сховища застосунку, відмінна від внутрішньої помилки протоколу.
+pub const STORAGE_ERROR_CODE: i64 = -32000;
+
+/// Creates a storage error with a client-safe message; log private details separately.
+/// Створює помилку сховища з безпечним повідомленням; приватні деталі логуйте окремо.
+pub fn storage_error(message: &'static str) -> RpcError {
+    RpcError::new(STORAGE_ERROR_CODE, message)
+}
 
 /// JSON-RPC request identifier. The protocol allows strings, numbers, and null.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
