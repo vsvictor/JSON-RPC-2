@@ -14,7 +14,7 @@ let backend = BackendBuilder::from_env()?   // BACKEND_* variables
     .configure(|rpc| rpc.register("ping", |_| async { Ok("pong".into()) }).map_err(Into::into))
     .build()
     .await?;
-backend.run(shutdown).await?;
+backend.run_until_signal().await?; // or run(your_shutdown_future)
 ```
 
 - `build()` validates ports, the TLS/QUIC identity and transports before any plugin

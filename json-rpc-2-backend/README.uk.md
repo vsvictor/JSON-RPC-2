@@ -14,7 +14,7 @@ let backend = BackendBuilder::from_env()?   // змінні BACKEND_*
     .configure(|rpc| rpc.register("ping", |_| async { Ok("pong".into()) }).map_err(Into::into))
     .build()
     .await?;
-backend.run(shutdown).await?;
+backend.run_until_signal().await?; // або run(ваш_future_завершення)
 ```
 
 - `build()` перевіряє порти, TLS/QUIC-ідентичність і транспорти до того, як плагіни

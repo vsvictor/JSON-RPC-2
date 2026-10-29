@@ -308,6 +308,11 @@ impl Backend {
         })
     }
 
+    /// Runs until SIGINT or SIGTERM (Ctrl+C on non-Unix targets), then closes gracefully.
+    pub async fn run_until_signal(self) -> Result<()> {
+        self.run(termination_signal()).await
+    }
+
     /// Runs all listeners and periodic maintenance until `shutdown` completes.
     pub async fn run(self, shutdown: impl Future<Output = Result<()>>) -> Result<()> {
         let running = self.start().await?;
@@ -345,6 +350,21 @@ impl Backend {
         // Dropping the set aborts the tasks, so shutdown cannot leak them.
         std::future::pending::<()>().await;
     }
+}
+
+async fn termination_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result?,
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await?;
+    Ok(())
 }
 
 /// Open listeners of a started [`Backend`].
