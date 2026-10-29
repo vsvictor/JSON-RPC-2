@@ -111,6 +111,9 @@ pub struct RpcError {
     pub data: Option<Value>,
 }
 
+/// Result of a JSON-RPC method or helper that fails with an [`RpcError`].
+pub type RpcResult<T> = Result<T, RpcError>;
+
 impl RpcError {
     pub fn new(code: i64, message: impl Into<String>) -> Self {
         Self {
