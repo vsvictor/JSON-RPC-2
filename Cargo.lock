@@ -1848,6 +1848,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-rpc-2-backend"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "json-rpc-2-core 0.1.0",
+ "json-rpc-2-datagram",
+ "json-rpc-2-gateway",
+ "json-rpc-2-quic",
+ "json-rpc-2-runtime",
+ "json-rpc-2-server",
+ "json-rpc-2-tcp",
+ "json-rpc-2-transport 0.1.0",
+ "json-rpc-2-websockets",
+ "quinn",
+ "rcgen",
+ "rustls",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tstrans-srt-sys",
+]
+
+[[package]]
 name = "json-rpc-2-cli"
 version = "0.1.0"
 dependencies = [

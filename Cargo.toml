@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "json-rpc-2",
+    "json-rpc-2-backend",
     "json-rpc-2-cli",
     "json-rpc-2-client",
     "json-rpc-2-config",
@@ -19,6 +20,7 @@ members = [
 ]
 default-members = [
     "json-rpc-2",
+    "json-rpc-2-backend",
     "json-rpc-2-cli",
     "json-rpc-2-client",
     "json-rpc-2-config",

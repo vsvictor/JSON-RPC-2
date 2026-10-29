@@ -1,0 +1,30 @@
+[package]
+name = "json-rpc-2-backend"
+version = "0.1.0"
+edition = "2024"
+description = "Single-builder multi-transport JSON-RPC-2 backend for JSON-RPC-2-GATEWAY with plugins"
+
+[dependencies]
+anyhow = "1"
+json-rpc-2-core = { path = "../json-rpc-2-core" }
+json-rpc-2-gateway = { path = "../json-rpc-2-gateway" }
+json-rpc-2-runtime = { path = "../json-rpc-2-runtime" }
+json-rpc-2-server = { path = "../json-rpc-2-server" }
+json-rpc-2-transport = { path = "../json-rpc-2-transport" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+# Upstream disables defaults; native SRT requires encryption for its passphrase.
+tstrans-srt-sys = { version = "0.8", default-features = false, features = ["mbedtls"] }
+
+[dev-dependencies]
+bytes = "1"
+json-rpc-2-datagram = { path = "../json-rpc-2-datagram", default-features = false, features = ["udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp"] }
+json-rpc-2-quic = { path = "../json-rpc-2-quic", default-features = false, features = ["quic", "http3"] }
+json-rpc-2-tcp = { path = "../json-rpc-2-tcp", default-features = false, features = ["tcp", "tls", "http1"] }
+json-rpc-2-websockets = { path = "../json-rpc-2-websockets", default-features = false, features = ["websocket", "tls", "tcp", "udp", "rtp", "rudp", "srt", "udplite", "dccp", "sctp", "quic", "http1", "http3"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = "0.13"
+tempfile = "3"
+tokio = { version = "1", features = ["net", "io-util"] }
