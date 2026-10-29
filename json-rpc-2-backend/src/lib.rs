@@ -516,5 +516,4 @@ fn tls_identity(builder: &BackendBuilder) -> Result<TlsIdentity> {
 }
 
 #[cfg(test)]
-#[path = "settings_tests.rs"]
-mod settings_tests;
+mod tests;

@@ -33,5 +33,4 @@ pub fn required_value(map: &Map<String, Value>, field: &str) -> Result<Value, Rp
 }
 
 #[cfg(test)]
-#[path = "params_tests.rs"]
 mod tests;

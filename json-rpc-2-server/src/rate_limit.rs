@@ -99,5 +99,4 @@ impl RateLimiter {
 }
 
 #[cfg(test)]
-#[path = "rate_limit_tests.rs"]
 mod tests;

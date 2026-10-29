@@ -69,5 +69,4 @@ pub trait ServerPlugin: Send + 'static {
 }
 
 #[cfg(test)]
-#[path = "plugin_tests.rs"]
 mod tests;

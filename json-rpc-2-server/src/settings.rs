@@ -69,5 +69,4 @@ impl<'a> Settings<'a> {
 }
 
 #[cfg(test)]
-#[path = "settings_tests.rs"]
 mod tests;
