@@ -17,6 +17,8 @@ use tokio::task::JoinSet;
 pub use json_rpc_2_core::*;
 pub use json_rpc_2_transport::{JsonRpcProtocol, ProtocolFuture, ServerLimits, TransportContext};
 pub type TransportLimits = ServerLimits;
+mod plugin;
+pub use plugin::{MaintenanceTask, PluginError, PluginFuture, PluginHandle, ServerPlugin};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
