@@ -1869,6 +1869,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "tstrans-srt-sys",
 ]
 
@@ -2062,6 +2063,7 @@ dependencies = [
 name = "json-rpc-2-server"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "arc-swap",
  "bytes",
  "criterion",

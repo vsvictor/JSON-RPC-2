@@ -5,7 +5,7 @@
 //! and [`run`](Backend::run) it.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     future::Future,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
@@ -16,10 +16,10 @@ use anyhow::{Context, Result, ensure};
 use json_rpc_2_gateway::GatewayBackendProtocol;
 pub use json_rpc_2_runtime::TransportKind;
 use json_rpc_2_runtime::{MultiTransportServer, RunningServer};
-use json_rpc_2_server::RpcServer;
 pub use json_rpc_2_server::{
     MaintenanceTask, PluginError, PluginFuture, PluginHandle, ServerPlugin,
 };
+use json_rpc_2_server::{RpcServer, Settings};
 use json_rpc_2_transport::JsonRpcProtocol;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 
@@ -78,22 +78,49 @@ impl BackendBuilder {
         Self::default()
     }
 
-    /// Reads the `BACKEND_*` (and plugin config directory) environment variables.
+    /// Reads the `BACKEND_*` environment variables.
     pub fn from_env() -> Result<Self> {
+        let values = std::env::vars_os()
+            .filter_map(|(key, value)| {
+                let key = key.into_string().ok()?;
+                key.starts_with("BACKEND_").then(|| {
+                    value
+                        .into_string()
+                        .map(|value| (key.clone(), value))
+                        .map_err(|_| anyhow::anyhow!("{key} must be valid Unicode"))
+                })
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        Self::from_settings(Settings::new(&values))
+    }
+
+    fn from_settings(settings: Settings<'_>) -> Result<Self> {
         let defaults = Self::default();
-        let bind = env_value("BACKEND_BIND")?
+        let bind = settings
+            .nonempty("BACKEND_BIND")?
             .map(|value| value.parse())
             .transpose()
             .context("BACKEND_BIND must be an IP address")?
             .unwrap_or(defaults.bind);
-        let port = env_port("BACKEND_PORT", defaults.tcp_port)?;
-        let tcp_port = env_port("BACKEND_TCP_PORT", port)?;
-        let udp_port = env_port("BACKEND_UDP_PORT", port)?;
-        let tls_port = env_port("BACKEND_TLS_PORT", defaults.tls_port)?;
-        let quic_port = env_port("BACKEND_QUIC_PORT", defaults.quic_port)?;
+        for key in [
+            "BACKEND_PORT",
+            "BACKEND_TCP_PORT",
+            "BACKEND_UDP_PORT",
+            "BACKEND_TLS_PORT",
+            "BACKEND_QUIC_PORT",
+        ] {
+            settings.nonempty(key)?;
+        }
+        let port = settings.port("BACKEND_PORT", defaults.tcp_port)?;
+        let tcp_port = settings.port("BACKEND_TCP_PORT", port)?;
+        let udp_port = settings.port("BACKEND_UDP_PORT", port)?;
+        let tls_port = settings.port("BACKEND_TLS_PORT", defaults.tls_port)?;
+        let quic_port = settings.port("BACKEND_QUIC_PORT", defaults.quic_port)?;
         for name in ["MQTT", "COAP", "AMQP", "WS_MQTT", "WS_COAP", "WS_AMQP"] {
             ensure!(
-                env_value(&format!("BACKEND_{name}_PORT"))?.is_none(),
+                settings
+                    .nonempty(&format!("BACKEND_{name}_PORT"))?
+                    .is_none(),
                 "{name} belongs on gateway ingress, not this backend"
             );
         }
@@ -103,10 +130,12 @@ impl BackendBuilder {
             udp_port,
             tls_port,
             quic_port,
-            tls_cert_file: env_value("BACKEND_TLS_CERT_FILE")?.map(Into::into),
-            tls_key_file: env_value("BACKEND_TLS_KEY_FILE")?.map(Into::into),
-            srt_passphrase: env_value("BACKEND_SRT_PASSPHRASE")?,
-            instance_id: env_value("BACKEND_ID")?.unwrap_or(defaults.instance_id),
+            tls_cert_file: settings.nonempty("BACKEND_TLS_CERT_FILE")?.map(Into::into),
+            tls_key_file: settings.nonempty("BACKEND_TLS_KEY_FILE")?.map(Into::into),
+            srt_passphrase: settings.nonempty("BACKEND_SRT_PASSPHRASE")?,
+            instance_id: settings
+                .nonempty("BACKEND_ID")?
+                .unwrap_or(defaults.instance_id),
             ..Self::default()
         };
         ensure!(tcp_port != tls_port, "TCP and TLS must use different ports");
@@ -122,11 +151,8 @@ impl BackendBuilder {
                 "BACKEND_{}_PORT",
                 kind.id().replace('-', "_").to_ascii_uppercase()
             );
-            if let Some(value) = env_value(&key)? {
-                let port = value
-                    .parse::<u16>()
-                    .with_context(|| format!("{key} must be a port in 1..=65535"))?;
-                ensure!(port > 0, "{key} must be positive");
+            if settings.nonempty(&key)?.is_some() {
+                let port = settings.port(&key, 1)?;
                 builder.additional.push((kind, port));
             }
         }
@@ -143,7 +169,9 @@ impl BackendBuilder {
             "WS_UDPLITE",
         ] {
             ensure!(
-                env_value(&format!("BACKEND_{name}_PORT"))?.is_none(),
+                settings
+                    .nonempty(&format!("BACKEND_{name}_PORT"))?
+                    .is_none(),
                 "{name} is unavailable on this platform"
             );
         }
@@ -487,23 +515,48 @@ fn tls_identity(builder: &BackendBuilder) -> Result<TlsIdentity> {
     Ok((certificates, key))
 }
 
-fn env_port(key: &str, default: u16) -> Result<u16> {
-    let port = env_value(key)?
-        .map(|value| value.parse::<u16>())
-        .transpose()
-        .with_context(|| format!("{key} must be an integer in 1..=65535"))?
-        .unwrap_or(default);
-    ensure!(port > 0, "{key} must be in 1..=65535");
-    Ok(port)
-}
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
 
-fn env_value(key: &str) -> Result<Option<String>> {
-    match std::env::var(key) {
-        Ok(value) => {
-            ensure!(!value.trim().is_empty(), "{key} must not be empty");
-            Ok(Some(value))
+    fn values(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).into(), (*value).into()))
+            .collect()
+    }
+
+    #[test]
+    fn settings_defaults_and_overrides() {
+        let empty = HashMap::new();
+        let defaults = BackendBuilder::from_settings(Settings::new(&empty)).unwrap();
+        assert_eq!(defaults.tcp_port, BackendBuilder::default().tcp_port);
+        let values = values(&[("BACKEND_PORT", "9000"), ("BACKEND_ID", "test-backend")]);
+        let builder = BackendBuilder::from_settings(Settings::new(&values)).unwrap();
+        assert_eq!(builder.tcp_port, 9000);
+        assert_eq!(builder.udp_port, 9000);
+        assert_eq!(builder.instance_id, "test-backend");
+    }
+
+    #[test]
+    fn backend_settings_reject_invalid_values_without_exposing_them() {
+        for (key, value) in [
+            ("BACKEND_BIND", "private-value"),
+            ("BACKEND_PORT", "private-value"),
+            ("BACKEND_PORT", "0"),
+            ("BACKEND_PORT", "65536"),
+            ("BACKEND_TCP_PORT", " "),
+            ("BACKEND_ID", ""),
+            ("BACKEND_TLS_KEY_FILE", " "),
+            ("BACKEND_RTP_PORT", ""),
+            ("BACKEND_MQTT_PORT", "1883"),
+        ] {
+            let values = values(&[(key, value)]);
+            let error = BackendBuilder::from_settings(Settings::new(&values))
+                .err()
+                .expect("invalid settings must fail")
+                .to_string();
+            assert!(!error.contains("private-value"));
         }
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("reading {key}")),
     }
 }

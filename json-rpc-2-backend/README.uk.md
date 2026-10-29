@@ -1,5 +1,9 @@
 # json-rpc-2-backend
 
+Конфігурація читається через `json_rpc_2_server::Settings`, спільний із плагінами.
+Backend відхиляє явно порожні значення `BACKEND_*` і некоректні порти;
+ані він, ані `Settings` не завантажують файли `.env`.
+
 [English](README.md) | Українська
 
 Мультитранспортний JSON-RPC-2 бекенд для JSON-RPC-2-GATEWAY з єдиним builder.

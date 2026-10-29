@@ -28,3 +28,7 @@ backend.run_until_signal().await?; // or run(your_shutdown_future)
 Environment: `BACKEND_BIND`, `BACKEND_ID`, `BACKEND_{TCP,UDP,TLS,QUIC,…}_PORT`,
 `BACKEND_TLS_CERT_FILE`, `BACKEND_TLS_KEY_FILE`, `BACKEND_SRT_PASSPHRASE` (10..79 bytes).
 MQTT/CoAP/AMQP ports are rejected (gateway ingress only).
+
+Configuration parsing uses `json_rpc_2_server::Settings`, shared with plugins.
+The backend rejects explicitly blank `BACKEND_*` values and invalid ports;
+neither it nor `Settings` loads `.env` files.

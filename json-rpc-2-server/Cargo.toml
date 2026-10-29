@@ -23,6 +23,7 @@ coap = []
 amqp = []
 
 [dependencies]
+anyhow = "1"
 arc-swap = "1"
 bytes = "1"
 json-rpc-2-core = { path = "../json-rpc-2-core" }
