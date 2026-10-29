@@ -15,6 +15,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # Upstream disables defaults; native SRT requires encryption for its passphrase.
 tstrans-srt-sys = { version = "0.8", default-features = false, features = ["mbedtls"] }
 

@@ -301,3 +301,15 @@ async fn test_backend_with_dir(
     let builder = builder.plugin(PingPlugin);
     (builder.build().await.unwrap(), directory)
 }
+
+#[tokio::test]
+async fn invalid_log_level_is_rejected_and_valid_is_accepted() {
+    // RUST_LOG would override the directive, so this test only runs without it.
+    if std::env::var_os("RUST_LOG").is_some() {
+        return;
+    }
+    let error = BackendBuilder::new().log_level("info,=[").build().await;
+    assert!(error.err().unwrap().to_string().contains("log level"));
+    let (builder, _, _, _tls_directory, _) = transport_config();
+    assert!(builder.log_level("warn").build().await.is_ok());
+}

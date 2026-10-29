@@ -10,6 +10,7 @@ of `ServerPlugin`s (`json-rpc-2-server`).
 
 ```rust
 let backend = BackendBuilder::from_env()?   // BACKEND_* variables
+    .log_level("info")                      // RUST_LOG takes precedence
     .plugin(MyPluginConfig::from_env()?)    // any ServerPlugin
     .configure(|rpc| rpc.register("ping", |_| async { Ok("pong".into()) }).map_err(Into::into))
     .build()

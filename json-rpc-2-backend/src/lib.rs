@@ -47,6 +47,7 @@ pub struct BackendBuilder {
     srt_passphrase: Option<String>,
     instance_id: String,
     allow_ephemeral_ports: bool,
+    log_level: Option<String>,
     configure: Vec<Configure>,
     plugins: Vec<Box<dyn ServerPlugin>>,
 }
@@ -65,6 +66,7 @@ impl Default for BackendBuilder {
             srt_passphrase: None,
             instance_id: "json-rpc-2-backend".into(),
             allow_ephemeral_ports: false,
+            log_level: None,
             configure: Vec::new(),
             plugins: Vec::new(),
         }
@@ -217,8 +219,21 @@ impl BackendBuilder {
         self
     }
 
+    /// Installs a global `tracing` subscriber when the backend is built.
+    ///
+    /// `directive` is an `EnvFilter` expression such as `"info"` or
+    /// `"info,json_rpc_2_backend=debug"`; a set `RUST_LOG` takes precedence.
+    /// An already installed subscriber is left untouched.
+    pub fn log_level(mut self, directive: impl Into<String>) -> Self {
+        self.log_level = Some(directive.into());
+        self
+    }
+
     /// Validates the configuration, installs the plugins and prepares the transports.
     pub async fn build(mut self) -> Result<Backend> {
+        if let Some(directive) = self.log_level.take() {
+            init_logging(&directive)?;
+        }
         let ports = [self.tcp_port, self.udp_port, self.tls_port, self.quic_port];
         ensure!(
             self.allow_ephemeral_ports || ports.iter().all(|&port| port > 0),
@@ -350,6 +365,20 @@ impl Backend {
         // Dropping the set aborts the tasks, so shutdown cannot leak them.
         std::future::pending::<()>().await;
     }
+}
+
+fn init_logging(directive: &str) -> Result<()> {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(value) => EnvFilter::try_new(value).context("invalid RUST_LOG")?,
+        Err(std::env::VarError::NotPresent) => EnvFilter::try_new(directive)
+            .with_context(|| format!("invalid log level {directive:?}"))?,
+        Err(error) => return Err(error.into()),
+    };
+    // A subscriber installed earlier (e.g. by the host or a previous backend) wins.
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    Ok(())
 }
 
 async fn termination_signal() -> Result<()> {

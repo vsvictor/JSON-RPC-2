@@ -10,6 +10,7 @@ QUIC (та будь-які інші транспорти JSON-RPC-2), працю
 
 ```rust
 let backend = BackendBuilder::from_env()?   // змінні BACKEND_*
+    .log_level("info")                      // RUST_LOG має пріоритет
     .plugin(MyPluginConfig::from_env()?)    // будь-який ServerPlugin
     .configure(|rpc| rpc.register("ping", |_| async { Ok("pong".into()) }).map_err(Into::into))
     .build()
