@@ -18,6 +18,8 @@ pub use json_rpc_2_core::*;
 pub use json_rpc_2_transport::{JsonRpcProtocol, ProtocolFuture, ServerLimits, TransportContext};
 pub type TransportLimits = ServerLimits;
 mod plugin;
+mod rate_limit;
+pub use rate_limit::{RateLimitConfig, RateLimiter};
 mod settings;
 pub use plugin::{MaintenanceTask, PluginError, PluginFuture, PluginHandle, ServerPlugin};
 use serde_json::{Value, json};

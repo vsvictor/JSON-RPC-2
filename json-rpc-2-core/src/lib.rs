@@ -46,6 +46,10 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Помилка сховища застосунку, відмінна від внутрішньої помилки протоколу.
 pub const STORAGE_ERROR_CODE: i64 = -32000;
 
+/// Application request-rate limit exceeded.
+/// Перевищено обмеження частоти запитів застосунку.
+pub const RATE_LIMIT_ERROR_CODE: i64 = -32004;
+
 /// Creates a storage error with a client-safe message; log private details separately.
 /// Створює помилку сховища з безпечним повідомленням; приватні деталі логуйте окремо.
 pub fn storage_error(message: &'static str) -> RpcError {
