@@ -138,13 +138,4 @@ pub fn decode_rudp_packet(packet: &[u8]) -> Result<RudpPacket, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rudp_roundtrip_preserves_fields() {
-        let packet = RudpPacket::request(7, 99, b"hello".to_vec());
-        let encoded = encode_rudp_packet(&packet).unwrap();
-        assert_eq!(decode_rudp_packet(&encoded).unwrap(), packet);
-    }
-}
+mod tests;
