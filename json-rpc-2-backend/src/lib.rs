@@ -17,7 +17,7 @@ use json_rpc_2_gateway::GatewayBackendProtocol;
 pub use json_rpc_2_runtime::TransportKind;
 use json_rpc_2_runtime::{MultiTransportServer, RunningServer};
 pub use json_rpc_2_server::{
-    MaintenanceTask, PluginError, PluginFuture, PluginHandle, ServerPlugin,
+    BoxedPlugin, FromSettings, MaintenanceTask, PluginFuture, PluginHandle, ServerPlugin,
 };
 use json_rpc_2_server::{RpcServer, Settings};
 use json_rpc_2_transport::JsonRpcProtocol;
@@ -49,7 +49,7 @@ pub struct BackendBuilder {
     allow_ephemeral_ports: bool,
     log_level: Option<String>,
     configure: Vec<Configure>,
-    plugins: Vec<Box<dyn ServerPlugin>>,
+    plugins: Vec<BoxedPlugin>,
 }
 
 impl Default for BackendBuilder {
@@ -243,8 +243,14 @@ impl BackendBuilder {
 
     /// Adds a plugin; it is installed during [`build`](Self::build), in the order added.
     pub fn plugin(mut self, plugin: impl ServerPlugin) -> Self {
-        self.plugins.push(Box::new(plugin));
+        self.plugins.push(BoxedPlugin::new(plugin));
         self
+    }
+
+    /// Reads the plugin configuration from the process environment and adds the plugin.
+    pub fn plugin_from_env<P: ServerPlugin + FromSettings>(self) -> Result<Self> {
+        let plugin = P::from_env().with_context(|| format!("configuring {} plugin", P::NAME))?;
+        Ok(self.plugin(plugin))
     }
 
     /// Installs a global `tracing` subscriber when the backend is built.
@@ -285,7 +291,6 @@ impl BackendBuilder {
             let handle = plugin
                 .install(&rpc)
                 .await
-                .map_err(anyhow::Error::from_boxed)
                 .with_context(|| format!("installing {name} plugin"))?;
             maintenance.extend_from_slice(handle.maintenance());
         }

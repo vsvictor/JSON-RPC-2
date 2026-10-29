@@ -21,9 +21,9 @@ mod plugin;
 mod rate_limit;
 pub use rate_limit::{RateLimitConfig, RateLimiter};
 mod settings;
-pub use plugin::{MaintenanceTask, PluginError, PluginFuture, PluginHandle, ServerPlugin};
+pub use plugin::{BoxedPlugin, MaintenanceTask, PluginFuture, PluginHandle, ServerPlugin};
 use serde_json::{Value, json};
-pub use settings::{Settings, process_env};
+pub use settings::{FromSettings, Settings, process_env};
 use tokio::sync::Semaphore;
 
 /// Errors encountered while registering a server method.
@@ -230,6 +230,18 @@ impl RpcServer {
         Ok(())
     }
 
+    /// Registers `{prefix}{target}` aliases for every target, e.g. legacy `rpc.*` names.
+    pub fn register_aliases(
+        &self,
+        prefix: &str,
+        targets: &[&str],
+    ) -> Result<(), RegistrationError> {
+        for target in targets {
+            self.register_alias(format!("{prefix}{target}"), target)?;
+        }
+        Ok(())
+    }
+
     /// Process a complete JSON-RPC message using the JSON-RPC 2.0 rules.
     ///
     /// Transport implementations should depend on [`JsonRpcProtocol`] rather
@@ -252,6 +264,22 @@ impl RpcServer {
         Fut: Future<Output = Result<Value, RpcError>> + Send + 'static,
     {
         self.register_with_context(name, move |params, _context| handler(params))
+    }
+
+    /// Register a method whose handler receives a clone of `state` on every call,
+    /// so plugins need no per-method `Arc::clone` boilerplate.
+    pub fn register_with<S, F, Fut>(
+        &self,
+        name: impl Into<String>,
+        state: S,
+        handler: F,
+    ) -> Result<(), RegistrationError>
+    where
+        S: Clone + Send + Sync + 'static,
+        F: Fn(S, Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Value, RpcError>> + Send + 'static,
+    {
+        self.register(name, move |params| handler(state.clone(), params))
     }
 
     /// Register a method that also receives transport metadata when the
@@ -375,7 +403,9 @@ impl RpcServer {
                 .await
                 .expect("request semaphore closed");
             self.metrics.active_requests.fetch_add(1, Ordering::Relaxed);
-            let _ = handler(params, context).await;
+            if let Err(error) = handler(params, context).await {
+                log_failure(method, &error);
+            }
             self.metrics.active_requests.fetch_sub(1, Ordering::Relaxed);
             return None;
         };
@@ -391,6 +421,7 @@ impl RpcServer {
         let response = match handler(params, context).await {
             Ok(result) => Some(json!({"jsonrpc": "2.0", "result": result, "id": id})),
             Err(error) => {
+                log_failure(method, &error);
                 self.metrics
                     .rpc_errors_total
                     .fetch_add(1, Ordering::Relaxed);
@@ -425,6 +456,10 @@ impl RpcServer {
         }
         self.methods.load().get(method).cloned()
     }
+}
+
+fn log_failure(method: &str, error: &RpcError) {
+    tracing::warn!(method, code = error.code, "JSON-RPC method failed");
 }
 
 impl JsonRpcProtocol for RpcServer {

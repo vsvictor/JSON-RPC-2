@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::{sync::Arc, time::Duration};
 
 use json_rpc_2_backend::BackendBuilder;
-use json_rpc_2_backend::{PluginFuture, PluginHandle, ServerPlugin};
+use json_rpc_2_backend::{PluginHandle, ServerPlugin};
 use json_rpc_2_runtime::TransportKind;
 use json_rpc_2_server::RpcServer;
 use rustls::pki_types::CertificateDer;
@@ -10,17 +10,13 @@ use rustls::pki_types::CertificateDer;
 struct PingPlugin;
 
 impl ServerPlugin for PingPlugin {
-    fn name(&self) -> &'static str {
-        "ping"
-    }
+    const NAME: &'static str = "ping";
 
-    fn install<'a>(self: Box<Self>, server: &'a RpcServer) -> PluginFuture<'a, PluginHandle> {
-        Box::pin(async move {
-            server.register("ping_plugin", |_params| async {
-                Ok(serde_json::json!("pong"))
-            })?;
-            Ok(PluginHandle::new())
-        })
+    async fn install(self, server: &RpcServer) -> anyhow::Result<PluginHandle> {
+        server.register("ping_plugin", |_params| async {
+            Ok(serde_json::json!("pong"))
+        })?;
+        Ok(PluginHandle::new())
     }
 }
 
@@ -312,4 +308,31 @@ async fn invalid_log_level_is_rejected_and_valid_is_accepted() {
     assert!(error.err().unwrap().to_string().contains("log level"));
     let (builder, _, _, _tls_directory, _) = transport_config();
     assert!(builder.log_level("warn").build().await.is_ok());
+}
+
+struct NeedsKey;
+
+impl json_rpc_2_backend::FromSettings for NeedsKey {
+    fn from_settings(settings: &json_rpc_2_server::Settings<'_>) -> anyhow::Result<Self> {
+        settings.required("JSON_RPC_2_BACKEND_TEST_UNSET_KEY")?;
+        Ok(Self)
+    }
+}
+
+impl ServerPlugin for NeedsKey {
+    const NAME: &'static str = "needs-key";
+
+    async fn install(self, _server: &RpcServer) -> anyhow::Result<PluginHandle> {
+        Ok(PluginHandle::new())
+    }
+}
+
+#[test]
+fn plugin_from_env_names_the_plugin_on_configuration_errors() {
+    let error = BackendBuilder::new()
+        .plugin_from_env::<NeedsKey>()
+        .err()
+        .unwrap();
+    assert!(format!("{error:#}").contains("configuring needs-key plugin"));
+    assert!(format!("{error:#}").contains("JSON_RPC_2_BACKEND_TEST_UNSET_KEY is required"));
 }

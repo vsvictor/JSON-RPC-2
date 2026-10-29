@@ -37,3 +37,18 @@ fn strict_access_rejects_blank_but_allows_absent_values() {
     assert_eq!(settings.nonempty("B").unwrap().as_deref(), Some("value"));
     assert!(settings.nonempty("C").unwrap().is_none());
 }
+
+#[test]
+fn from_settings_provides_from_values() {
+    struct Pool(usize);
+    impl FromSettings for Pool {
+        fn from_settings(settings: &Settings<'_>) -> Result<Self> {
+            Ok(Self(settings.number("POOL_SIZE", 8)?))
+        }
+    }
+    assert_eq!(
+        Pool::from_values(&values(&[("POOL_SIZE", "3")])).unwrap().0,
+        3
+    );
+    assert!(Pool::from_values(&values(&[("POOL_SIZE", "x")])).is_err());
+}

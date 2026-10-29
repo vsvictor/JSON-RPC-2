@@ -11,7 +11,7 @@ of `ServerPlugin`s (`json-rpc-2-server`).
 ```rust
 let backend = BackendBuilder::from_env()?   // BACKEND_* variables
     .log_level("info")                      // RUST_LOG takes precedence
-    .plugin(MyPluginConfig::from_env()?)    // any ServerPlugin
+    .plugin_from_env::<MyPluginConfig>()?   // ServerPlugin + FromSettings
     .configure(|rpc| rpc.register("ping", |_| async { Ok("pong".into()) }).map_err(Into::into))
     .build()
     .await?;
@@ -24,6 +24,32 @@ backend.run_until_signal().await?; // or run(your_shutdown_future)
   `run` drives them until shutdown.
 - `Backend::start()` returns a `RunningBackend` (`listeners`, `address`, `close`);
   `allow_ephemeral_ports()` permits port `0` (tests/embedding).
+
+Writing a plugin:
+
+```rust
+impl FromSettings for MyPluginConfig {
+    fn from_settings(settings: &Settings<'_>) -> anyhow::Result<Self> { /* MY_* keys */ }
+}
+
+impl ServerPlugin for MyPluginConfig {
+    const NAME: &'static str = "my-plugin";
+
+    async fn install(self, server: &RpcServer) -> anyhow::Result<PluginHandle> {
+        let service = Arc::new(MyService::connect(self).await?);
+        server.register_with("my.method", service.clone(), |service, params| async move {
+            service.handle(params).await
+        })?;
+        server.register_aliases("rpc.", &["my.method"])?;
+        Ok(PluginHandle::new().with_maintenance(Duration::from_secs(60), service, |service| async move {
+            service.cleanup().await
+        }))
+    }
+}
+```
+
+`RpcServer` logs every failed method call (`warn`, method and error code), so plugins
+need no logging wrapper.
 
 Environment: `BACKEND_BIND`, `BACKEND_ID`, `BACKEND_{TCP,UDP,TLS,QUIC,…}_PORT`,
 `BACKEND_TLS_CERT_FILE`, `BACKEND_TLS_KEY_FILE`, `BACKEND_SRT_PASSPHRASE` (10..79 bytes).

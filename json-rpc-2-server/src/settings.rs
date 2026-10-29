@@ -24,6 +24,21 @@ pub fn process_env() -> HashMap<String, String> {
         .collect()
 }
 
+/// Configuration that can be read from [`Settings`], e.g. a plugin's environment variables.
+pub trait FromSettings: Sized {
+    fn from_settings(settings: &Settings<'_>) -> Result<Self>;
+
+    /// Builds the value from explicit key/value pairs.
+    fn from_values(values: &HashMap<String, String>) -> Result<Self> {
+        Self::from_settings(&Settings::new(values))
+    }
+
+    /// Reads the process environment (the host loads `.env` into it beforehand).
+    fn from_env() -> Result<Self> {
+        Self::from_values(&process_env())
+    }
+}
+
 /// Read-only configuration view without copying the source map.
 ///
 /// Blank values count as unset. Errors name keys but never include values.

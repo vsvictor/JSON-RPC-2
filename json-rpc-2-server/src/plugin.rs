@@ -3,13 +3,27 @@
 //! A plugin owns its configuration and registers its methods during
 //! [`ServerPlugin::install`]; the host only decides which plugins to add. Plugins depend on
 //! this crate alone, never on each other or on the host.
+//!
+//! ```
+//! use json_rpc_2_server::{PluginHandle, RpcServer, ServerPlugin};
+//!
+//! struct Hello;
+//!
+//! impl ServerPlugin for Hello {
+//!     const NAME: &'static str = "hello";
+//!
+//!     async fn install(self, server: &RpcServer) -> anyhow::Result<PluginHandle> {
+//!         server.register("hello", |_| async { Ok("world".into()) })?;
+//!         Ok(PluginHandle::new())
+//!     }
+//! }
+//! ```
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use crate::RpcServer;
 
-pub type PluginError = Box<dyn std::error::Error + Send + Sync>;
-pub type PluginFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> + Send + 'a>>;
+pub type PluginFuture<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
 
 type MaintenanceFn = dyn Fn() -> PluginFuture<'static, ()> + Send + Sync;
 
@@ -41,13 +55,16 @@ impl PluginHandle {
         Self::default()
     }
 
-    pub fn with_maintenance<F>(mut self, interval: Duration, task: F) -> Self
+    /// Adds a periodic task; `task` receives a clone of `state` on every run.
+    pub fn with_maintenance<S, F, Fut>(mut self, interval: Duration, state: S, task: F) -> Self
     where
-        F: Fn() -> PluginFuture<'static, ()> + Send + Sync + 'static,
+        S: Clone + Send + Sync + 'static,
+        F: Fn(S) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
     {
         self.maintenance.push(MaintenanceTask {
             interval,
-            run: Arc::new(task),
+            run: Arc::new(move || Box::pin(task(state.clone()))),
         });
         self
     }
@@ -59,13 +76,41 @@ impl PluginHandle {
 
 /// An optional set of methods installed into a shared [`RpcServer`] at startup.
 ///
-/// `RpcServer` clones share one registry, so a plugin may keep or wrap the clone it is given.
+/// `RpcServer` clones share one registry, so a plugin may keep the clone it is given.
 /// A method-name collision is an error; discard the server because earlier registrations may
 /// already have succeeded.
 pub trait ServerPlugin: Send + 'static {
-    fn name(&self) -> &'static str;
+    const NAME: &'static str;
 
-    fn install<'a>(self: Box<Self>, server: &'a RpcServer) -> PluginFuture<'a, PluginHandle>;
+    fn install(
+        self,
+        server: &RpcServer,
+    ) -> impl Future<Output = anyhow::Result<PluginHandle>> + Send;
+}
+
+type InstallFn = Box<dyn for<'a> FnOnce(&'a RpcServer) -> PluginFuture<'a, PluginHandle> + Send>;
+
+/// Type-erased [`ServerPlugin`] for hosts that keep a list of different plugins.
+pub struct BoxedPlugin {
+    name: &'static str,
+    install: InstallFn,
+}
+
+impl BoxedPlugin {
+    pub fn new<P: ServerPlugin>(plugin: P) -> Self {
+        Self {
+            name: P::NAME,
+            install: Box::new(move |server| Box::pin(plugin.install(server))),
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub fn install(self, server: &RpcServer) -> PluginFuture<'_, PluginHandle> {
+        (self.install)(server)
+    }
 }
 
 #[cfg(test)]
