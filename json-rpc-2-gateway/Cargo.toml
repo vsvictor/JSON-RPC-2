@@ -1,0 +1,14 @@
+[package]
+name = "json-rpc-2-gateway"
+version = "0.1.0"
+edition = "2024"
+description = "Backend-side JSON-RPC-2-GATEWAY v3 wire protocol adapter for JSON-RPC-2 servers"
+
+[dependencies]
+bytes = "1"
+json-rpc-2-core = { path = "../json-rpc-2-core" }
+json-rpc-2-transport = { path = "../json-rpc-2-transport" }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
