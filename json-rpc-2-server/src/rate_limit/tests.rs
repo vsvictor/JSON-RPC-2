@@ -77,3 +77,15 @@ async fn concurrent_checks_share_capacity() {
     }
     assert_eq!(accepted, 2);
 }
+
+#[test]
+fn config_from_prefixed_settings() {
+    let values = std::collections::HashMap::from([
+        ("AUTH_RATE_PER_MINUTE".to_owned(), "20".to_owned()),
+        ("BAD_BURST".to_owned(), "x".to_owned()),
+    ]);
+    let settings = Settings::new(&values);
+    let config = RateLimitConfig::from_prefix(&settings, "AUTH_RATE").unwrap();
+    assert_eq!((config.per_minute, config.burst), (20, 5));
+    assert!(RateLimitConfig::from_prefix(&settings, "BAD").is_err());
+}

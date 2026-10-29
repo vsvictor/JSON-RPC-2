@@ -5,7 +5,7 @@ use std::{
 
 use tokio::sync::Mutex;
 
-use crate::{RATE_LIMIT_ERROR_CODE, RpcError};
+use crate::{RATE_LIMIT_ERROR_CODE, RpcError, Settings};
 
 #[derive(Clone, Copy, Debug)]
 /// Token-bucket refill rate and capacity. Zero in either field disables limiting.
@@ -21,6 +21,18 @@ impl Default for RateLimitConfig {
             per_minute: 10,
             burst: 5,
         }
+    }
+}
+
+impl RateLimitConfig {
+    /// Reads `{prefix}_PER_MINUTE` and `{prefix}_BURST`, defaulting to [`Default`].
+    /// Читає `{prefix}_PER_MINUTE` і `{prefix}_BURST`; типові значення — з [`Default`].
+    pub fn from_prefix(settings: &Settings<'_>, prefix: &str) -> anyhow::Result<Self> {
+        let defaults = Self::default();
+        Ok(Self {
+            per_minute: settings.number(&format!("{prefix}_PER_MINUTE"), defaults.per_minute)?,
+            burst: settings.number(&format!("{prefix}_BURST"), defaults.burst)?,
+        })
     }
 }
 

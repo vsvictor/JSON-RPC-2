@@ -52,3 +52,26 @@ fn from_settings_provides_from_values() {
     );
     assert!(Pool::from_values(&values(&[("POOL_SIZE", "x")])).is_err());
 }
+
+#[test]
+fn durations_default_and_never_zero() {
+    let values = values(&[("ZERO", "0"), ("MS", "250"), ("BAD", "x")]);
+    let settings = Settings::new(&values);
+    assert_eq!(
+        settings.duration_secs("MISSING", 5).unwrap(),
+        Duration::from_secs(5)
+    );
+    assert_eq!(
+        settings.duration_secs("ZERO", 5).unwrap(),
+        Duration::from_secs(1)
+    );
+    assert_eq!(
+        settings.duration_millis("MS", 1).unwrap(),
+        Duration::from_millis(250)
+    );
+    assert_eq!(
+        settings.duration_millis("ZERO", 9).unwrap(),
+        Duration::from_millis(1)
+    );
+    assert!(settings.duration_secs("BAD", 1).is_err());
+}

@@ -6,6 +6,7 @@ description = "Single-builder multi-transport JSON-RPC-2 backend for JSON-RPC-2-
 
 [dependencies]
 anyhow = "1"
+dotenvy = "0.15.7"
 json-rpc-2-core = { path = "../json-rpc-2-core" }
 json-rpc-2-gateway = { path = "../json-rpc-2-gateway" }
 json-rpc-2-runtime = { path = "../json-rpc-2-runtime" }

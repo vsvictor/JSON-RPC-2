@@ -46,6 +46,7 @@ pub struct BackendBuilder {
     additional: Vec<(TransportKind, u16)>,
     srt_passphrase: Option<String>,
     instance_id: String,
+    instance_id_explicit: bool,
     allow_ephemeral_ports: bool,
     log_level: Option<String>,
     configure: Vec<Configure>,
@@ -65,6 +66,7 @@ impl Default for BackendBuilder {
             additional: Vec::new(),
             srt_passphrase: None,
             instance_id: "json-rpc-2-backend".into(),
+            instance_id_explicit: false,
             allow_ephemeral_ports: false,
             log_level: None,
             configure: Vec::new(),
@@ -76,6 +78,18 @@ impl Default for BackendBuilder {
 impl BackendBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Loads `.env` from the working directory or its parents into the process
+    /// environment (existing variables win; a missing file is fine), then calls
+    /// [`from_env`](Self::from_env).
+    pub fn from_dotenv() -> Result<Self> {
+        match dotenvy::dotenv() {
+            Ok(_) => {}
+            Err(error) if error.not_found() => {}
+            Err(error) => return Err(error).context("loading .env"),
+        }
+        Self::from_env()
     }
 
     /// Reads the `BACKEND_*` environment variables.
@@ -133,6 +147,7 @@ impl BackendBuilder {
             tls_cert_file: settings.nonempty("BACKEND_TLS_CERT_FILE")?.map(Into::into),
             tls_key_file: settings.nonempty("BACKEND_TLS_KEY_FILE")?.map(Into::into),
             srt_passphrase: settings.nonempty("BACKEND_SRT_PASSPHRASE")?,
+            instance_id_explicit: settings.get("BACKEND_ID").is_some(),
             instance_id: settings
                 .nonempty("BACKEND_ID")?
                 .unwrap_or(defaults.instance_id),
@@ -180,6 +195,16 @@ impl BackendBuilder {
 
     pub fn instance_id(mut self, id: impl Into<String>) -> Self {
         self.instance_id = id.into();
+        self.instance_id_explicit = true;
+        self
+    }
+
+    /// Sets the instance id unless `BACKEND_ID` or [`instance_id`](Self::instance_id)
+    /// already chose one.
+    pub fn default_instance_id(mut self, id: impl Into<String>) -> Self {
+        if !self.instance_id_explicit {
+            self.instance_id = id.into();
+        }
         self
     }
 

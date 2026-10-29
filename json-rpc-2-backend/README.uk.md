@@ -9,7 +9,7 @@ QUIC (та будь-які інші транспорти JSON-RPC-2), працю
 кількість `ServerPlugin` (`json-rpc-2-server`).
 
 ```rust
-let backend = BackendBuilder::from_env()?   // змінні BACKEND_*
+let backend = BackendBuilder::from_dotenv()?   // завантажує .env, потім змінні BACKEND_*
     .log_level("info")                      // RUST_LOG має пріоритет
     .plugin_from_env::<MyPluginConfig>()?   // ServerPlugin + FromSettings
     .configure(|rpc| rpc.register("ping", |_| async { Ok("pong".into()) }).map_err(Into::into))
@@ -37,7 +37,7 @@ impl ServerPlugin for MyPluginConfig {
 
     async fn install(self, server: &RpcServer) -> anyhow::Result<PluginHandle> {
         let service = Arc::new(MyService::connect(self).await?);
-        server.register_with("my.method", service.clone(), |service, params| async move {
+        server.register_typed("my.method", service.clone(), |service, params: MyParams| async move {
             service.handle(params).await
         })?;
         server.register_aliases("rpc.", &["my.method"])?;
@@ -51,10 +51,18 @@ impl ServerPlugin for MyPluginConfig {
 `RpcServer` логує кожен невдалий виклик методу (`warn`, метод і код помилки), тож
 плагінам не потрібна обгортка для логування.
 
+`register_typed` десеріалізує параметри в тип `Deserialize + JsonSchema`
+(будь-яка невідповідність — `-32602 Invalid params`) і документує метод його схемою
+та `#[schemars(example = ...)]`. `NonBlank`, `NonNull` і `keep_null` покривають типові
+правила полів; `parse_params` / `document_params` доступні, якщо обробник спершу має
+переглянути сирі параметри. `Settings::duration_secs` / `duration_millis` і
+`RateLimitConfig::from_prefix(settings, "MY_RATE")` читають типові налаштування плагінів.
+`default_instance_id` задає id, якщо його не вибрали `BACKEND_ID` чи `instance_id`.
+
 Середовище: `BACKEND_BIND`, `BACKEND_ID`, `BACKEND_{TCP,UDP,TLS,QUIC,…}_PORT`,
 `BACKEND_TLS_CERT_FILE`, `BACKEND_TLS_KEY_FILE`, `BACKEND_SRT_PASSPHRASE` (10..79 байт).
 Порти MQTT/CoAP/AMQP відхиляються (лише вхід шлюзу).
 
 Конфігурація читається через `json_rpc_2_server::Settings`, спільний із плагінами.
 Backend відхиляє явно порожні значення `BACKEND_*` і некоректні порти;
-ані він, ані `Settings` не завантажують файли `.env`.
+`.env` завантажує лише `BackendBuilder::from_dotenv` (наявні змінні мають пріоритет).

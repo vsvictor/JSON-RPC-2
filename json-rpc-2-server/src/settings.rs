@@ -11,7 +11,7 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, anyhow, ensure};
 
@@ -80,6 +80,20 @@ impl<'a> Settings<'a> {
         let port = self.number(key, default)?;
         ensure!(port > 0, "{key} must be positive");
         Ok(port)
+    }
+
+    /// Whole seconds; zero is raised to one second so a timeout or TTL is never disabled.
+    /// Цілі секунди; нуль замінюється однією секундою, тож тайм-аут або TTL не вимикається.
+    pub fn duration_secs(&self, key: &str, default_secs: u64) -> Result<Duration> {
+        Ok(Duration::from_secs(self.number(key, default_secs)?.max(1)))
+    }
+
+    /// Whole milliseconds; zero is raised to one millisecond.
+    /// Цілі мілісекунди; нуль замінюється однією мілісекундою.
+    pub fn duration_millis(&self, key: &str, default_millis: u64) -> Result<Duration> {
+        Ok(Duration::from_millis(
+            self.number(key, default_millis)?.max(1),
+        ))
     }
 }
 

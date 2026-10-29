@@ -9,7 +9,7 @@ QUIC listeners (plus any other JSON-RPC-2 transport), speaks the gateway v3 fram
 of `ServerPlugin`s (`json-rpc-2-server`).
 
 ```rust
-let backend = BackendBuilder::from_env()?   // BACKEND_* variables
+let backend = BackendBuilder::from_dotenv()?   // loads .env, then BACKEND_* variables
     .log_level("info")                      // RUST_LOG takes precedence
     .plugin_from_env::<MyPluginConfig>()?   // ServerPlugin + FromSettings
     .configure(|rpc| rpc.register("ping", |_| async { Ok("pong".into()) }).map_err(Into::into))
@@ -37,7 +37,7 @@ impl ServerPlugin for MyPluginConfig {
 
     async fn install(self, server: &RpcServer) -> anyhow::Result<PluginHandle> {
         let service = Arc::new(MyService::connect(self).await?);
-        server.register_with("my.method", service.clone(), |service, params| async move {
+        server.register_typed("my.method", service.clone(), |service, params: MyParams| async move {
             service.handle(params).await
         })?;
         server.register_aliases("rpc.", &["my.method"])?;
@@ -51,10 +51,18 @@ impl ServerPlugin for MyPluginConfig {
 `RpcServer` logs every failed method call (`warn`, method and error code), so plugins
 need no logging wrapper.
 
+`register_typed` deserializes params into a `Deserialize + JsonSchema` type
+(any mismatch is `-32602 Invalid params`) and documents the method with its schema
+and `#[schemars(example = ...)]`. `NonBlank`, `NonNull` and `keep_null` cover common
+field rules; `parse_params` / `document_params` are available when a handler must
+inspect raw params first. `Settings::duration_secs` / `duration_millis` and
+`RateLimitConfig::from_prefix(settings, "MY_RATE")` read common plugin settings.
+`default_instance_id` sets an id unless `BACKEND_ID` or `instance_id` chose one.
+
 Environment: `BACKEND_BIND`, `BACKEND_ID`, `BACKEND_{TCP,UDP,TLS,QUIC,…}_PORT`,
 `BACKEND_TLS_CERT_FILE`, `BACKEND_TLS_KEY_FILE`, `BACKEND_SRT_PASSPHRASE` (10..79 bytes).
 MQTT/CoAP/AMQP ports are rejected (gateway ingress only).
 
 Configuration parsing uses `json_rpc_2_server::Settings`, shared with plugins.
 The backend rejects explicitly blank `BACKEND_*` values and invalid ports;
-neither it nor `Settings` loads `.env` files.
+only `BackendBuilder::from_dotenv` loads `.env` (existing variables win).

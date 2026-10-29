@@ -40,3 +40,21 @@ fn backend_settings_reject_invalid_values_without_exposing_them() {
         assert!(!error.contains("private-value"));
     }
 }
+
+#[test]
+fn default_instance_id_never_overrides_a_chosen_id() {
+    let empty = HashMap::new();
+    let builder = BackendBuilder::from_settings(Settings::new(&empty))
+        .unwrap()
+        .default_instance_id("fallback");
+    assert_eq!(builder.instance_id, "fallback");
+    let values = values(&[("BACKEND_ID", "from-env")]);
+    let builder = BackendBuilder::from_settings(Settings::new(&values))
+        .unwrap()
+        .default_instance_id("fallback");
+    assert_eq!(builder.instance_id, "from-env");
+    let builder = BackendBuilder::new()
+        .instance_id("explicit")
+        .default_instance_id("fallback");
+    assert_eq!(builder.instance_id, "explicit");
+}
