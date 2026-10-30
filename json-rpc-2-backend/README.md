@@ -60,6 +60,10 @@ charges a `RateLimiter` with a raw top-level field before typed parsing;
 `one_or_many_schema::<T>(max)` documents "one object or a bounded array" params. `Settings::duration_secs` / `duration_millis` and
 `RateLimitConfig::from_prefix(settings, "MY_RATE")` read common plugin settings.
 `default_instance_id` sets an id unless `BACKEND_ID` or `instance_id` chose one.
+To avoid boilerplate, `#[rpc_methods]` on a service `impl` generates
+`register_rpc` for its `#[rpc]` methods (names, aliases, rate limits, schemas), and
+`#[derive(FromSettings)]` reads a config struct from `#[setting(...)]` attributes
+(keys, defaults, durations, ports, nested configs).
 
 Environment: `BACKEND_BIND`, `BACKEND_ID`, `BACKEND_{TCP,UDP,TLS,QUIC,…}_PORT`,
 `BACKEND_TLS_CERT_FILE`, `BACKEND_TLS_KEY_FILE`, `BACKEND_SRT_PASSPHRASE` (10..79 bytes).

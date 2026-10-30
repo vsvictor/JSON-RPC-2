@@ -148,3 +148,107 @@ fn one_or_many_schema_accepts_object_or_bounded_array() {
             .is_none()
     );
 }
+
+mod rpc_methods_macro {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
+
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+    use serde_json::{Value, json};
+
+    use crate::{NonBlank, RateLimitConfig, RateLimiter, RpcResult, RpcServer, rpc_methods};
+
+    #[derive(Deserialize, JsonSchema)]
+    #[schemars(example = json!({"name": "Ada"}))]
+    struct Name {
+        name: NonBlank,
+    }
+
+    #[derive(Deserialize, JsonSchema)]
+    struct Empty {}
+
+    #[derive(Default)]
+    struct Greeter {
+        calls: AtomicU32,
+    }
+
+    #[rpc_methods(alias_prefix = "rpc.")]
+    impl Greeter {
+        #[rpc]
+        async fn hello(&self, params: Name) -> RpcResult<String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(format!("Hello, {}", params.name.as_str()))
+        }
+
+        #[rpc(name = "greeter.count", alias = "count")]
+        async fn count(&self, _params: Empty) -> RpcResult<u32> {
+            Ok(self.calls.load(Ordering::Relaxed))
+        }
+
+        #[rpc(name = "limited", limit = "name")]
+        async fn limited(&self, params: Name) -> RpcResult<Value> {
+            Ok(json!(params.name))
+        }
+
+        fn helper(&self) -> u32 {
+            self.calls.load(Ordering::Relaxed)
+        }
+    }
+
+    async fn call(server: &RpcServer, method: &str, params: Value) -> Value {
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        let response = server
+            .handle_bytes(request.to_string().as_bytes())
+            .await
+            .unwrap();
+        serde_json::from_slice(&response).unwrap()
+    }
+
+    #[tokio::test]
+    async fn registers_names_aliases_limits_and_docs() {
+        let server = RpcServer::new();
+        let greeter = Arc::new(Greeter::default());
+        let limiter = Arc::new(RateLimiter::new(RateLimitConfig {
+            per_minute: 1,
+            burst: 1,
+        }));
+        greeter.clone().register_rpc(&server, &limiter).unwrap();
+
+        let ok = call(&server, "rpc.hello", json!({"name": "Ada"})).await;
+        assert_eq!(ok["result"], "Hello, Ada");
+        assert_eq!(
+            call(&server, "hello", json!({"name": " "})).await["error"]["code"],
+            -32602
+        );
+        for name in ["greeter.count", "rpc.greeter.count", "count"] {
+            assert_eq!(call(&server, name, json!({})).await["result"], 1);
+        }
+        assert_eq!(greeter.helper(), 1);
+
+        assert_eq!(
+            call(&server, "limited", json!({"name": "x"})).await["result"],
+            "x"
+        );
+        assert_eq!(
+            call(&server, "rpc.limited", json!({"name": "x"})).await["error"]["code"],
+            crate::RATE_LIMIT_ERROR_CODE
+        );
+
+        let hello = server
+            .method_descriptions()
+            .into_iter()
+            .find(|d| d.name == "rpc.hello")
+            .unwrap();
+        assert_eq!(
+            hello.example_request.unwrap()["params"],
+            json!({"name": "Ada"})
+        );
+        assert!(
+            server.register_alias("hello", "count").is_err(),
+            "names are taken"
+        );
+    }
+}

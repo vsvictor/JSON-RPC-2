@@ -60,6 +60,10 @@ impl ServerPlugin for MyPluginConfig {
 `one_or_many_schema::<T>(max)` документує параметри «один об'єкт або обмежений масив». `Settings::duration_secs` / `duration_millis` і
 `RateLimitConfig::from_prefix(settings, "MY_RATE")` читають типові налаштування плагінів.
 `default_instance_id` задає id, якщо його не вибрали `BACKEND_ID` чи `instance_id`.
+Щоб уникнути шаблонного коду, `#[rpc_methods]` на `impl` сервісу генерує
+`register_rpc` для його методів `#[rpc]` (імена, псевдоніми, ліміти, схеми), а
+`#[derive(FromSettings)]` читає структуру конфігу за атрибутами `#[setting(...)]`
+(ключі, значення за замовчуванням, тривалості, порти, вкладені конфіги).
 
 Середовище: `BACKEND_BIND`, `BACKEND_ID`, `BACKEND_{TCP,UDP,TLS,QUIC,…}_PORT`,
 `BACKEND_TLS_CERT_FILE`, `BACKEND_TLS_KEY_FILE`, `BACKEND_SRT_PASSPHRASE` (10..79 байт).

@@ -14,7 +14,16 @@ use std::{
 };
 use tokio::task::JoinSet;
 
+// Lets generated `::json_rpc_2_server::...` paths resolve inside this crate's own tests.
+extern crate self as json_rpc_2_server;
+
 pub use json_rpc_2_core::*;
+pub use json_rpc_2_macros::{FromSettings, rpc_methods};
+
+#[doc(hidden)]
+pub mod __private {
+    pub use anyhow;
+}
 pub use json_rpc_2_transport::{JsonRpcProtocol, ProtocolFuture, ServerLimits, TransportContext};
 pub type TransportLimits = ServerLimits;
 mod plugin;

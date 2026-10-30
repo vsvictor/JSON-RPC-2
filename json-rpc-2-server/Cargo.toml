@@ -27,6 +27,7 @@ anyhow = "1"
 arc-swap = "1"
 bytes = "1"
 json-rpc-2-core = { path = "../json-rpc-2-core" }
+json-rpc-2-macros = { path = "../json-rpc-2-macros" }
 json-rpc-2-transport = { path = "../json-rpc-2-transport" }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

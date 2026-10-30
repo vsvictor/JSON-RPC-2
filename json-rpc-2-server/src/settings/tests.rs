@@ -75,3 +75,116 @@ fn durations_default_and_never_zero() {
     );
     assert!(settings.duration_secs("BAD", 1).is_err());
 }
+
+#[test]
+fn parse_helpers_trim_and_hide_values() {
+    let values = values(&[("FLAG", " true "), ("BAD", "secret")]);
+    let settings = Settings::new(&values);
+    assert_eq!(settings.parse::<bool>("FLAG").unwrap(), Some(true));
+    assert_eq!(settings.parse::<bool>("MISSING").unwrap(), None);
+    assert!(settings.parse_or("MISSING", false).is_ok_and(|v| !v));
+    assert!(settings.parse_required::<u8>("MISSING").is_err());
+    let error = settings.parse::<u8>("BAD").unwrap_err().to_string();
+    assert!(error.contains("BAD") && !error.contains("secret"));
+}
+
+mod derive {
+    use std::{collections::HashMap, time::Duration};
+
+    use crate::{FromSettings, Settings};
+
+    #[derive(Debug, PartialEq)]
+    struct Pair(u8, u8);
+
+    #[derive(FromSettings)]
+    #[settings(prefix = "DEMO_")]
+    struct Demo {
+        name: String,
+        #[setting(default = "guest")]
+        user: String,
+        note: Option<String>,
+        #[setting(default = 8, min = 1)]
+        pool: usize,
+        retries: Option<u32>,
+        #[setting(key = "SHARED_FLAG", default = false)]
+        flag: bool,
+        #[setting(secs, default = 5)]
+        timeout: Duration,
+        #[setting(millis, default = 300)]
+        backoff: Duration,
+        #[setting(port, default = 5432)]
+        port: u16,
+        #[setting(with = |s: &Settings<'_>| Ok::<_, anyhow::Error>(Pair(s.number("A", 1)?, 2)))]
+        pair: Pair,
+        #[setting(nested)]
+        inner: Inner,
+    }
+
+    #[derive(FromSettings)]
+    struct Inner {
+        #[setting(key = "INNER")]
+        value: u64,
+    }
+
+    fn values(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect()
+    }
+
+    #[test]
+    fn defaults_keys_and_conversions() {
+        let demo = Demo::from_values(&values(&[("DEMO_NAME", " n "), ("INNER", "9")])).unwrap();
+        assert_eq!(demo.name, " n ");
+        assert_eq!(demo.user, "guest");
+        assert_eq!(demo.note, None);
+        assert_eq!(demo.pool, 8);
+        assert_eq!(demo.retries, None);
+        assert!(!demo.flag);
+        assert_eq!(demo.timeout, Duration::from_secs(5));
+        assert_eq!(demo.backoff, Duration::from_millis(300));
+        assert_eq!(demo.port, 5432);
+        assert_eq!(demo.pair, Pair(1, 2));
+        assert_eq!(demo.inner.value, 9);
+
+        let demo = Demo::from_values(&values(&[
+            ("DEMO_NAME", "n"),
+            ("DEMO_USER", "u"),
+            ("DEMO_NOTE", "x"),
+            ("DEMO_POOL", "0"),
+            ("DEMO_RETRIES", "3"),
+            ("SHARED_FLAG", "true"),
+            ("DEMO_TIMEOUT", "0"),
+            ("DEMO_PORT", "1"),
+            ("A", "7"),
+            ("INNER", "1"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            (demo.user.as_str(), demo.note.as_deref(), demo.pool),
+            ("u", Some("x"), 1)
+        );
+        assert_eq!((demo.retries, demo.flag, demo.port), (Some(3), true, 1));
+        assert_eq!(demo.timeout, Duration::from_secs(1));
+        assert_eq!(demo.pair, Pair(7, 2));
+    }
+
+    #[test]
+    fn required_and_invalid_values_name_the_key() {
+        let error = Demo::from_values(&values(&[("INNER", "1")])).err().unwrap();
+        assert!(error.to_string().contains("DEMO_NAME is required"));
+        let error = Demo::from_values(&values(&[("DEMO_NAME", "n")]))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("INNER is required"));
+        let error = Demo::from_values(&values(&[
+            ("DEMO_NAME", "n"),
+            ("INNER", "1"),
+            ("DEMO_RETRIES", "many"),
+        ]))
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("DEMO_RETRIES") && !error.to_string().contains("many"));
+    }
+}

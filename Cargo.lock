@@ -2014,6 +2014,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-rpc-2-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "json-rpc-2-quic"
 version = "0.1.0"
 dependencies = [
@@ -2075,6 +2084,7 @@ dependencies = [
  "bytes",
  "criterion",
  "json-rpc-2-core 0.1.0",
+ "json-rpc-2-macros",
  "json-rpc-2-tcp",
  "json-rpc-2-transport 0.1.0",
  "jsonrpsee",

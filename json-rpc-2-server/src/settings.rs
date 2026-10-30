@@ -75,6 +75,30 @@ impl<'a> Settings<'a> {
         }
     }
 
+    /// Parses a trimmed value with `FromStr`; unset or blank is `None`.
+    /// Розбирає обрізане значення через `FromStr`; незадане чи порожнє — `None`.
+    pub fn parse<T: FromStr>(&self, key: &str) -> Result<Option<T>> {
+        self.get(key)
+            .map(|value| {
+                value
+                    .trim()
+                    .parse()
+                    .map_err(|_| anyhow!("invalid value for {key}"))
+            })
+            .transpose()
+    }
+
+    /// Like [`parse`](Self::parse), with a default for an unset value.
+    pub fn parse_or<T: FromStr>(&self, key: &str, default: T) -> Result<T> {
+        Ok(self.parse(key)?.unwrap_or(default))
+    }
+
+    /// Like [`parse`](Self::parse), but the value is required.
+    pub fn parse_required<T: FromStr>(&self, key: &str) -> Result<T> {
+        self.parse(key)?
+            .with_context(|| format!("{key} is required"))
+    }
+
     /// A port in `1..=65535`; blank values use the default.
     pub fn port(&self, key: &str, default: u16) -> Result<u16> {
         let port = self.number(key, default)?;
