@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "cargo-json-rpc-2-plugin",
     "json-rpc-2",
     "json-rpc-2-backend",
     "json-rpc-2-cli",
@@ -20,6 +21,7 @@ members = [
     "json-rpc-2-websockets",
 ]
 default-members = [
+    "cargo-json-rpc-2-plugin",
     "json-rpc-2",
     "json-rpc-2-backend",
     "json-rpc-2-cli",

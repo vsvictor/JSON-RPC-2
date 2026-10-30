@@ -1,0 +1,61 @@
+//! Application logic of the `__NAME__` plugin: params, results and JSON-RPC methods.
+//!
+//! Прикладна логіка плагіна `__NAME__`: параметри, результати й JSON-RPC методи.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use json_rpc_2_server::{NonBlank, RpcResult, rpc_methods};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+/// Params of the `__NAME__` method; invalid input is answered with -32602.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(example = serde_json::json!({"name": "Ada"}))]
+pub struct __PASCAL__Params {
+    pub name: NonBlank,
+}
+
+/// Result of the `__NAME__` method.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct __PASCAL__Result {
+    pub message: String,
+    pub calls_since_reset: u64,
+}
+
+/// Business logic without transport concerns.
+pub struct __PASCAL__Service {
+    greeting: String,
+    calls: AtomicU64,
+}
+
+impl __PASCAL__Service {
+    pub fn new(greeting: impl Into<String>) -> Self {
+        Self {
+            greeting: greeting.into(),
+            calls: AtomicU64::new(0),
+        }
+    }
+
+    /// Resets the call counter; used by the maintenance task.
+    pub fn reset(&self) -> u64 {
+        self.calls.swap(0, Ordering::Relaxed)
+    }
+}
+
+/// Generates `register_rpc(self: Arc<Self>, server)`: `__NAME__` and `rpc.__NAME__`.
+#[rpc_methods(alias_prefix = "rpc.")]
+impl __PASCAL__Service {
+    #[rpc(name = "__NAME__")]
+    pub async fn call(&self, params: __PASCAL__Params) -> RpcResult<__PASCAL__Result> {
+        let calls = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        Ok(__PASCAL__Result {
+            message: format!("{}, {}!", self.greeting, params.name.as_str()),
+            calls_since_reset: calls,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests;

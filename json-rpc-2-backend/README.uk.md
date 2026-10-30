@@ -65,6 +65,19 @@ impl ServerPlugin for MyPluginConfig {
 `#[derive(FromSettings)]` читає структуру конфігу за атрибутами `#[setting(...)]`
 (ключі, значення за замовчуванням, тривалості, порти, вкладені конфіги).
 
+Нові крейти плагінів створює підкоманда `cargo-json-rpc-2-plugin`:
+
+```bash
+cargo install --git https://github.com/vsvictor/JSON-RPC-2 --branch start cargo-json-rpc-2-plugin
+cargo json-rpc-2-plugin new my-plugin   # у корені workspace; опції — у --help
+```
+
+Вона створює крейт (`lib.rs` — підключення, `service.rs` — логіка, файли
+`tests.rs`), додає його в `[workspace] members`, а якщо кореневий пакет має
+`src/main.rs`, — feature `my-plugin`, optional-залежність і виклик
+`plugin_from_env` перед `builder.build()`. Префікс крейта береться з
+`--crate-prefix` або `[workspace.metadata.json-rpc-2-plugin] crate-prefix`.
+
 Середовище: `BACKEND_BIND`, `BACKEND_ID`, `BACKEND_{TCP,UDP,TLS,QUIC,…}_PORT`,
 `BACKEND_TLS_CERT_FILE`, `BACKEND_TLS_KEY_FILE`, `BACKEND_SRT_PASSPHRASE` (10..79 байт).
 Порти MQTT/CoAP/AMQP відхиляються (лише вхід шлюзу).

@@ -1,0 +1,16 @@
+[package]
+name = "cargo-json-rpc-2-plugin"
+version = "0.1.0"
+edition = "2024"
+description = "Cargo subcommand that scaffolds json-rpc-2-server plugin crates"
+
+[[bin]]
+name = "cargo-json-rpc-2-plugin"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+toml_edit = "0.25"
+
+[dev-dependencies]
+tempfile = "3"

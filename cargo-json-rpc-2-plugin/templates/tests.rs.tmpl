@@ -1,0 +1,18 @@
+use std::collections::HashMap;
+
+use super::*;
+
+#[test]
+fn config_reads_settings_with_defaults() {
+    let config = __PASCAL__Config::from_values(&HashMap::new()).unwrap();
+    assert_eq!(config.greeting, "Hello");
+    assert_eq!(config.reset_secs, Duration::from_secs(3600));
+
+    let values = HashMap::from([
+        ("__PREFIX__GREETING".to_owned(), "Hey".to_owned()),
+        ("__PREFIX__RESET_SECS".to_owned(), "60".to_owned()),
+    ]);
+    let config = __PASCAL__Config::from_values(&values).unwrap();
+    assert_eq!(config.greeting, "Hey");
+    assert_eq!(config.reset_secs, Duration::from_secs(60));
+}

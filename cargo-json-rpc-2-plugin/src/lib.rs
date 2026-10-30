@@ -1,0 +1,344 @@
+//! Scaffolds a `json-rpc-2-server` plugin crate and wires it into a Cargo workspace.
+//!
+//! Створює крейт плагіна для `json-rpc-2-server` і підключає його до Cargo workspace.
+//!
+//! The generated crate keeps application logic in `src/service.rs`
+//! (`#[rpc_methods]`) and the wiring in `src/lib.rs` (`#[derive(FromSettings)]`
+//! config + `ServerPlugin`); tests live in `tests.rs` files.
+
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result, bail};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value, value};
+
+const LIB_TEMPLATE: &str = include_str!("../templates/lib.rs.tmpl");
+const TESTS_TEMPLATE: &str = include_str!("../templates/tests.rs.tmpl");
+const SERVICE_TEMPLATE: &str = include_str!("../templates/service.rs.tmpl");
+const SERVICE_TESTS_TEMPLATE: &str = include_str!("../templates/service_tests.rs.tmpl");
+const ENV_TEMPLATE: &str = include_str!("../templates/env.tmpl");
+
+/// Git source used when the workspace does not declare `json-rpc-2-server` itself.
+pub const JSON_RPC_2_GIT: &str = "https://github.com/vsvictor/JSON-RPC-2";
+/// `[workspace.metadata.<METADATA_KEY>]` holds generator defaults.
+pub const METADATA_KEY: &str = "json-rpc-2-plugin";
+
+/// All names derived from the plugin name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Names {
+    /// `fleet_stats`: method name and `ServerPlugin::NAME`.
+    pub snake: String,
+    /// `fleet-stats`: Cargo feature.
+    pub kebab: String,
+    /// `<crate-prefix>fleet-stats`: crate and directory name.
+    pub krate: String,
+    /// Crate name as a Rust path.
+    pub module: String,
+    /// `FleetStats`: type name prefix.
+    pub pascal: String,
+    /// `FLEET_STATS_`: settings key prefix.
+    pub env_prefix: String,
+}
+
+impl Names {
+    pub fn new(raw: &str, crate_prefix: &str) -> Result<Self> {
+        let snake = raw.trim().to_lowercase().replace('-', "_");
+        let valid = snake.starts_with(|c: char| c.is_ascii_lowercase())
+            && snake
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            && snake.split('_').all(|part| !part.is_empty());
+        if !valid {
+            bail!(
+                "invalid plugin name `{raw}`: use letters, digits, `-` or `_`, starting with a letter"
+            );
+        }
+        if !crate_prefix
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        {
+            bail!("invalid crate prefix `{crate_prefix}`");
+        }
+        let kebab = snake.replace('_', "-");
+        let krate = format!("{crate_prefix}{kebab}");
+        Ok(Self {
+            module: krate.replace('-', "_"),
+            pascal: snake
+                .split('_')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    chars
+                        .next()
+                        .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+                        .unwrap_or_default()
+                })
+                .collect(),
+            env_prefix: format!("{}_", snake.to_uppercase()),
+            snake,
+            kebab,
+            krate,
+        })
+    }
+
+    fn render(&self, template: &str) -> String {
+        template
+            .replace("__NAME__", &self.snake)
+            .replace("__KEBAB__", &self.kebab)
+            .replace("__CRATE__", &self.krate)
+            .replace("__MODULE__", &self.module)
+            .replace("__PASCAL__", &self.pascal)
+            .replace("__PREFIX__", &self.env_prefix)
+    }
+}
+
+/// Generator input.
+#[derive(Debug, Clone)]
+pub struct Options {
+    pub name: String,
+    /// Workspace root (directory with the root `Cargo.toml`).
+    pub workspace: PathBuf,
+    /// Overrides `[workspace.metadata.json-rpc-2-plugin] crate-prefix`.
+    pub crate_prefix: Option<String>,
+    /// Only create the crate and add it to `members`.
+    pub no_wire: bool,
+}
+
+/// What the generator did, for the user report.
+#[derive(Debug, Default)]
+pub struct Report {
+    pub crate_dir: PathBuf,
+    pub created: Vec<PathBuf>,
+    pub changed: Vec<PathBuf>,
+    /// Feature added to the root package, if any.
+    pub feature: Option<String>,
+    /// Manual steps left to the user.
+    pub hints: Vec<String>,
+}
+
+/// Creates the plugin. Every edit is prepared first; nothing is written if any
+/// check fails.
+pub fn generate(options: &Options) -> Result<(Names, Report)> {
+    let root = &options.workspace;
+    let manifest_path = root.join("Cargo.toml");
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("cannot read {}", manifest_path.display()))?;
+    let mut manifest: DocumentMut = manifest_text
+        .parse()
+        .with_context(|| format!("cannot parse {}", manifest_path.display()))?;
+    let Some(workspace) = manifest.get("workspace").and_then(Item::as_table) else {
+        bail!(
+            "{} has no [workspace]; run in a workspace root",
+            manifest_path.display()
+        );
+    };
+
+    let crate_prefix = match &options.crate_prefix {
+        Some(prefix) => prefix.clone(),
+        None => workspace
+            .get("metadata")
+            .and_then(|metadata| metadata.get(METADATA_KEY))
+            .and_then(|config| config.get("crate-prefix"))
+            .and_then(Item::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+    };
+    let names = Names::new(&options.name, &crate_prefix)?;
+    let crate_dir = root.join(&names.krate);
+    if crate_dir.exists() {
+        bail!("{} already exists", crate_dir.display());
+    }
+
+    let plugin_manifest = plugin_manifest(&names, workspace);
+    add_member(&mut manifest, &names.krate)?;
+
+    let mut report = Report {
+        crate_dir: crate_dir.clone(),
+        ..Report::default()
+    };
+    let mut main_edit = None;
+    let main_path = root.join("src").join("main.rs");
+    let config_path = format!("{}::{}Config", names.module, names.pascal);
+    if options.no_wire {
+        report.hints.push(format!(
+            "register the plugin: builder.plugin_from_env::<{config_path}>()?"
+        ));
+    } else if manifest.get("package").is_some() && main_path.is_file() {
+        let main_text = fs::read_to_string(&main_path)?;
+        main_edit = Some(wire_main(&main_text, &names, &config_path)?);
+        add_feature(&mut manifest, &names)?;
+        report.feature = Some(names.kebab.clone());
+    } else {
+        report.hints.push(format!(
+            "no root package with src/main.rs: add `{}` as a dependency and call builder.plugin_from_env::<{config_path}>()?",
+            names.krate
+        ));
+    }
+
+    let env_path = root.join(".env.example");
+    let env_edit = env_path
+        .is_file()
+        .then(|| -> Result<String> {
+            let text = fs::read_to_string(&env_path)?;
+            Ok(format!(
+                "{}\n\n{}",
+                text.trim_end_matches('\n'),
+                names.render(ENV_TEMPLATE)
+            ))
+        })
+        .transpose()?;
+
+    // Write phase.
+    let files = [
+        ("Cargo.toml", plugin_manifest),
+        ("src/lib.rs", names.render(LIB_TEMPLATE)),
+        ("src/tests.rs", names.render(TESTS_TEMPLATE)),
+        ("src/service.rs", names.render(SERVICE_TEMPLATE)),
+        ("src/service/tests.rs", names.render(SERVICE_TESTS_TEMPLATE)),
+    ];
+    fs::create_dir_all(crate_dir.join("src").join("service"))?;
+    for (relative, contents) in files {
+        let path = crate_dir.join(relative);
+        fs::write(&path, contents)?;
+        report.created.push(path);
+    }
+    fs::write(&manifest_path, manifest.to_string())?;
+    report.changed.push(manifest_path);
+    if let Some(text) = main_edit {
+        fs::write(&main_path, text)?;
+        report.changed.push(main_path);
+    }
+    match env_edit {
+        Some(text) => {
+            fs::write(&env_path, text)?;
+            report.changed.push(env_path);
+        }
+        None => report.hints.push(format!(
+            "document {0}GREETING and {0}RESET_SECS for your deployment",
+            names.env_prefix
+        )),
+    }
+    Ok((names, report))
+}
+
+/// Generated crate manifest: reuses `[workspace.package]` / `[workspace.dependencies]`
+/// when present, otherwise pins explicit versions.
+fn plugin_manifest(names: &Names, workspace: &Table) -> String {
+    let package = workspace.get("package").and_then(Item::as_table);
+    let inherited = |key: &str, fallback: &str| match package.and_then(|table| table.get(key)) {
+        Some(_) => format!("{key}.workspace = true"),
+        None => format!("{key} = \"{fallback}\""),
+    };
+    let shared = workspace.get("dependencies").and_then(Item::as_table);
+    let dependency = |name: &str, fallback: &str| match shared.and_then(|table| table.get(name)) {
+        Some(_) => format!("{name}.workspace = true"),
+        None => format!("{name} = {fallback}"),
+    };
+    let server = format!("{{ git = \"{JSON_RPC_2_GIT}\", branch = \"start\" }}");
+    [
+        "[package]".to_owned(),
+        format!("name = \"{}\"", names.krate),
+        inherited("version", "0.1.0"),
+        inherited("edition", "2024"),
+        String::new(),
+        "[dependencies]".to_owned(),
+        dependency("anyhow", "\"1\""),
+        dependency("json-rpc-2-server", &server),
+        "schemars = \"1\"".to_owned(),
+        dependency("serde", "{ version = \"1\", features = [\"derive\"] }"),
+        dependency("serde_json", "\"1\""),
+        dependency("tracing", "\"0.1\""),
+        String::new(),
+        "[dev-dependencies]".to_owned(),
+        dependency(
+            "tokio",
+            "{ version = \"1\", features = [\"macros\", \"rt\"] }",
+        ),
+        String::new(),
+    ]
+    .join("\n")
+}
+
+fn add_member(manifest: &mut DocumentMut, krate: &str) -> Result<()> {
+    let workspace = manifest["workspace"]
+        .as_table_mut()
+        .context("[workspace] must be a table")?;
+    let members = workspace
+        .entry("members")
+        .or_insert_with(|| value(Array::new()))
+        .as_array_mut()
+        .context("workspace.members must be an array")?;
+    if members.iter().any(|member| member.as_str() == Some(krate)) {
+        bail!("{krate} is already a workspace member");
+    }
+    members.push(krate);
+    Ok(())
+}
+
+fn add_feature(manifest: &mut DocumentMut, names: &Names) -> Result<()> {
+    let features = manifest
+        .entry("features")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .context("[features] must be a table")?;
+    if features.contains_key(&names.kebab) {
+        bail!("feature `{}` already exists", names.kebab);
+    }
+    let mut enables = Array::new();
+    enables.push(format!("dep:{}", names.krate));
+    features.insert(&names.kebab, value(enables));
+
+    let dependencies = manifest
+        .entry("dependencies")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .context("[dependencies] must be a table")?;
+    if dependencies.contains_key(&names.krate) {
+        bail!("dependency `{}` already exists", names.krate);
+    }
+    let mut dependency = InlineTable::new();
+    dependency.insert("path", Value::from(names.krate.as_str()));
+    dependency.insert("version", Value::from("0.1.0"));
+    dependency.insert("optional", Value::from(true));
+    dependencies.insert(&names.krate, value(dependency));
+    Ok(())
+}
+
+/// Inserts a feature-gated `plugin_from_env` block before `builder.build()`.
+fn wire_main(text: &str, names: &Names, config_path: &str) -> Result<String> {
+    if text.contains(&format!("feature = \"{}\"", names.kebab)) {
+        bail!("src/main.rs already uses feature `{}`", names.kebab);
+    }
+    let mut output = String::with_capacity(text.len() + 160);
+    let mut inserted = false;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if !inserted && trimmed.starts_with("builder.build()") {
+            let indent = &line[..line.len() - trimmed.len()];
+            output.push_str(&format!(
+                "{indent}#[cfg(feature = \"{kebab}\")]\n{indent}{{\n{indent}    builder = builder.plugin_from_env::<{config_path}>()?;\n{indent}}}\n",
+                kebab = names.kebab
+            ));
+            inserted = true;
+        }
+        output.push_str(line);
+    }
+    if !inserted {
+        bail!(
+            "cannot find `builder.build()` in src/main.rs; use --no-wire and call builder.plugin_from_env::<{config_path}>() yourself"
+        );
+    }
+    Ok(output)
+}
+
+/// Relative path for messages.
+pub fn display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests;

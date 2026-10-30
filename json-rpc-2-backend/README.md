@@ -65,6 +65,19 @@ To avoid boilerplate, `#[rpc_methods]` on a service `impl` generates
 `#[derive(FromSettings)]` reads a config struct from `#[setting(...)]` attributes
 (keys, defaults, durations, ports, nested configs).
 
+New plugin crates are scaffolded by the `cargo-json-rpc-2-plugin` subcommand:
+
+```bash
+cargo install --git https://github.com/vsvictor/JSON-RPC-2 --branch start cargo-json-rpc-2-plugin
+cargo json-rpc-2-plugin new my-plugin   # in the workspace root; --help for options
+```
+
+It creates the crate (`lib.rs` wiring, `service.rs` logic, `tests.rs` files), adds
+it to `[workspace] members` and, if the root package has `src/main.rs`, a
+`my-plugin` feature, an optional dependency and a `plugin_from_env` call before
+`builder.build()`. The crate prefix comes from `--crate-prefix` or
+`[workspace.metadata.json-rpc-2-plugin] crate-prefix`.
+
 Environment: `BACKEND_BIND`, `BACKEND_ID`, `BACKEND_{TCP,UDP,TLS,QUIC,…}_PORT`,
 `BACKEND_TLS_CERT_FILE`, `BACKEND_TLS_KEY_FILE`, `BACKEND_SRT_PASSPHRASE` (10..79 bytes).
 MQTT/CoAP/AMQP ports are rejected (gateway ingress only).

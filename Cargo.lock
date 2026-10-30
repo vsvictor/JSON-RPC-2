@@ -537,6 +537,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-json-rpc-2-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tempfile",
+ "toml_edit",
+]
+
+[[package]]
 name = "cargo-platform"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3999,6 +4008,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

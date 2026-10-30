@@ -1,0 +1,40 @@
+use std::sync::Arc;
+
+use json_rpc_2_server::RpcServer;
+use serde_json::{Value, json};
+
+use super::*;
+
+async fn call(server: &RpcServer, method: &str, params: Value) -> Value {
+    let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+    let response = server
+        .handle_bytes(request.to_string().as_bytes())
+        .await
+        .unwrap();
+    serde_json::from_slice(&response).unwrap()
+}
+
+#[tokio::test]
+async fn answers_on_both_names_and_validates_params() {
+    let server = RpcServer::new();
+    Arc::new(__PASCAL__Service::new("Hi"))
+        .register_rpc(&server)
+        .unwrap();
+
+    let ok = call(&server, "rpc.__NAME__", json!({"name": "Ada"})).await;
+    assert_eq!(
+        ok["result"],
+        json!({"message": "Hi, Ada!", "callsSinceReset": 1})
+    );
+
+    let bad = call(&server, "__NAME__", json!({"name": "  "})).await;
+    assert_eq!(bad["error"]["code"], -32602);
+}
+
+#[test]
+fn reset_returns_and_clears_the_counter() {
+    let service = __PASCAL__Service::new("Hi");
+    service.calls.store(3, Ordering::Relaxed);
+    assert_eq!(service.reset(), 3);
+    assert_eq!(service.reset(), 0);
+}
