@@ -252,3 +252,141 @@ mod rpc_methods_macro {
         );
     }
 }
+
+mod rpc_api_macro {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
+
+    use serde_json::{Value, json};
+
+    use crate::{RateLimitConfig, RateLimiter, RpcResult, RpcServer, rpc_api};
+
+    #[rpc_api(alias_prefix = "rpc.")]
+    mod api {
+        use crate::NonBlank;
+
+        #[params(method = "getShift", result = Shift)]
+        #[schemars(example = serde_json::json!({"driverId": "d1"}))]
+        pub struct GetShift {
+            pub driver_id: NonBlank,
+        }
+
+        #[result]
+        pub struct Shift {
+            pub driver_id: String,
+            pub is_open: bool,
+        }
+
+        #[params(method = "tracking.sendLocation", result = u32, limit = "phone", alias = "sendLocation")]
+        #[serde(rename_all = "snake_case")]
+        pub struct SendLocation {
+            pub phone: NonBlank,
+            pub point_count: u32,
+        }
+
+        #[params(method = "session.info", result = String, handler = "info")]
+        #[serde(tag = "kind")]
+        pub enum Info {
+            Short,
+            Long,
+        }
+    }
+
+    #[rpc_api(trait_name = "CounterApi")]
+    mod counter {
+        #[params(method = "count", result = u32)]
+        pub struct Count {}
+    }
+
+    #[derive(Default)]
+    struct Logic {
+        calls: AtomicU32,
+    }
+
+    impl api::Api for Logic {
+        async fn get_shift(&self, params: api::GetShift) -> RpcResult<api::Shift> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(api::Shift {
+                driver_id: params.driver_id.as_str().to_owned(),
+                is_open: true,
+            })
+        }
+
+        async fn tracking_send_location(&self, params: api::SendLocation) -> RpcResult<u32> {
+            Ok(params.point_count + u32::from(params.phone.as_str().is_empty()))
+        }
+
+        async fn info(&self, params: api::Info) -> RpcResult<String> {
+            Ok(match params {
+                api::Info::Short => "short".into(),
+                api::Info::Long => "long".into(),
+            })
+        }
+    }
+
+    impl counter::CounterApi for Logic {
+        async fn count(&self, _params: counter::Count) -> RpcResult<u32> {
+            Ok(self.calls.load(Ordering::Relaxed))
+        }
+    }
+
+    async fn call(server: &RpcServer, method: &str, params: Value) -> Value {
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        let response = server
+            .handle_bytes(request.to_string().as_bytes())
+            .await
+            .unwrap();
+        serde_json::from_slice(&response).unwrap()
+    }
+
+    #[tokio::test]
+    async fn generates_trait_registration_derives_and_aliases() {
+        let server = RpcServer::new();
+        let logic = Arc::new(Logic::default());
+        let limiter = Arc::new(RateLimiter::new(RateLimitConfig {
+            per_minute: 1,
+            burst: 1,
+        }));
+        api::Api::register_rpc(logic.clone(), &server, &limiter).unwrap();
+        counter::CounterApi::register_rpc(logic.clone(), &server).unwrap();
+
+        let shift = call(&server, "rpc.getShift", json!({"driverId": "d1"})).await;
+        assert_eq!(shift["result"], json!({"driverId": "d1", "isOpen": true}));
+        assert_eq!(
+            call(&server, "getShift", json!({"driverId": " "})).await["error"]["code"],
+            -32602
+        );
+        assert_eq!(call(&server, "count", json!({})).await["result"], 1);
+        assert_eq!(
+            call(&server, "rpc.count", json!({})).await["error"]["code"],
+            -32601,
+            "alias_prefix is per module"
+        );
+
+        let location = json!({"phone": "+380", "point_count": 3});
+        assert_eq!(
+            call(&server, "sendLocation", location.clone()).await["result"],
+            3
+        );
+        assert_eq!(
+            call(&server, "rpc.tracking.sendLocation", location).await["error"]["code"],
+            crate::RATE_LIMIT_ERROR_CODE
+        );
+        assert_eq!(
+            call(&server, "session.info", json!({"kind": "Long"})).await["result"],
+            "long"
+        );
+
+        let described = server
+            .method_descriptions()
+            .into_iter()
+            .find(|d| d.name == "getShift")
+            .unwrap();
+        assert_eq!(
+            described.example_request.unwrap()["params"],
+            json!({"driverId": "d1"})
+        );
+    }
+}

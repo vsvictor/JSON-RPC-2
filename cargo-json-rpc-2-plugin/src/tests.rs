@@ -64,6 +64,7 @@ fn options(dir: &TempDir, name: &str) -> Options {
         workspace: dir.path().to_owned(),
         crate_prefix: None,
         no_wire: false,
+        api: false,
     }
 }
 
@@ -218,4 +219,43 @@ fn rejects_non_workspace_manifest() {
     let dir = workspace("[package]\nname = \"x\"\n", None, None);
     let error = generate(&options(&dir, "hello")).unwrap_err().to_string();
     assert!(error.contains("no [workspace]"), "{error}");
+}
+
+#[test]
+fn api_layout_splits_contract_and_logic() {
+    let dir = workspace(ROOT_MANIFEST, Some(MAIN), None);
+    let mut options = options(&dir, "fleet-stats");
+    options.api = true;
+    let (_, report) = generate(&options).unwrap();
+    let created: Vec<_> = report
+        .created
+        .iter()
+        .map(|path| display(dir.path(), path))
+        .collect();
+    assert_eq!(
+        created,
+        [
+            "tms-server-fleet-stats/Cargo.toml",
+            "tms-server-fleet-stats/src/lib.rs",
+            "tms-server-fleet-stats/src/tests.rs",
+            "tms-server-fleet-stats/src/api.rs",
+            "tms-server-fleet-stats/src/logic.rs",
+            "tms-server-fleet-stats/src/logic/tests.rs",
+        ]
+    );
+    let lib = read(&dir, "tms-server-fleet-stats/src/lib.rs");
+    assert!(lib.contains("pub mod api;\npub mod logic;"));
+    assert!(lib.contains("use api::Api;"));
+    let api = read(&dir, "tms-server-fleet-stats/src/api.rs");
+    assert!(api.contains("#[params(method = \"fleet_stats\", result = FleetStatsResult)]"));
+    assert!(api.contains("#[result]\n    pub struct FleetStatsResult"));
+    assert!(!api.contains("impl "), "no logic in the contract");
+    let logic = read(&dir, "tms-server-fleet-stats/src/logic.rs");
+    assert!(logic.contains("impl Api for FleetStatsService"));
+    assert!(logic.contains("async fn fleet_stats(&self, params: FleetStatsParams)"));
+    assert!(
+        !dir.path()
+            .join("tms-server-fleet-stats/src/service.rs")
+            .exists()
+    );
 }

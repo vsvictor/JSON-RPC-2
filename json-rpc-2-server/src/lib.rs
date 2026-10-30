@@ -18,7 +18,7 @@ use tokio::task::JoinSet;
 extern crate self as json_rpc_2_server;
 
 pub use json_rpc_2_core::*;
-pub use json_rpc_2_macros::{FromSettings, rpc_methods};
+pub use json_rpc_2_macros::{FromSettings, rpc_api, rpc_methods};
 
 #[doc(hidden)]
 pub mod __private {

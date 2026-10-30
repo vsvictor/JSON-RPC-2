@@ -64,6 +64,10 @@ To avoid boilerplate, `#[rpc_methods]` on a service `impl` generates
 `register_rpc` for its `#[rpc]` methods (names, aliases, rate limits, schemas), and
 `#[derive(FromSettings)]` reads a config struct from `#[setting(...)]` attributes
 (keys, defaults, durations, ports, nested configs).
+Contract-first alternative: `#[rpc_api]` on an inline module derives serde/schemars for
+its `#[params(method = "...", result = Type)]` and `#[result]` types and generates an
+`Api` trait (one `async fn` per method) with a ready `register_rpc`; the logic file
+only implements `Api`, and a missing method is a compile error.
 
 New plugin crates are scaffolded by the `cargo-json-rpc-2-plugin` subcommand:
 
@@ -76,7 +80,9 @@ It creates the crate (`lib.rs` wiring, `service.rs` logic, `tests.rs` files), ad
 it to `[workspace] members` and, if the root package has `src/main.rs`, a
 `my-plugin` feature, an optional dependency and a `plugin_from_env` call before
 `builder.build()`. The crate prefix comes from `--crate-prefix` or
-`[workspace.metadata.json-rpc-2-plugin] crate-prefix`.
+`[workspace.metadata.json-rpc-2-plugin] crate-prefix`. With `--api` it creates the
+contract-first layout instead: `api.rs` (`#[rpc_api]` params / results) and
+`logic.rs` (`impl Api`).
 
 Environment: `BACKEND_BIND`, `BACKEND_ID`, `BACKEND_{TCP,UDP,TLS,QUIC,…}_PORT`,
 `BACKEND_TLS_CERT_FILE`, `BACKEND_TLS_KEY_FILE`, `BACKEND_SRT_PASSPHRASE` (10..79 bytes).

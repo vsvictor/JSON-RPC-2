@@ -1,0 +1,42 @@
+//! Application logic of the `__NAME__` plugin: implements [`Api`] from `api.rs`.
+//!
+//! Прикладна логіка плагіна `__NAME__`: реалізує [`Api`] з `api.rs`.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use json_rpc_2_server::RpcResult;
+
+use crate::api::{__PASCAL__Params, __PASCAL__Result, Api};
+
+/// Service state; no transport concerns.
+pub struct __PASCAL__Service {
+    greeting: String,
+    calls: AtomicU64,
+}
+
+impl __PASCAL__Service {
+    pub fn new(greeting: impl Into<String>) -> Self {
+        Self {
+            greeting: greeting.into(),
+            calls: AtomicU64::new(0),
+        }
+    }
+
+    /// Resets the call counter; used by the maintenance task.
+    pub fn reset(&self) -> u64 {
+        self.calls.swap(0, Ordering::Relaxed)
+    }
+}
+
+impl Api for __PASCAL__Service {
+    async fn __NAME__(&self, params: __PASCAL__Params) -> RpcResult<__PASCAL__Result> {
+        let calls = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        Ok(__PASCAL__Result {
+            message: format!("{}, {}!", self.greeting, params.name.as_str()),
+            calls_since_reset: calls,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,29 @@
+//! JSON-RPC contract of the `__NAME__` plugin: only params and result types.
+//!
+//! JSON-RPC контракт плагіна `__NAME__`: лише типи параметрів і результатів.
+//!
+//! `#[rpc_api]` derives serde/schemars for the annotated types and generates the
+//! [`Api`] trait plus `register_rpc`; implement [`Api`] in `logic.rs`.
+//! `#[rpc_api]` виводить serde/schemars для позначених типів і генерує трейт [`Api`]
+//! та `register_rpc`; реалізуйте [`Api`] у `logic.rs`.
+
+pub use contract::*;
+
+#[json_rpc_2_server::rpc_api(alias_prefix = "rpc.")]
+mod contract {
+    use json_rpc_2_server::NonBlank;
+
+    /// Params of `__NAME__`; invalid input is answered with -32602.
+    #[params(method = "__NAME__", result = __PASCAL__Result)]
+    #[schemars(example = serde_json::json!({"name": "Ada"}))]
+    pub struct __PASCAL__Params {
+        pub name: NonBlank,
+    }
+
+    /// Result of `__NAME__`.
+    #[result]
+    pub struct __PASCAL__Result {
+        pub message: String,
+        pub calls_since_reset: u64,
+    }
+}

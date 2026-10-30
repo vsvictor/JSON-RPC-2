@@ -15,6 +15,7 @@ OPTIONS:
     --path <dir>            workspace root (default: current directory)
     --crate-prefix <text>   crate name prefix (default: [workspace.metadata.json-rpc-2-plugin] crate-prefix)
     --no-wire               do not add a feature / src/main.rs block
+    --api                   contract-first: src/api.rs (#[rpc_api] params/results) + src/logic.rs
     -h, --help              print help";
 
 fn main() {
@@ -45,6 +46,7 @@ fn run() -> Result<()> {
     let mut workspace = env::current_dir()?;
     let mut crate_prefix = None;
     let mut no_wire = false;
+    let mut api = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--path" => workspace = PathBuf::from(args.next().context("--path needs a value")?),
@@ -52,6 +54,7 @@ fn run() -> Result<()> {
                 crate_prefix = Some(args.next().context("--crate-prefix needs a value")?)
             }
             "--no-wire" => no_wire = true,
+            "--api" => api = true,
             flag if flag.starts_with('-') => bail!("unknown option `{flag}`\n\n{USAGE}"),
             _ if name.is_none() => name = Some(arg),
             _ => bail!("unexpected argument `{arg}`"),
@@ -62,6 +65,7 @@ fn run() -> Result<()> {
         workspace,
         crate_prefix,
         no_wire,
+        api,
     };
     let (names, report) = generate(&options)?;
 

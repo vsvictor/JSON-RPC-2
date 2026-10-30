@@ -4,8 +4,69 @@
 
 use proc_macro::TokenStream;
 
+mod rpc_api;
 mod rpc_methods;
 mod settings;
+
+/// Contract-first API: annotate params / result types, implement the generated trait elsewhere.
+///
+/// API від контракту: позначте типи параметрів / результатів, а згенерований трейт
+/// реалізуйте в іншому файлі.
+///
+/// Put on an inline module. For every `#[params(...)]` type it adds
+/// `#[derive(Deserialize, JsonSchema)]`, for every `#[result]` type `#[derive(Serialize)]`;
+/// structs with named fields also get `#[serde(rename_all = "camelCase")]` unless they set
+/// `rename_all` themselves. It then generates a trait (default `Api`) with one
+/// `async fn handler(&self, params: P) -> RpcResult<R>` per method and a provided
+/// `register_rpc(self: Arc<Self>, server)` (plus `limiter: &Arc<RateLimiter>` if any method
+/// has `limit`). Forgetting a method is a compile error in the implementing file.
+/// The crate must depend on `serde` and `schemars`.
+///
+/// Ставиться на вбудований модуль. Типам `#[params(...)]` додає
+/// `#[derive(Deserialize, JsonSchema)]`, типам `#[result]` — `#[derive(Serialize)]`;
+/// структури з іменованими полями також отримують `#[serde(rename_all = "camelCase")]`,
+/// якщо самі не задають `rename_all`. Далі генерує трейт (за замовчуванням `Api`) з одним
+/// `async fn handler(&self, params: P) -> RpcResult<R>` на метод і готовим
+/// `register_rpc(self: Arc<Self>, server)` (плюс `limiter: &Arc<RateLimiter>`, якщо в
+/// якогось методу є `limit`). Пропущений метод — помилка компіляції у файлі реалізації.
+/// Крейт має залежати від `serde` і `schemars`.
+///
+/// | Attribute / Атрибут | Meaning / Значення |
+/// |---|---|
+/// | `#[rpc_api(alias_prefix = "rpc.")]` | adds `rpc.<method>` for every method / додає `rpc.<method>` для кожного методу |
+/// | `#[rpc_api(trait_name = "HelloApi")]` | trait name, default `Api` / ім'я трейту, типово `Api` |
+/// | `#[params(method = "getShift", result = Shift)]` | method name and result type, required / ім'я методу й тип результату, обов'язкові |
+/// | `#[params(..., handler = "shift")]` | trait fn name, default snake_case of the method (`get_shift`) / ім'я fn у трейті, типово snake_case методу |
+/// | `#[params(..., alias = "x.y")]` | extra alias, repeatable / додатковий псевдонім, можна кілька |
+/// | `#[params(..., limit = "phone")]` | rate limit by the raw `phone` field / ліміт за сирим полем `phone` |
+/// | `#[result]` | result type / тип результату |
+///
+/// ```ignore
+/// // src/api.rs — contracts only / лише контракти
+/// #[json_rpc_2_server::rpc_api(alias_prefix = "rpc.")]
+/// pub mod api {
+///     use json_rpc_2_server::NonBlank;
+///
+///     #[params(method = "hello", result = HelloResult)]
+///     pub struct HelloParams { pub name: NonBlank }
+///
+///     #[result]
+///     pub struct HelloResult { pub message: String }
+/// }
+///
+/// // src/logic.rs — application logic only / лише прикладна логіка
+/// impl api::Api for HelloService {
+///     async fn hello(&self, params: api::HelloParams) -> RpcResult<api::HelloResult> { /* ... */ }
+/// }
+///
+/// Arc::new(HelloService::new()).register_rpc(&server)?; // hello, rpc.hello
+/// ```
+#[proc_macro_attribute]
+pub fn rpc_api(args: TokenStream, input: TokenStream) -> TokenStream {
+    rpc_api::expand(args.into(), input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
 
 /// Generates `register_rpc` for the `#[rpc]` methods of an inherent `impl` block.
 ///

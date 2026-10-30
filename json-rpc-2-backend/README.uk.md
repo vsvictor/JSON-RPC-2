@@ -64,6 +64,10 @@ impl ServerPlugin for MyPluginConfig {
 `register_rpc` для його методів `#[rpc]` (імена, псевдоніми, ліміти, схеми), а
 `#[derive(FromSettings)]` читає структуру конфігу за атрибутами `#[setting(...)]`
 (ключі, значення за замовчуванням, тривалості, порти, вкладені конфіги).
+Альтернатива «від контракту»: `#[rpc_api]` на вбудованому модулі виводить serde/schemars
+для його типів `#[params(method = "...", result = Type)]` і `#[result]` та генерує трейт
+`Api` (один `async fn` на метод) з готовим `register_rpc`; файл логіки лише реалізує
+`Api`, а пропущений метод — помилка компіляції.
 
 Нові крейти плагінів створює підкоманда `cargo-json-rpc-2-plugin`:
 
@@ -76,7 +80,9 @@ cargo json-rpc-2-plugin new my-plugin   # у корені workspace; опції 
 `tests.rs`), додає його в `[workspace] members`, а якщо кореневий пакет має
 `src/main.rs`, — feature `my-plugin`, optional-залежність і виклик
 `plugin_from_env` перед `builder.build()`. Префікс крейта береться з
-`--crate-prefix` або `[workspace.metadata.json-rpc-2-plugin] crate-prefix`.
+`--crate-prefix` або `[workspace.metadata.json-rpc-2-plugin] crate-prefix`. З `--api`
+вона створює варіант «від контракту»: `api.rs` (параметри / результати з `#[rpc_api]`)
+і `logic.rs` (`impl Api`).
 
 Середовище: `BACKEND_BIND`, `BACKEND_ID`, `BACKEND_{TCP,UDP,TLS,QUIC,…}_PORT`,
 `BACKEND_TLS_CERT_FILE`, `BACKEND_TLS_KEY_FILE`, `BACKEND_SRT_PASSPHRASE` (10..79 байт).
