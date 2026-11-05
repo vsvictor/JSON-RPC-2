@@ -6,7 +6,7 @@ pub use json_rpc_2_transport::*;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, RwLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
@@ -189,7 +189,6 @@ struct RequestContext {
     expects_response: bool,
 }
 
-#[derive(Clone)]
 struct RpcClientState<T> {
     transport: Arc<T>,
     config: Arc<RwLock<RpcClientConfig>>,
@@ -198,6 +197,23 @@ struct RpcClientState<T> {
     ping_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     metrics: Arc<ClientMetrics>,
     closed: Arc<AtomicBool>,
+    liveness_log: std::sync::Mutex<VecDeque<String>>,
+    dropped_liveness_entries: AtomicU64,
+}
+
+impl<T> RpcClientState<T> {
+    fn log_liveness(&self, message: String) {
+        let mut entries = self
+            .liveness_log
+            .lock()
+            .expect("liveness log lock poisoned");
+        if entries.len() == 512 {
+            entries.pop_front();
+            self.dropped_liveness_entries
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        entries.push_back(message);
+    }
 }
 
 /// A request to include in a JSON-RPC batch.
@@ -234,6 +250,15 @@ impl BatchRequest {
 pub struct BatchResponse {
     pub id: RpcId,
     pub result: Result<Value, RpcError>,
+}
+
+fn validate_manual_timeout(operation: &str, timeout: Duration) -> Result<(), RpcClientError> {
+    if timeout.is_zero() {
+        return Err(RpcClientError::InvalidConfiguration(format!(
+            "{operation} timeout must be greater than zero"
+        )));
+    }
+    Ok(())
 }
 
 /// Cloneable client. Clones share the request ID sequence and transport.
@@ -276,6 +301,8 @@ where
                 ping_task: Arc::new(Mutex::new(None)),
                 metrics,
                 closed: Arc::new(AtomicBool::new(false)),
+                liveness_log: std::sync::Mutex::new(VecDeque::new()),
+                dropped_liveness_entries: AtomicU64::new(0),
             }),
         })
     }
@@ -292,6 +319,27 @@ where
     /// Observable health/metrics counters.
     pub fn metrics(&self) -> ClientMetricsSnapshot {
         self.state.metrics.snapshot()
+    }
+
+    /// Drain actual transport liveness events, including recovery failures.
+    pub fn take_liveness_log(&self) -> String {
+        let mut entries = self
+            .state
+            .liveness_log
+            .lock()
+            .expect("liveness log lock poisoned");
+        let dropped = self
+            .state
+            .dropped_liveness_entries
+            .swap(0, Ordering::Relaxed);
+        let mut result = Vec::new();
+        if dropped != 0 {
+            result.push(format!(
+                "WARNING: {dropped} liveness log entries were dropped"
+            ));
+        }
+        result.extend(entries.drain(..));
+        result.join("\n")
     }
 
     /// Gracefully close the underlying transport and stop the shared client
@@ -415,6 +463,9 @@ where
         }
 
         let mut ping_task = self.state.ping_task.lock().await;
+        if self.state.closed.load(Ordering::SeqCst) {
+            return Err(RpcClientError::SessionClosed);
+        }
         if let Some(task) = ping_task.take() {
             task.abort();
         }
@@ -435,11 +486,21 @@ where
                 .unwrap_or_else(|| "unknown".to_owned());
             loop {
                 interval.tick().await;
-                match state.transport.transport_ping().await {
+                state.log_liveness("PING: periodic transport ping".to_owned());
+                let ping_result = tokio::time::timeout(
+                    Duration::from_millis(frequency_ms),
+                    state.transport.transport_ping(),
+                )
+                .await
+                .unwrap_or_else(|_| Err(TransportError::new("pong deadline exceeded")));
+                match ping_result {
                     Ok(()) => {
                         reconnect_state.reset();
                         state.metrics.missed_pong_streak.store(0, Ordering::Relaxed);
                         trace!(transport = transport_kind, peer, "transport ping -> pong");
+                        state.log_liveness(
+                            "PONG: received; missed-pong streak reset to 0".to_owned(),
+                        );
                     }
                     Err(error) => {
                         let liveness = state
@@ -461,6 +522,9 @@ where
                             "transport ping failed"
                         );
                         let threshold = liveness.max_missed_pongs.max(1);
+                        state.log_liveness(format!(
+                            "ERROR: ping failed; consecutive missed pongs {missed_pongs}/{threshold}: {error}"
+                        ));
                         if missed_pongs < threshold {
                             continue;
                         }
@@ -481,20 +545,41 @@ where
                                 missed_pongs,
                                 "missed pong threshold reached, attempting restore"
                             );
-                            match state.transport.restore().await {
-                                Ok(()) => {
-                                    reconnect_state.reset();
-                                    state.metrics.missed_pong_streak.store(0, Ordering::Relaxed);
-                                    continue;
+                            let mut restored = false;
+                            for attempt in 1..=3 {
+                                state.log_liveness(format!("RESTORE: attempt {attempt}/3"));
+                                let restore_result = tokio::time::timeout(
+                                    Duration::from_millis(frequency_ms),
+                                    state.transport.restore(),
+                                )
+                                .await
+                                .unwrap_or_else(|_| {
+                                    Err(TransportError::new("restore deadline exceeded"))
+                                });
+                                match restore_result {
+                                    Ok(()) => {
+                                        reconnect_state.reset();
+                                        state
+                                            .metrics
+                                            .missed_pong_streak
+                                            .store(0, Ordering::Relaxed);
+                                        state.log_liveness("RESTORED: connection restored; missed-pong streak reset to 0".to_owned());
+                                        restored = true;
+                                        break;
+                                    }
+                                    Err(restore_error) => {
+                                        state.log_liveness(format!("ERROR: restore attempt {attempt}/3 failed: {restore_error}"));
+                                        warn!(
+                                            transport = transport_kind,
+                                            peer,
+                                            error = %restore_error,
+                                            "transport restore failed"
+                                        );
+                                    }
                                 }
-                                Err(restore_error) => {
-                                    warn!(
-                                        transport = transport_kind,
-                                        peer,
-                                        error = %restore_error,
-                                        "transport restore failed, reconnecting"
-                                    );
-                                }
+                            }
+                            if restored {
+                                continue;
                             }
                         }
                         let Some(backoff) = reconnect_state.next_delay(&reconnect) else {
@@ -503,6 +588,7 @@ where
                                 peer, "reconnect budget exhausted for current failure streak"
                             );
                             reconnect_state.reset();
+                            state.log_liveness("ERROR: reconnect budget exhausted".to_owned());
                             continue;
                         };
                         if !backoff.is_zero() {
@@ -514,13 +600,29 @@ where
                             );
                             tokio::time::sleep(backoff).await;
                         }
-                        match state.transport.reconnect().await {
+                        state.log_liveness("RECONNECT: rebuilding connection to server".to_owned());
+                        let reconnect_timeout = state
+                            .config
+                            .read()
+                            .expect("client config lock poisoned")
+                            .request_timeout;
+                        let reconnect_result =
+                            tokio::time::timeout(reconnect_timeout, state.transport.reconnect())
+                                .await
+                                .unwrap_or_else(|_| {
+                                    Err(TransportError::new("reconnect deadline exceeded"))
+                                });
+                        match reconnect_result {
                             Ok(()) => {
                                 reconnect_state.reset();
                                 state.metrics.missed_pong_streak.store(0, Ordering::Relaxed);
                                 info!(transport = transport_kind, peer, "transport reconnected");
+                                state.log_liveness("RECONNECTED: connection established; missed-pong streak reset to 0".to_owned());
                             }
                             Err(reconnect_error) => {
+                                state.log_liveness(format!(
+                                    "ERROR: reconnect failed: {reconnect_error}"
+                                ));
                                 error!(
                                     transport = transport_kind,
                                     peer,
@@ -555,10 +657,92 @@ where
     /// Perform a transport-level liveness check that bypasses JSON-RPC.
     pub async fn transport_ping(&self) -> Result<(), RpcClientError> {
         self.state
+            .log_liveness("PING: manual transport ping".to_owned());
+        let result = self
+            .state
             .transport
             .transport_ping()
             .await
-            .map_err(RpcClientError::Transport)
+            .map_err(RpcClientError::Transport);
+        match &result {
+            Ok(()) => self
+                .state
+                .log_liveness("PONG: manual transport pong received".to_owned()),
+            Err(error) => self
+                .state
+                .log_liveness(format!("ERROR: manual ping failed: {error}")),
+        }
+        result
+    }
+
+    /// Perform one manual transport-level ping bounded by `timeout` inside the
+    /// async runtime. Does not touch periodic ping scheduling or missed-pong
+    /// accounting; callers own liveness policy.
+    pub async fn transport_ping_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), RpcClientError> {
+        validate_manual_timeout("transport ping", timeout)?;
+        if self.state.closed.load(Ordering::SeqCst) {
+            return Err(RpcClientError::SessionClosed);
+        }
+        let timeout_ms = timeout.as_millis();
+        self.state.log_liveness(format!(
+            "PING: manual transport ping (timeout {timeout_ms} ms)"
+        ));
+        let result = tokio::time::timeout(timeout, self.state.transport.transport_ping())
+            .await
+            .unwrap_or_else(|_| {
+                Err(TransportError::new(format!(
+                    "pong deadline exceeded after {timeout_ms} ms"
+                )))
+            })
+            .map_err(RpcClientError::Transport);
+        match &result {
+            Ok(()) => self
+                .state
+                .log_liveness("PONG: manual transport pong received".to_owned()),
+            Err(error) => self
+                .state
+                .log_liveness(format!("ERROR: manual ping failed: {error}")),
+        }
+        result
+    }
+
+    /// Restore the existing transport connection in place (the transport's
+    /// own `restore`, not a new client) bounded by `timeout` inside the async
+    /// runtime. Performs exactly one attempt; retry policy belongs to callers.
+    pub async fn restore_connection(&self, timeout: Duration) -> Result<(), RpcClientError> {
+        validate_manual_timeout("restore", timeout)?;
+        if self.state.closed.load(Ordering::SeqCst) {
+            return Err(RpcClientError::SessionClosed);
+        }
+        let timeout_ms = timeout.as_millis();
+        self.state.log_liveness(format!(
+            "RESTORE: manual restore (timeout {timeout_ms} ms)"
+        ));
+        let result = tokio::time::timeout(timeout, self.state.transport.restore())
+            .await
+            .unwrap_or_else(|_| {
+                Err(TransportError::new(format!(
+                    "restore deadline exceeded after {timeout_ms} ms"
+                )))
+            })
+            .map_err(RpcClientError::Transport);
+        match &result {
+            Ok(()) => {
+                self.state
+                    .metrics
+                    .missed_pong_streak
+                    .store(0, Ordering::Relaxed);
+                self.state
+                    .log_liveness("RESTORED: manual restore succeeded".to_owned());
+            }
+            Err(error) => self
+                .state
+                .log_liveness(format!("ERROR: manual restore failed: {error}")),
+        }
+        result
     }
 
     /// Perform a call with serializable structured parameters and decode the
@@ -1294,6 +1478,7 @@ fn parse_response(value: Value) -> Result<(RpcId, Result<Value, RpcError>), RpcC
             "jsonrpc must be \"2.0\"".to_owned(),
         ));
     }
+
     let id: RpcId = serde_json::from_value(
         object
             .get("id")
@@ -1311,5 +1496,203 @@ fn parse_response(value: Value) -> Result<(RpcId, Result<Value, RpcError>), RpcC
         _ => Err(RpcClientError::InvalidResponse(
             "exactly one of result and error is required".to_owned(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod mobile_liveness_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Probe {
+        pongs: std::sync::Mutex<VecDeque<bool>>,
+        restores: std::sync::Mutex<VecDeque<bool>>,
+        events: std::sync::Mutex<Vec<&'static str>>,
+        stall_ping: AtomicBool,
+        stall_restore: AtomicBool,
+        fail_reconnect: AtomicBool,
+    }
+
+    impl RpcClientTransport for Probe {
+        fn send<'a>(&'a self, _: Bytes) -> ClientTransportFuture<'a> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn transport_ping<'a>(&'a self) -> ClientPingFuture<'a> {
+            Box::pin(async move {
+                self.events.lock().unwrap().push("ping");
+                if self.stall_ping.load(Ordering::Relaxed) {
+                    std::future::pending::<()>().await;
+                }
+                if self.pongs.lock().unwrap().pop_front().unwrap_or(true) {
+                    Ok(())
+                } else {
+                    Err(TransportError::new("missing pong"))
+                }
+            })
+        }
+
+        fn restore<'a>(&'a self) -> ClientRecoverFuture<'a> {
+            Box::pin(async move {
+                self.events.lock().unwrap().push("restore");
+                if self.stall_restore.load(Ordering::Relaxed) {
+                    std::future::pending::<()>().await;
+                }
+                if self.restores.lock().unwrap().pop_front().unwrap_or(false) {
+                    Ok(())
+                } else {
+                    Err(TransportError::new("restore failed"))
+                }
+            })
+        }
+
+        fn reconnect<'a>(&'a self) -> ClientRecoverFuture<'a> {
+            Box::pin(async move {
+                self.events.lock().unwrap().push("reconnect");
+                if self.fail_reconnect.load(Ordering::Relaxed) {
+                    Err(TransportError::new("server unavailable"))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn close<'a>(&'a self) -> ClientCloseFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    async fn wait_for(probe: &Probe, event: &str, count: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if probe
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|&&e| e == event)
+                    .count()
+                    >= count
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("expected liveness event");
+    }
+
+    #[tokio::test]
+    async fn three_misses_then_three_restores_then_reconnect() {
+        let probe = Arc::new(Probe::default());
+        probe.pongs.lock().unwrap().extend([false, false, false]);
+        let client = RpcClient::new(Arc::clone(&probe));
+        client.set_ping_frequency(5).await.unwrap();
+        wait_for(&probe, "reconnect", 1).await;
+        client.close().await.unwrap();
+        assert_eq!(
+            &probe.events.lock().unwrap()[..7],
+            &[
+                "ping",
+                "ping",
+                "ping",
+                "restore",
+                "restore",
+                "restore",
+                "reconnect"
+            ]
+        );
+        assert_eq!(client.metrics().missed_pong_streak, 0);
+        let log = client.take_liveness_log();
+        assert!(log.contains("consecutive missed pongs 3/3"));
+        assert!(log.contains("restore attempt 3/3 failed"));
+        assert!(log.contains("RECONNECTED:"));
+        assert!(client.take_liveness_log().is_empty());
+    }
+
+    #[tokio::test]
+    async fn successful_restore_stops_retries_and_skips_reconnect() {
+        let probe = Arc::new(Probe::default());
+        probe.pongs.lock().unwrap().extend([false, false, false]);
+        probe.restores.lock().unwrap().extend([false, true]);
+        let client = RpcClient::new(Arc::clone(&probe));
+        client.set_ping_frequency(5).await.unwrap();
+        wait_for(&probe, "ping", 4).await;
+        client.close().await.unwrap();
+        assert_eq!(
+            &probe.events.lock().unwrap()[..6],
+            &["ping", "ping", "ping", "restore", "restore", "ping"]
+        );
+        assert!(!probe.events.lock().unwrap().contains(&"reconnect"));
+        assert!(client.take_liveness_log().contains("RESTORED:"));
+    }
+
+    #[tokio::test]
+    async fn pong_resets_consecutive_misses() {
+        let probe = Arc::new(Probe::default());
+        probe
+            .pongs
+            .lock()
+            .unwrap()
+            .extend([false, false, true, false, false, false]);
+        let client = RpcClient::new(Arc::clone(&probe));
+        client.set_ping_frequency(5).await.unwrap();
+        wait_for(&probe, "reconnect", 1).await;
+        client.close().await.unwrap();
+        assert_eq!(&probe.events.lock().unwrap()[..6], &["ping"; 6]);
+        assert!(client.take_liveness_log().contains("PONG:"));
+    }
+
+    #[tokio::test]
+    async fn disabling_and_closing_stop_pings() {
+        let probe = Arc::new(Probe::default());
+        let client = RpcClient::new(Arc::clone(&probe));
+        client.set_ping_frequency(5).await.unwrap();
+        wait_for(&probe, "ping", 1).await;
+        client.set_ping_frequency(0).await.unwrap();
+        tokio::task::yield_now().await;
+        let count = probe.events.lock().unwrap().len();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(probe.events.lock().unwrap().len(), count);
+        client.set_ping_frequency(5).await.unwrap();
+        wait_for(&probe, "ping", count + 1).await;
+        client.close().await.unwrap();
+        tokio::task::yield_now().await;
+        let count = probe.events.lock().unwrap().len();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(probe.events.lock().unwrap().len(), count);
+        assert!(client.set_ping_frequency(5).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn missing_pongs_and_stalled_restore_have_deadlines() {
+        let probe = Arc::new(Probe::default());
+        probe.stall_ping.store(true, Ordering::Relaxed);
+        probe.stall_restore.store(true, Ordering::Relaxed);
+        let client = RpcClient::new(Arc::clone(&probe));
+        client.set_ping_frequency(5).await.unwrap();
+        wait_for(&probe, "reconnect", 1).await;
+        client.close().await.unwrap();
+        let log = client.take_liveness_log();
+        assert!(log.contains("pong deadline exceeded"));
+        assert!(log.contains("restore attempt 3/3 failed: restore deadline exceeded"));
+        assert!(log.contains("RECONNECTED:"));
+    }
+
+    #[tokio::test]
+    async fn failed_reconnect_does_not_stop_monitoring() {
+        let probe = Arc::new(Probe::default());
+        probe.stall_ping.store(true, Ordering::Relaxed);
+        probe.fail_reconnect.store(true, Ordering::Relaxed);
+        let client = RpcClient::new(Arc::clone(&probe));
+        client.set_ping_frequency(5).await.unwrap();
+        wait_for(&probe, "reconnect", 2).await;
+        client.close().await.unwrap();
+        assert!(
+            client
+                .take_liveness_log()
+                .contains("ERROR: reconnect failed")
+        );
     }
 }

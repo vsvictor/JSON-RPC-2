@@ -992,9 +992,7 @@ impl RpcClientTransport for AnyTransport {
                 transport.send_cancelable(message, expects_response, cancel)
             }
             #[cfg(feature = "websocket_tls")]
-            Self::WsTls(transport) => {
-                transport.send_with_expectation(message, expects_response)
-            }
+            Self::WsTls(transport) => transport.send_with_expectation(message, expects_response),
             #[cfg(feature = "quic")]
             Self::Quic(transport) => transport.send_cancelable(message, expects_response, cancel),
             #[cfg(feature = "http3")]
@@ -1859,7 +1857,8 @@ fn quic_endpoint(
     ca_pem: &str,
 ) -> Result<quinn::Endpoint, FfiError> {
     let mut tls = json_rpc_2::client::ClientTlsConfig::default();
-    tls.set_ca_certificate_pem(ca_pem).map_err(transport_error)?;
+    tls.set_ca_certificate_pem(ca_pem)
+        .map_err(transport_error)?;
     tls.endpoint(SocketAddr::new(local, 0), alpn)
         .map_err(transport_error)
 }
@@ -1870,6 +1869,7 @@ fn quic_endpoint(
 pub struct RpcClientBuilder {
     kind: FfiTransportKind,
     options: std::sync::Mutex<ConnectOptions>,
+    connect_timeout_ms: std::sync::Mutex<Option<u64>>,
 }
 
 #[cfg(any(feature = "quic", feature = "http3"))]
@@ -1880,6 +1880,7 @@ impl RpcClientBuilder {
         Arc::new(Self {
             kind,
             options: std::sync::Mutex::new(options),
+            connect_timeout_ms: std::sync::Mutex::new(None),
         })
     }
 
@@ -1899,6 +1900,19 @@ impl RpcClientBuilder {
         Ok(())
     }
 
+    /// Bound name resolution plus transport handshake of [`Self::connect`]
+    /// with a deadline enforced by the Tokio runtime. Must be non-zero.
+    pub fn set_connect_timeout_ms(&self, timeout_ms: u64) -> Result<(), FfiError> {
+        manual_timeout("connect", timeout_ms)?;
+        *self
+            .connect_timeout_ms
+            .lock()
+            .map_err(|error| FfiError::InvalidConfiguration {
+                details: error.to_string(),
+            })? = Some(timeout_ms);
+        Ok(())
+    }
+
     pub fn connect(&self) -> Result<Arc<RpcClient>, FfiError> {
         let options = self
             .options
@@ -1907,7 +1921,13 @@ impl RpcClientBuilder {
                 details: error.to_string(),
             })?
             .clone();
-        RpcClient::connect(self.kind, options)
+        let timeout_ms = *self
+            .connect_timeout_ms
+            .lock()
+            .map_err(|error| FfiError::InvalidConfiguration {
+                details: error.to_string(),
+            })?;
+        RpcClient::connect_bounded(self.kind, options, timeout_ms)
     }
 }
 
@@ -1925,7 +1945,19 @@ impl RpcClient {
     /// is required for `srt` and `ws-srt`.
     #[uniffi::constructor]
     pub fn connect(kind: FfiTransportKind, options: ConnectOptions) -> Result<Arc<Self>, FfiError> {
-        runtime().block_on(async move {
+        Self::connect_bounded(kind, options, None)
+    }
+}
+
+impl RpcClient {
+    /// Connect, optionally bounding resolution and handshake with a timeout
+    /// enforced inside the Tokio runtime.
+    fn connect_bounded(
+        kind: FfiTransportKind,
+        options: ConnectOptions,
+        timeout_ms: Option<u64>,
+    ) -> Result<Arc<Self>, FfiError> {
+        let connect = async move {
             validate_broker_options(kind, &options)?;
             let to = if kind.is_external_broker() {
                 SocketAddr::from(([127, 0, 0, 1], 0))
@@ -2197,7 +2229,9 @@ impl RpcClient {
                     #[cfg(not(any(target_os = "linux", target_os = "android")))]
                     {
                         return Err(FfiError::InvalidConfiguration {
-                            details: "WebSocket over UDP-Lite is only supported on Linux and Android".into(),
+                            details:
+                                "WebSocket over UDP-Lite is only supported on Linux and Android"
+                                    .into(),
                         });
                     }
                 }
@@ -2214,7 +2248,8 @@ impl RpcClient {
                     #[cfg(not(any(target_os = "linux", target_os = "android")))]
                     {
                         return Err(FfiError::InvalidConfiguration {
-                            details: "WebSocket over DCCP is only supported on Linux and Android".into(),
+                            details: "WebSocket over DCCP is only supported on Linux and Android"
+                                .into(),
                         });
                     }
                 }
@@ -2231,7 +2266,8 @@ impl RpcClient {
                     #[cfg(not(any(target_os = "linux", target_os = "android")))]
                     {
                         return Err(FfiError::InvalidConfiguration {
-                            details: "WebSocket over SCTP is only supported on Linux and Android".into(),
+                            details: "WebSocket over SCTP is only supported on Linux and Android"
+                                .into(),
                         });
                     }
                 }
@@ -2314,9 +2350,36 @@ impl RpcClient {
             };
 
             Ok(wrap_client(transport))
-        })
+        };
+        match timeout_ms {
+            None => runtime().block_on(connect),
+            Some(timeout_ms) => {
+                let timeout = manual_timeout("connect", timeout_ms)?;
+                runtime().block_on(async move {
+                    tokio::time::timeout(timeout, connect)
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(FfiError::Transport {
+                                details: format!("connect deadline exceeded after {timeout_ms} ms"),
+                            })
+                        })
+                })
+            }
+        }
     }
+}
 
+fn manual_timeout(operation: &str, timeout_ms: u64) -> Result<Duration, FfiError> {
+    if timeout_ms == 0 {
+        return Err(FfiError::InvalidConfiguration {
+            details: format!("{operation} timeout must be greater than zero milliseconds"),
+        });
+    }
+    Ok(Duration::from_millis(timeout_ms))
+}
+
+#[uniffi::export]
+impl RpcClient {
     /// Call a method and return its JSON-encoded result.
     ///
     /// `params_json`, when present, must be a JSON-encoded object or array.
@@ -2359,12 +2422,33 @@ impl RpcClient {
         runtime().block_on(async { Ok(self.inner.transport_ping().await?) })
     }
 
+    /// Perform one transport-level ping/pong whose deadline is enforced by
+    /// the Tokio runtime. Does not change periodic ping scheduling.
+    pub fn transport_ping_with_timeout(&self, timeout_ms: u64) -> Result<(), FfiError> {
+        let timeout = manual_timeout("transport ping", timeout_ms)?;
+        runtime().block_on(async {
+            Ok(self.inner.transport_ping_with_timeout(timeout).await?)
+        })
+    }
+
+    /// Run one in-place restore of the existing transport connection (no new
+    /// client is created) whose deadline is enforced by the Tokio runtime.
+    pub fn restore_connection(&self, timeout_ms: u64) -> Result<(), FfiError> {
+        let timeout = manual_timeout("restore", timeout_ms)?;
+        runtime().block_on(async { Ok(self.inner.restore_connection(timeout).await?) })
+    }
+
     /// Start (or stop) a periodic background transport-level ping used as
     /// a keep-alive. `frequency_ms = 0` disables it. Pings run on the same
     /// Tokio runtime as every other call and are stopped automatically by
     /// [`RpcClient::disconnect`].
     pub fn set_ping_frequency(&self, frequency_ms: u64) -> Result<(), FfiError> {
         runtime().block_on(async { Ok(self.inner.set_ping_frequency(frequency_ms).await?) })
+    }
+
+    /// Drain transport ping/pong and recovery logs without sending extra pings.
+    pub fn take_liveness_log(&self) -> String {
+        self.inner.take_liveness_log()
     }
 
     /// Configure how many consecutive missed pong ticks trigger recovery.
@@ -2610,3 +2694,7 @@ pub fn connect_ws_http3(options: QuicConnectOptions) -> Result<Arc<RpcClient>, F
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "lifecycle/tests.rs"]
+mod lifecycle_tests;

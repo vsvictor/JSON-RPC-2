@@ -159,7 +159,11 @@ async fn set_ping_frequency_uses_restore_then_reconnect_after_threshold() {
         .restore_results
         .lock()
         .expect("restore results mutex poisoned")
-        .push_back(Err(TransportError::new("restore-failed")));
+        .extend([
+            Err(TransportError::new("restore-failed-1")),
+            Err(TransportError::new("restore-failed-2")),
+            Err(TransportError::new("restore-failed-3")),
+        ]);
 
     let client = RpcClient::new(transport);
     client.set_max_missed_pongs(4).await.unwrap();
@@ -172,7 +176,7 @@ async fn set_ping_frequency_uses_restore_then_reconnect_after_threshold() {
     })
     .await
     .expect("client never attempted reconnect");
-    assert_eq!(restore_count.load(Ordering::Relaxed), 1);
+    assert_eq!(restore_count.load(Ordering::Relaxed), 3);
 
     client.set_ping_frequency(0).await.unwrap();
 }
