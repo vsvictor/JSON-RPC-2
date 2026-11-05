@@ -1,5 +1,61 @@
 use super::*;
 
+#[cfg(feature = "tcp")]
+#[test]
+fn mobile_liveness_tcp_ping_logs_do_not_interfere_with_rpc() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::time::{Duration, Instant};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap() == 0 {
+                break;
+            }
+            if line.trim_end() == "#json-rpc-2-control-ping" {
+                reader
+                    .get_mut()
+                    .write_all(b"#json-rpc-2-control-pong\n")
+                    .unwrap();
+            } else {
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0", "id": request["id"], "result": {"ok": true}
+                });
+                writeln!(reader.get_mut(), "{response}").unwrap();
+            }
+        }
+    });
+    let mut opts = options();
+    opts.host = "127.0.0.1".into();
+    opts.port = port;
+    let client = RpcClient::connect(FfiTransportKind::Tcp, opts).unwrap();
+    client.set_ping_frequency(50).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut events = String::new();
+    while events.matches("PONG:").count() < 2 {
+        assert!(Instant::now() < deadline, "missing real TCP pongs: {events}");
+        events.push_str(&client.take_liveness_log());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(events.contains("PING:"));
+    let result = client.call("echo".into(), None).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result).unwrap(),
+        serde_json::json!({"ok": true})
+    );
+    client.disconnect().unwrap();
+    server.join().unwrap();
+}
+
 fn options() -> ConnectOptions {
     ConnectOptions {
         host: "localhost".into(),
