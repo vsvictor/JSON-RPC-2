@@ -26,6 +26,9 @@ pub type ClientPingFuture<'a> =
 /// Future returned while recovering a broken transport connection.
 pub type ClientRecoverFuture<'a> =
     Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + 'a>>;
+/// Future resolving to the next server-initiated message.
+pub type ClientIncomingFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Bytes, TransportError>> + Send + 'a>>;
 
 /// Transport boundary used by the client.
 ///
@@ -105,6 +108,29 @@ pub trait RpcClientTransport: Send + Sync + 'static {
     /// After a successful close, `send` must fail. Closing an already closed
     /// transport must succeed.
     fn close<'a>(&'a self) -> ClientCloseFuture<'a>;
+
+    /// Whether this transport can deliver server-initiated messages through
+    /// [`RpcClientTransport::recv_incoming`].
+    fn supports_incoming(&self) -> bool {
+        false
+    }
+
+    /// Wait for the next server-initiated (push) message, such as a JSON-RPC
+    /// notification sent by the server on this connection.
+    ///
+    /// Messages are delivered in arrival order, never mixed with responses to
+    /// the client's own requests, and survive transparent reconnects. The
+    /// future is cancel-safe: dropping it loses no message. It fails once the
+    /// transport is closed (after buffered messages are drained) or when the
+    /// transport does not support server-initiated messages.
+    fn recv_incoming<'a>(&'a self) -> ClientIncomingFuture<'a> {
+        let kind = self.kind();
+        Box::pin(async move {
+            Err(TransportError::new(format!(
+                "the {kind} transport does not support server-initiated messages"
+            )))
+        })
+    }
 }
 
 impl<T> RpcClientTransport for Arc<T>
@@ -162,6 +188,14 @@ where
 
     fn close<'a>(&'a self) -> ClientCloseFuture<'a> {
         (**self).close()
+    }
+
+    fn supports_incoming(&self) -> bool {
+        (**self).supports_incoming()
+    }
+
+    fn recv_incoming<'a>(&'a self) -> ClientIncomingFuture<'a> {
+        (**self).recv_incoming()
     }
 }
 

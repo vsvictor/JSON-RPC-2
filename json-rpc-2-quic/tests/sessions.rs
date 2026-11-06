@@ -134,3 +134,97 @@ async fn connection_identity_and_push_survive_real_path_migration() {
     .await
     .expect("QUIC migration/session test timed out");
 }
+
+fn test_endpoints() -> (quinn::Endpoint, quinn::Endpoint) {
+    let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert: rustls::pki_types::CertificateDer<'static> = identity.cert.into();
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(identity.key_pair.serialize_der().into());
+    let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(vec![cert.clone()], key)
+    .unwrap();
+    tls.alpn_protocols = vec![b"session-test".to_vec()];
+    let server = quinn::Endpoint::server(
+        quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls).unwrap())),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).unwrap();
+    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    tls.alpn_protocols = vec![b"session-test".to_vec()];
+    let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    client.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+        QuicClientConfig::try_from(tls).unwrap(),
+    )));
+    (server, client)
+}
+
+#[tokio::test]
+async fn incoming_messages_are_ordered_cancel_safe_and_survive_reconnect() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (server, endpoint) = test_endpoints();
+        let address = server.local_addr().unwrap();
+        let (opened, mut sessions) = mpsc::unbounded_channel();
+        let (requests, _identities) = mpsc::unbounded_channel();
+        let (closed, _closures) = mpsc::unbounded_channel();
+        let running = QuicTransport::new(server).start(Arc::new(Echo {
+            opened,
+            requests,
+            closed,
+        }));
+        let client = Arc::new(
+            QuicClientTransport::connect(endpoint, address, "localhost")
+                .await
+                .unwrap(),
+        );
+        assert!(client.supports_incoming());
+        let first = sessions.recv().await.unwrap();
+        // A cancelled wait must not consume anything.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), client.recv_incoming())
+                .await
+                .is_err()
+        );
+        let push = first.push_sender.as_ref().unwrap();
+        push.send(Bytes::from_static(b"one")).unwrap();
+        push.send(Bytes::from_static(b"two")).unwrap();
+        assert_eq!(client.recv_incoming().await.unwrap(), "one");
+        assert_eq!(client.recv_incoming().await.unwrap(), "two");
+
+        let waiting = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.recv_incoming().await })
+        };
+        client.reconnect().await.unwrap();
+        let second = sessions.recv().await.unwrap();
+        assert_ne!(second.connection_id, first.connection_id);
+        second
+            .push_sender
+            .as_ref()
+            .unwrap()
+            .send(Bytes::from_static(b"after reconnect"))
+            .unwrap();
+        assert_eq!(waiting.await.unwrap().unwrap(), "after reconnect");
+
+        let waiting = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.recv_incoming().await })
+        };
+        client.close().await.unwrap();
+        assert!(waiting.await.unwrap().is_err());
+        running.close().await.unwrap();
+    })
+    .await
+    .expect("QUIC incoming test timed out");
+}

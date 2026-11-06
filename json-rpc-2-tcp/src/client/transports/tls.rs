@@ -16,9 +16,9 @@ use tokio_rustls::{TlsConnector, client::TlsStream};
 
 use json_rpc_2_transport::TcpTuningConfig;
 use json_rpc_2_transport::{
-    CONTROL_PING, CONTROL_PONG, ClientCloseFuture, ClientPingFuture, ClientRecoverFuture,
-    ClientTransportFuture, RpcClientTransport, TLS_ALPN, TransportError, TransportMessage,
-    expects_response, transport_error,
+    CONTROL_PING, CONTROL_PONG, ClientCloseFuture, ClientIncomingFuture, ClientPingFuture,
+    ClientRecoverFuture, ClientTransportFuture, RpcClientTransport, TLS_ALPN, TransportError,
+    TransportMessage, expects_response, transport_error,
 };
 
 // Keep the mixed-stream helpers available for TLS-only feature builds too.
@@ -28,15 +28,12 @@ use json_rpc_2_transport::{
 mod tcp;
 #[cfg(feature = "tcp")]
 use super::tcp;
-pub(crate) use tcp::{read_frame, validate_message, write_message};
+#[cfg(not(feature = "tcp"))]
+pub(crate) use tcp::read_frame;
+use tcp::{ConnectionState, StreamIncoming};
+pub(crate) use tcp::{validate_message, write_message};
 
 type Connection = (TlsStream<TcpStream>, BytesMut);
-
-enum ConnectionState {
-    Ready(Box<Connection>),
-    Invalidated,
-    Closed,
-}
 
 /// TLS client for JSON lines and application-defined binary frames over TCP.
 ///
@@ -48,7 +45,8 @@ pub struct TlsClientTransport {
     connector: TlsConnector,
     tuning: TcpTuningConfig,
     framing: Option<Arc<dyn json_rpc_2_transport::StreamFraming>>,
-    connection: Mutex<ConnectionState>,
+    connection: Mutex<ConnectionState<Box<Connection>>>,
+    incoming: StreamIncoming,
 }
 
 impl TlsClientTransport {
@@ -114,6 +112,7 @@ impl TlsClientTransport {
             tuning,
             framing: None,
             connection: Mutex::new(ConnectionState::Invalidated),
+            incoming: StreamIncoming::default(),
         };
         let connection = client.open().await?;
         *client.connection.lock().await = ConnectionState::Ready(Box::new(connection));
@@ -190,25 +189,37 @@ impl RpcClientTransport for TlsClientTransport {
         "tls"
     }
 
+    fn supports_incoming(&self) -> bool {
+        self.framing.is_none()
+    }
+
+    fn recv_incoming<'a>(&'a self) -> ClientIncomingFuture<'a> {
+        Box::pin(
+            self.incoming
+                .recv(&self.connection, self.framing.as_deref()),
+        )
+    }
+
     fn peer(&self) -> Option<String> {
         Some(self.address.to_string())
     }
 
     fn reconnect<'a>(&'a self) -> ClientRecoverFuture<'a> {
         Box::pin(async move {
-            let mut connection = self.connection.lock().await;
+            let mut connection = self.incoming.lock(&self.connection).await;
             let replacement = self.open().await?;
             *connection = ConnectionState::Ready(Box::new(replacement));
+            self.incoming.queue.wake();
             Ok(())
         })
     }
 
     fn close<'a>(&'a self) -> ClientCloseFuture<'a> {
         Box::pin(async move {
-            let mut connection = self.connection.lock().await;
-            let ConnectionState::Ready(framed) =
-                std::mem::replace(&mut *connection, ConnectionState::Closed)
-            else {
+            let mut connection = self.incoming.lock(&self.connection).await;
+            let previous = std::mem::replace(&mut *connection, ConnectionState::Closed);
+            self.incoming.queue.close();
+            let ConnectionState::Ready(framed) = previous else {
                 return Ok(());
             };
             let (mut stream, _) = *framed;
@@ -237,7 +248,7 @@ impl TlsClientTransport {
         expects_response: bool,
     ) -> Result<Option<Bytes>, TransportError> {
         validate_message(&message, self.framing.as_deref()).map_err(transport_error)?;
-        let mut connection = self.connection.lock().await;
+        let mut connection = self.incoming.lock(&self.connection).await;
         if matches!(*connection, ConnectionState::Closed) {
             return Err(json_rpc_2_transport::closed());
         }
@@ -250,7 +261,9 @@ impl TlsClientTransport {
             .await
             .map_err(transport_error)?;
         let response = if expects_response {
-            match read_frame(&mut framed.0, &mut framed.1, self.framing.as_deref())
+            match self
+                .incoming
+                .read_response(&mut framed, self.framing.as_deref())
                 .await
                 .map_err(transport_error)?
             {
@@ -261,6 +274,7 @@ impl TlsClientTransport {
             None
         };
         *connection = ConnectionState::Ready(framed);
+        self.incoming.queue.wake();
         Ok(response)
     }
 }

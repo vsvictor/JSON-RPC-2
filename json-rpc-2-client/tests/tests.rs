@@ -129,3 +129,76 @@ async fn bounded_operations_reject_zero_timeout_and_closed_client() {
         Err(RpcClientError::SessionClosed)
     ));
 }
+
+struct PushTransport {
+    queue: json_rpc_2_client::IncomingQueue,
+}
+
+impl RpcClientTransport for PushTransport {
+    fn send<'a>(&'a self, _message: Bytes) -> ClientTransportFuture<'a> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn close<'a>(&'a self) -> ClientCloseFuture<'a> {
+        Box::pin(async move {
+            self.queue.close();
+            Ok(())
+        })
+    }
+
+    fn transport_ping<'a>(&'a self) -> ClientPingFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn reconnect<'a>(&'a self) -> ClientRecoverFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn supports_incoming(&self) -> bool {
+        true
+    }
+
+    fn recv_incoming<'a>(&'a self) -> json_rpc_2_client::ClientIncomingFuture<'a> {
+        Box::pin(async move {
+            self.queue
+                .recv()
+                .await
+                .ok_or_else(json_rpc_2_client::closed)
+        })
+    }
+}
+
+#[tokio::test]
+async fn incoming_messages_reach_the_client_until_it_closes() {
+    let transport = PushTransport {
+        queue: json_rpc_2_client::IncomingQueue::default(),
+    };
+    transport.queue.push(Bytes::from_static(b"push"));
+    let client = RpcClient::new(transport);
+    assert!(client.supports_incoming());
+    assert_eq!(client.recv_incoming().await.unwrap(), "push");
+    let waiting = {
+        let client = client.clone();
+        tokio::spawn(async move { client.recv_incoming().await })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    client.close().await.unwrap();
+    assert!(matches!(
+        waiting.await.unwrap(),
+        Err(RpcClientError::SessionClosed)
+    ));
+    assert!(matches!(
+        client.recv_incoming().await,
+        Err(RpcClientError::SessionClosed)
+    ));
+}
+
+#[tokio::test]
+async fn transports_without_push_report_unsupported() {
+    let client = RpcClient::new(HangingTransport::default());
+    assert!(!client.supports_incoming());
+    assert!(matches!(
+        client.recv_incoming().await,
+        Err(RpcClientError::Transport(_))
+    ));
+}

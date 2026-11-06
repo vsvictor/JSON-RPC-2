@@ -654,6 +654,33 @@ where
         Ok(())
     }
 
+    /// Whether the transport delivers server-initiated messages.
+    pub fn supports_incoming(&self) -> bool {
+        self.state.transport.supports_incoming()
+    }
+
+    /// Wait for the next server-initiated message (for example a JSON-RPC
+    /// notification pushed by the server) on this client's connection.
+    ///
+    /// Shared by all clones: each message is delivered to exactly one waiter,
+    /// so applications should run a single listener. Cancel-safe. Fails with
+    /// [`RpcClientError::SessionClosed`] after [`RpcClient::close`].
+    ///
+    /// Чекає наступне повідомлення, ініційоване сервером, на з'єднанні клієнта.
+    /// Повідомлення отримує лише один очікувач; скасування нічого не втрачає.
+    pub async fn recv_incoming(&self) -> Result<Bytes, RpcClientError> {
+        if self.state.closed.load(Ordering::SeqCst) {
+            return Err(RpcClientError::SessionClosed);
+        }
+        self.state.transport.recv_incoming().await.map_err(|error| {
+            if self.state.closed.load(Ordering::SeqCst) {
+                RpcClientError::SessionClosed
+            } else {
+                RpcClientError::Transport(error)
+            }
+        })
+    }
+
     /// Perform a transport-level liveness check that bypasses JSON-RPC.
     pub async fn transport_ping(&self) -> Result<(), RpcClientError> {
         self.state

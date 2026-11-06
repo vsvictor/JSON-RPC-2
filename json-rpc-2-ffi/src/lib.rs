@@ -103,8 +103,8 @@ use json_rpc_2::{
     RpcError, TransportCapabilities, TransportCapabilitySet, TransportMultiplexing,
     TransportSecurity, TransportSocket,
     client::{
-        ClientCloseFuture, ClientPingFuture, ClientTransportFuture, RpcClient as CoreClient,
-        RpcClientError, RpcClientTransport,
+        ClientCloseFuture, ClientIncomingFuture, ClientPingFuture, ClientTransportFuture,
+        RpcClient as CoreClient, RpcClientError, RpcClientTransport,
     },
 };
 use tokio::runtime::Runtime;
@@ -1313,6 +1313,39 @@ impl RpcClientTransport for AnyTransport {
         }
     }
 
+    fn supports_incoming(&self) -> bool {
+        match self {
+            #[cfg(feature = "tcp")]
+            Self::Tcp(transport) => transport.supports_incoming(),
+            #[cfg(feature = "tls")]
+            Self::Tls(transport) => transport.supports_incoming(),
+            #[cfg(feature = "quic")]
+            Self::Quic(transport) => transport.supports_incoming(),
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
+    fn recv_incoming<'a>(&'a self) -> ClientIncomingFuture<'a> {
+        match self {
+            #[cfg(feature = "tcp")]
+            Self::Tcp(transport) => transport.recv_incoming(),
+            #[cfg(feature = "tls")]
+            Self::Tls(transport) => transport.recv_incoming(),
+            #[cfg(feature = "quic")]
+            Self::Quic(transport) => transport.recv_incoming(),
+            #[allow(unreachable_patterns)]
+            _ => {
+                let kind = self.kind();
+                Box::pin(async move {
+                    Err(json_rpc_2::client::TransportError::new(format!(
+                        "the {kind} transport does not support server-initiated messages"
+                    )))
+                })
+            }
+        }
+    }
+
     fn close<'a>(&'a self) -> ClientCloseFuture<'a> {
         match self {
             #[cfg(feature = "tcp")]
@@ -2462,6 +2495,39 @@ impl RpcClient {
         self.inner.set_request_timeout_millis(timeout_ms)?;
         Ok(())
     }
+
+    /// Whether this connection delivers server-initiated messages
+    /// (currently `tcp`, `tls` and `quic`).
+    pub fn supports_incoming(&self) -> bool {
+        self.inner.supports_incoming()
+    }
+
+    /// Block until the next server-initiated message (for example a JSON-RPC
+    /// notification pushed by the server) and return it as UTF-8 JSON text.
+    /// Run a single listener per client. Fails with `SessionClosed` after
+    /// [`RpcClient::disconnect`].
+    pub fn recv_incoming(&self) -> Result<String, FfiError> {
+        runtime().block_on(async { incoming_text(self.inner.recv_incoming().await?) })
+    }
+
+    /// Like [`RpcClient::recv_incoming`], but returns `None` when no message
+    /// arrives within `timeout_ms`. Nothing is lost when the wait times out,
+    /// so a listener can poll with a short timeout to stay stoppable.
+    pub fn recv_incoming_with_timeout(&self, timeout_ms: u64) -> Result<Option<String>, FfiError> {
+        let timeout = manual_timeout("incoming message", timeout_ms)?;
+        runtime().block_on(async {
+            match tokio::time::timeout(timeout, self.inner.recv_incoming()).await {
+                Ok(message) => incoming_text(message?).map(Some),
+                Err(_) => Ok(None),
+            }
+        })
+    }
+}
+
+fn incoming_text(message: Bytes) -> Result<String, FfiError> {
+    String::from_utf8(message.into()).map_err(|error| FfiError::Json {
+        details: format!("server-initiated message is not UTF-8: {error}"),
+    })
 }
 
 #[cfg(feature = "tcp")]

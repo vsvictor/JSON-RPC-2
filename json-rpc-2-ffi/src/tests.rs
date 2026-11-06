@@ -56,6 +56,73 @@ fn mobile_liveness_tcp_ping_logs_do_not_interfere_with_rpc() {
     server.join().unwrap();
 }
 
+#[cfg(feature = "tcp")]
+#[test]
+fn tcp_incoming_messages_are_delivered_beside_calls_and_pings() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::time::Duration;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        writeln!(
+            reader.get_mut(),
+            r#"{{"jsonrpc":"2.0","method":"first","params":[1]}}"#
+        )
+        .unwrap();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            if line.trim_end() == "#json-rpc-2-control-ping" {
+                reader
+                    .get_mut()
+                    .write_all(b"#json-rpc-2-control-pong\n")
+                    .unwrap();
+                continue;
+            }
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            writeln!(reader.get_mut(), r#"{{"jsonrpc":"2.0","method":"second"}}"#).unwrap();
+            let response = serde_json::json!({
+                "jsonrpc": "2.0", "id": request["id"], "result": "ok"
+            });
+            writeln!(reader.get_mut(), "{response}").unwrap();
+        }
+    });
+    let mut opts = options();
+    opts.host = "127.0.0.1".into();
+    opts.port = port;
+    let client = RpcClient::connect(FfiTransportKind::Tcp, opts).unwrap();
+    assert!(client.supports_incoming());
+    client.set_ping_frequency(20).unwrap();
+    let first = client.recv_incoming_with_timeout(3000).unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&first).unwrap()["method"],
+        "first"
+    );
+    assert_eq!(client.call("echo".into(), None).unwrap(), r#""ok""#);
+    let second = client.recv_incoming().unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&second).unwrap()["method"],
+        "second"
+    );
+    assert_eq!(client.recv_incoming_with_timeout(100).unwrap(), None);
+    assert!(client.recv_incoming_with_timeout(0).is_err());
+    client.disconnect().unwrap();
+    assert!(matches!(
+        client.recv_incoming(),
+        Err(FfiError::SessionClosed)
+    ));
+    server.join().unwrap();
+}
+
 fn options() -> ConnectOptions {
     ConnectOptions {
         host: "localhost".into(),
