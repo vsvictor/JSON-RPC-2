@@ -4178,8 +4178,6 @@ checksum = "4475a34997d43bb9c612ae2232287e761cf79b47ffbfbb436eeb7d269475e7f1"
 [[package]]
 name = "tstrans-srt-sys"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58215bf6782b6927f105d7131740900a61f3ce7eba854ab1fc0b78870c06185f"
 dependencies = [
  "bindgen",
  "cmake",

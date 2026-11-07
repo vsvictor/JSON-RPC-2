@@ -43,5 +43,6 @@ default-members = [
 resolver = "3"
 
 [patch.crates-io]
+tstrans-srt-sys = { path = "build/mobile-overlays/tstrans-srt-sys" }
 h3 = { git = "https://github.com/hyperium/h3", package = "h3" }
 h3-quinn = { git = "https://github.com/hyperium/h3", package = "h3-quinn" }
