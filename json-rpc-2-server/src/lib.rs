@@ -330,6 +330,33 @@ impl RpcServer {
         input: &[u8],
         context: Option<TransportContext>,
     ) -> Option<Bytes> {
+        #[cfg(feature = "message-logging")]
+        tracing::info!(
+            target: "json_rpc::message",
+            direction = "request",
+            payload = ?String::from_utf8_lossy(input),
+            "JSON-RPC message"
+        );
+        let response = self.process_message_inner(input, context).await;
+        #[cfg(feature = "message-logging")]
+        let payload = response
+            .as_deref()
+            .map(|bytes| String::from_utf8_lossy(bytes));
+        #[cfg(feature = "message-logging")]
+        tracing::info!(
+            target: "json_rpc::message",
+            direction = "response",
+            payload = ?payload,
+            "JSON-RPC message"
+        );
+        response
+    }
+
+    async fn process_message_inner(
+        &self,
+        input: &[u8],
+        context: Option<TransportContext>,
+    ) -> Option<Bytes> {
         let value = match serde_json::from_slice::<Value>(input) {
             Ok(value) => value,
             Err(_) => {

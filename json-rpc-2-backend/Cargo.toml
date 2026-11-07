@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "Single-builder multi-transport JSON-RPC-2 backend for JSON-RPC-2-GATEWAY with plugins"
 
+[features]
+default = []
+message-logging = ["json-rpc-2-server/message-logging"]
+
 [dependencies]
 anyhow = "1"
 dotenvy = "0.15.7"
