@@ -28,7 +28,7 @@ use json_rpc_2_transport::{
 mod tcp;
 #[cfg(feature = "tcp")]
 use super::tcp;
-pub(crate) use tcp::{read_frame, validate_message, write_message};
+pub(crate) use tcp::{IdleRead, PushInbox, read_response, validate_message, write_message};
 
 type Connection = (TlsStream<TcpStream>, BytesMut);
 
@@ -49,6 +49,7 @@ pub struct TlsClientTransport {
     tuning: TcpTuningConfig,
     framing: Option<Arc<dyn json_rpc_2_transport::StreamFraming>>,
     connection: Mutex<ConnectionState>,
+    inbox: PushInbox,
 }
 
 impl TlsClientTransport {
@@ -114,6 +115,7 @@ impl TlsClientTransport {
             tuning,
             framing: None,
             connection: Mutex::new(ConnectionState::Invalidated),
+            inbox: PushInbox::new(),
         };
         let connection = client.open().await?;
         *client.connection.lock().await = ConnectionState::Ready(Box::new(connection));
@@ -223,6 +225,34 @@ impl RpcClientTransport for TlsClientTransport {
 }
 
 impl TlsClientTransport {
+    /// Waits for the next server-initiated message on this connection.
+    ///
+    /// Safe to cancel. Requests sent meanwhile take over the stream first.
+    pub async fn recv_push(&self) -> Result<Bytes, TransportError> {
+        loop {
+            if let Some(push) = self.inbox.try_take() {
+                return Ok(push);
+            }
+            let mut connection = self.connection.lock().await;
+            let ConnectionState::Ready(framed) = &mut *connection else {
+                return Err(json_rpc_2_transport::closed());
+            };
+            let (stream, buffer) = &mut **framed;
+            match self
+                .inbox
+                .read_idle(stream, buffer, self.framing.as_deref())
+                .await
+            {
+                IdleRead::Interrupted => {}
+                IdleRead::Push(push) => return Ok(push),
+                IdleRead::Failed(error) => {
+                    *connection = ConnectionState::Invalidated;
+                    return Err(transport_error(error));
+                }
+            }
+        }
+    }
+
     async fn send_line(
         &self,
         message: Bytes,
@@ -237,6 +267,7 @@ impl TlsClientTransport {
         expects_response: bool,
     ) -> Result<Option<Bytes>, TransportError> {
         validate_message(&message, self.framing.as_deref()).map_err(transport_error)?;
+        self.inbox.interrupt();
         let mut connection = self.connection.lock().await;
         if matches!(*connection, ConnectionState::Closed) {
             return Err(json_rpc_2_transport::closed());
@@ -250,8 +281,13 @@ impl TlsClientTransport {
             .await
             .map_err(transport_error)?;
         let response = if expects_response {
-            match read_frame(&mut framed.0, &mut framed.1, self.framing.as_deref())
-                .await
+            match read_response(
+                &self.inbox,
+                &mut framed.0,
+                &mut framed.1,
+                self.framing.as_deref(),
+            )
+            .await
                 .map_err(transport_error)?
             {
                 Some(response) => Some(response),

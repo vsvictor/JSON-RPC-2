@@ -2137,6 +2137,7 @@ dependencies = [
  "json-rpc-2-transport 0.1.0",
  "libc",
  "rustls",
+ "serde_json",
  "tokio",
  "tokio-rustls",
  "tokio-util",

@@ -19,6 +19,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 json-rpc-2-core = { path = "../json-rpc-2-core" }
+serde_json = "1"
 json-rpc-2-transport = { path = "../json-rpc-2-transport" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }

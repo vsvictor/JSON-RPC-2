@@ -1599,7 +1599,7 @@ fn unspecified(ip: IpAddr) -> IpAddr {
 fn wrap_client(transport: AnyTransport) -> Arc<RpcClient> {
     Arc::new(RpcClient {
         inner: CoreClient::new(transport),
-        #[cfg(feature = "quic")]
+        #[cfg(any(feature = "quic", feature = "srt", feature = "tcp", feature = "tls"))]
         callbacks: std::sync::Mutex::new(None),
     })
 }
@@ -1918,7 +1918,7 @@ impl RpcClientBuilder {
 #[derive(uniffi::Object)]
 pub struct RpcClient {
     inner: CoreClient<AnyTransport>,
-    #[cfg(feature = "quic")]
+    #[cfg(any(feature = "quic", feature = "srt", feature = "tcp", feature = "tls"))]
     callbacks: std::sync::Mutex<Option<json_rpc_2_callback::CallbackListener>>,
 }
 
@@ -2616,7 +2616,7 @@ pub fn connect_ws_http3(options: QuicConnectOptions) -> Result<Arc<RpcClient>, F
 mod tests;
 
 /// Receives server-to-client JSON-RPC 2.0 notifications pushed through the gateway.
-#[cfg(feature = "quic")]
+#[cfg(any(feature = "quic", feature = "srt", feature = "tcp", feature = "tls"))]
 #[uniffi::export(with_foreign)]
 pub trait CallbackHandler: Send + Sync {
     /// `params_json` is the notification's `params` serialized as JSON, if present.
@@ -2626,25 +2626,68 @@ pub trait CallbackHandler: Send + Sync {
     fn on_interrupted(&self);
 }
 
-#[cfg(feature = "quic")]
+#[cfg(any(feature = "quic", feature = "srt", feature = "tcp", feature = "tls"))]
 impl json_rpc_2_callback::PushSource for AnyTransport {
     fn recv_push(&self) -> json_rpc_2_callback::PushFuture<'_> {
         match self {
-            Self::Quic(transport) => {
-                json_rpc_2_callback::PushSource::recv_push(transport)
-            }
+            #[cfg(feature = "quic")]
+            Self::Quic(transport) => json_rpc_2_callback::PushSource::recv_push(transport),
+            #[cfg(feature = "tcp")]
+            Self::Tcp(transport) => Box::pin(async move {
+                transport.recv_push().await.map_err(push_error)
+            }),
+            #[cfg(feature = "tls")]
+            Self::Tls(transport) => Box::pin(async move {
+                transport.recv_push().await.map_err(push_error)
+            }),
+            #[cfg(feature = "srt")]
+            Self::Srt(transport) => Box::pin(async move {
+                transport.recv_push().await.map_err(push_error)
+            }),
+            #[cfg(all(feature = "websocket", feature = "srt"))]
+            Self::WsSrt(transport) => Box::pin(async move {
+                match transport.recv_push().await.map_err(push_error)? {
+                    json_rpc_2::WebSocketMessage::Text(text) => Ok(Bytes::from(text)),
+                    json_rpc_2::WebSocketMessage::Binary(bytes) => Ok(bytes),
+                    _ => Err(std::io::Error::other("unexpected WebSocket control frame")),
+                }
+            }),
             _ => Box::pin(std::future::ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "server push requires the QUIC transport",
+                "this transport cannot receive server push",
             )))),
         }
     }
 }
 
-#[cfg(feature = "quic")]
+#[cfg(any(feature = "quic", feature = "srt", feature = "tcp", feature = "tls"))]
+#[cfg(any(feature = "quic", feature = "srt", feature = "tcp", feature = "tls"))]
+fn push_error(error: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::ConnectionAborted, error.to_string())
+}
+
+impl AnyTransport {
+    fn supports_push(&self) -> bool {
+        match self {
+            #[cfg(feature = "quic")]
+            Self::Quic(_) => true,
+            #[cfg(feature = "tcp")]
+            Self::Tcp(_) => true,
+            #[cfg(feature = "tls")]
+            Self::Tls(_) => true,
+            #[cfg(feature = "srt")]
+            Self::Srt(_) => true,
+            #[cfg(all(feature = "websocket", feature = "srt"))]
+            Self::WsSrt(_) => true,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(any(feature = "quic", feature = "srt", feature = "tcp", feature = "tls"))]
 struct ForeignCallbacks(Arc<dyn CallbackHandler>);
 
-#[cfg(feature = "quic")]
+#[cfg(any(feature = "quic", feature = "srt", feature = "tcp", feature = "tls"))]
 impl json_rpc_2_callback::CallbackHandler for ForeignCallbacks {
     fn on_message(&self, message: json_rpc_2_callback::CallbackMessage) {
         let params = message.params.map(|params| params.to_string());
@@ -2656,14 +2699,14 @@ impl json_rpc_2_callback::CallbackHandler for ForeignCallbacks {
     }
 }
 
-#[cfg(feature = "quic")]
+#[cfg(any(feature = "quic", feature = "srt", feature = "tcp", feature = "tls"))]
 #[uniffi::export]
 impl RpcClient {
-    /// Starts listening for server callbacks (QUIC only), replacing any previous listener.
+    /// Starts listening for server callbacks on the connection's own transport (TCP, TLS, QUIC, SRT, WS-SRT), replacing any previous listener.
     pub fn start_callbacks(&self, handler: Arc<dyn CallbackHandler>) -> Result<(), FfiError> {
-        if !matches!(*self.inner.transport(), AnyTransport::Quic(_)) {
+        if !self.inner.transport().supports_push() {
             return Err(FfiError::InvalidConfiguration {
-                details: "callbacks require the QUIC transport".into(),
+                details: "this transport cannot receive server callbacks".into(),
             });
         }
         let _guard = runtime().enter();

@@ -6,7 +6,7 @@ use bytes::{Bytes, BytesMut};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
-    sync::Mutex,
+    sync::{Mutex, Notify, mpsc},
 };
 
 use json_rpc_2_core::MAX_MESSAGE_BYTES;
@@ -25,6 +25,110 @@ enum ConnectionState {
     Closed,
 }
 
+/// Server-initiated notifications that arrive on a persistent stream.
+///
+/// Pushes captured while an exchange waits for its response are queued here;
+/// while the stream is idle, [`PushInbox::read_idle`] reads them directly.
+/// Exchanges interrupt an idle read through [`PushInbox::interrupt`].
+pub(crate) struct PushInbox {
+    sender: mpsc::UnboundedSender<Bytes>,
+    receiver: Mutex<mpsc::UnboundedReceiver<Bytes>>,
+    wake: Notify,
+}
+
+pub(crate) enum IdleRead {
+    Interrupted,
+    Push(Bytes),
+    Failed(std::io::Error),
+}
+
+impl PushInbox {
+    pub(crate) fn new() -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        Self {
+            sender,
+            receiver: Mutex::new(receiver),
+            wake: Notify::new(),
+        }
+    }
+
+    pub(crate) fn interrupt(&self) {
+        self.wake.notify_one();
+    }
+
+    pub(crate) fn try_take(&self) -> Option<Bytes> {
+        self.receiver.try_lock().ok()?.try_recv().ok()
+    }
+
+    /// Queues `frame` and returns true when it is a push, not a response.
+    pub(crate) fn capture(
+        &self,
+        frame: &Bytes,
+        framing: Option<&dyn json_rpc_2_transport::StreamFraming>,
+    ) -> bool {
+        if framing.is_none() && is_notification(frame) {
+            let _ = self.sender.send(frame.clone());
+            return true;
+        }
+        false
+    }
+
+    /// Reads one frame while no exchange owns the stream.
+    pub(crate) async fn read_idle<R>(
+        &self,
+        reader: &mut R,
+        buffer: &mut BytesMut,
+        framing: Option<&dyn json_rpc_2_transport::StreamFraming>,
+    ) -> IdleRead
+    where
+        R: AsyncRead + Unpin,
+    {
+        tokio::select! {
+            biased;
+            _ = self.wake.notified() => IdleRead::Interrupted,
+            frame = read_frame(reader, buffer, framing) => match frame {
+                Ok(Some(frame)) if self.capture(&frame, framing) => {
+                    IdleRead::Push(self.try_take().unwrap_or(frame))
+                }
+                Ok(Some(frame)) if framing.is_some() => IdleRead::Push(frame),
+                Ok(Some(_)) => IdleRead::Failed(invalid_frame("unexpected message while idle")),
+                Ok(None) => IdleRead::Failed(std::io::ErrorKind::UnexpectedEof.into()),
+                Err(error) => IdleRead::Failed(error),
+            },
+        }
+    }
+}
+
+fn is_notification(frame: &[u8]) -> bool {
+    if frame.first() != Some(&b'{') {
+        return false;
+    }
+    match serde_json::from_slice::<serde_json::Value>(frame) {
+        Ok(serde_json::Value::Object(object)) => {
+            object.contains_key("method") && !object.contains_key("id")
+        }
+        _ => false,
+    }
+}
+
+/// Reads frames until a response arrives, queueing any pushes seen on the way.
+pub(crate) async fn read_response<R>(
+    inbox: &PushInbox,
+    reader: &mut R,
+    buffer: &mut BytesMut,
+    framing: Option<&dyn json_rpc_2_transport::StreamFraming>,
+) -> std::io::Result<Option<Bytes>>
+where
+    R: AsyncRead + Unpin,
+{
+    loop {
+        match read_frame(reader, buffer, framing).await? {
+            Some(frame) if inbox.capture(&frame, framing) => continue,
+            other => return Ok(other),
+        }
+    }
+}
+
 /// TCP client transport supporting JSON lines and application-defined binary frames.
 ///
 /// An interrupted exchange discards its socket, including any partially written
@@ -35,6 +139,7 @@ pub struct TcpClientTransport {
     tuning: TcpTuningConfig,
     framing: Option<std::sync::Arc<dyn json_rpc_2_transport::StreamFraming>>,
     connection: Mutex<ConnectionState>,
+    inbox: PushInbox,
 }
 
 impl TcpClientTransport {
@@ -51,6 +156,7 @@ impl TcpClientTransport {
             connection: Mutex::new(ConnectionState::Ready(Self::open(address, &tuning).await?)),
             tuning,
             framing: None,
+            inbox: PushInbox::new(),
         })
     }
 
@@ -151,6 +257,34 @@ impl RpcClientTransport for TcpClientTransport {
 }
 
 impl TcpClientTransport {
+    /// Waits for the next server-initiated message on this connection.
+    ///
+    /// Safe to cancel. Requests sent meanwhile take over the stream first.
+    pub async fn recv_push(&self) -> Result<Bytes, TransportError> {
+        loop {
+            if let Some(push) = self.inbox.try_take() {
+                return Ok(push);
+            }
+            let mut connection = self.connection.lock().await;
+            let ConnectionState::Ready(framed) = &mut *connection else {
+                return Err(closed());
+            };
+            let (stream, buffer) = framed;
+            match self
+                .inbox
+                .read_idle(stream, buffer, self.framing.as_deref())
+                .await
+            {
+                IdleRead::Interrupted => {}
+                IdleRead::Push(push) => return Ok(push),
+                IdleRead::Failed(error) => {
+                    *connection = ConnectionState::Invalidated;
+                    return Err(transport_error(error));
+                }
+            }
+        }
+    }
+
     async fn send_line(
         &self,
         message: Bytes,
@@ -165,6 +299,7 @@ impl TcpClientTransport {
         expects_response: bool,
     ) -> Result<Option<Bytes>, TransportError> {
         validate_message(&message, self.framing.as_deref()).map_err(transport_error)?;
+        self.inbox.interrupt();
         let mut connection = self.connection.lock().await;
         if matches!(*connection, ConnectionState::Closed) {
             return Err(closed());
@@ -182,8 +317,13 @@ impl TcpClientTransport {
             .await
             .map_err(transport_error)?;
         let response = if expects_response {
-            match read_frame(&mut framed.0, &mut framed.1, self.framing.as_deref())
-                .await
+            match read_response(
+                &self.inbox,
+                &mut framed.0,
+                &mut framed.1,
+                self.framing.as_deref(),
+            )
+            .await
                 .map_err(transport_error)?
             {
                 Some(response) => Some(response),
@@ -349,3 +489,6 @@ where
     }
     writer.flush().await
 }
+
+#[cfg(test)]
+mod tests;
