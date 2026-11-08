@@ -1,6 +1,6 @@
 //! Raw QUIC: one connection, one bidirectional stream per message.
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use quinn::{Connection, Endpoint, VarInt};
@@ -9,8 +9,9 @@ use tokio_util::sync::CancellationToken;
 
 use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_transport::{
-    CONTROL_PING, CONTROL_PONG, ClientCloseFuture, ClientPingFuture, ClientRecoverFuture,
-    ClientTransportFuture, RpcClientTransport, TransportError, TransportMessage,
+    CONTROL_PING, CONTROL_PONG, ClientCloseFuture, ClientIncomingFuture, ClientPingFuture,
+    ClientRecoverFuture, ClientTransportFuture, IncomingQueue, RpcClientTransport, TransportError,
+    TransportMessage,
 };
 use json_rpc_2_transport::{closed, transport_error};
 
@@ -24,6 +25,7 @@ pub struct QuicClientTransport {
     address: SocketAddr,
     server_name: String,
     connection: Mutex<Option<Connection>>,
+    incoming: Arc<IncomingQueue>,
 }
 
 impl QuicClientTransport {
@@ -37,11 +39,14 @@ impl QuicClientTransport {
             .map_err(transport_error)?
             .await
             .map_err(transport_error)?;
+        let incoming = Arc::new(IncomingQueue::default());
+        spawn_push_reader(connection.clone(), Arc::clone(&incoming));
         Ok(Self {
             endpoint,
             address,
             server_name: server_name.to_owned(),
             connection: Mutex::new(Some(connection)),
+            incoming,
         })
     }
 
@@ -53,16 +58,11 @@ impl QuicClientTransport {
             .map_err(transport_error)
     }
 
-    /// Receive one server-initiated message on its own unidirectional stream.
-    /// Push traffic never shares a request's response stream.
+    /// Receive one server-initiated message. Each push arrives on its own
+    /// unidirectional stream and never shares a request's response stream.
+    /// Equivalent to [`RpcClientTransport::recv_incoming`].
     pub async fn recv_push(&self) -> Result<Bytes, TransportError> {
-        let connection = self.current_connection().await?;
-        let mut stream = connection.accept_uni().await.map_err(transport_error)?;
-        stream
-            .read_to_end(MAX_MESSAGE_BYTES)
-            .await
-            .map(Bytes::from)
-            .map_err(transport_error)
+        self.incoming.recv().await.ok_or_else(closed)
     }
 
     async fn current_connection(&self) -> Result<Connection, TransportError> {
@@ -130,6 +130,14 @@ impl RpcClientTransport for QuicClientTransport {
         "quic"
     }
 
+    fn supports_incoming(&self) -> bool {
+        true
+    }
+
+    fn recv_incoming<'a>(&'a self) -> ClientIncomingFuture<'a> {
+        Box::pin(self.recv_push())
+    }
+
     fn peer(&self) -> Option<String> {
         Some(self.address.to_string())
     }
@@ -137,6 +145,7 @@ impl RpcClientTransport for QuicClientTransport {
     fn reconnect<'a>(&'a self) -> ClientRecoverFuture<'a> {
         Box::pin(async move {
             let replacement = self.open().await?;
+            spawn_push_reader(replacement.clone(), Arc::clone(&self.incoming));
             let previous = self.connection.lock().await.replace(replacement);
             if let Some(connection) = previous {
                 connection.close(QUIC_NO_ERROR.into(), b"client reconnect");
@@ -152,10 +161,24 @@ impl RpcClientTransport for QuicClientTransport {
             if let Some(connection) = self.connection.lock().await.take() {
                 connection.close(QUIC_NO_ERROR.into(), b"client closed");
             }
+            self.incoming.close();
             self.endpoint.wait_idle().await;
             Ok(())
         })
     }
+}
+
+/// Accept push streams of one connection in arrival order until it closes.
+/// Streams are drained here rather than in the consumer so cancelling a
+/// consumer can never lose a partially read push.
+fn spawn_push_reader(connection: Connection, incoming: Arc<IncomingQueue>) {
+    tokio::spawn(async move {
+        while let Ok(mut stream) = connection.accept_uni().await {
+            if let Ok(message) = stream.read_to_end(MAX_MESSAGE_BYTES).await {
+                incoming.push(Bytes::from(message));
+            }
+        }
+    });
 }
 
 async fn send_request(

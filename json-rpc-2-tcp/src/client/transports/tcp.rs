@@ -6,125 +6,135 @@ use bytes::{Bytes, BytesMut};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
-    sync::{Mutex, Notify, mpsc},
+    sync::{Mutex, MutexGuard, Notify},
 };
 
 use json_rpc_2_core::MAX_MESSAGE_BYTES;
 use json_rpc_2_transport::TcpTuningConfig;
 use json_rpc_2_transport::{
-    CONTROL_PING, CONTROL_PONG, ClientCloseFuture, ClientPingFuture, ClientRecoverFuture,
-    ClientTransportFuture, RpcClientTransport, TransportError, TransportMessage, expects_response,
+    CONTROL_PING, CONTROL_PONG, ClientCloseFuture, ClientIncomingFuture, ClientPingFuture,
+    ClientRecoverFuture, ClientTransportFuture, IncomingQueue, RpcClientTransport, StreamFraming,
+    TransportError, TransportMessage, expects_response, is_incoming_message,
 };
 use json_rpc_2_transport::{closed, transport_error};
 
 type Connection = (TcpStream, BytesMut);
 
-enum ConnectionState {
-    Ready(Connection),
+pub(crate) enum ConnectionState<C> {
+    Ready(C),
     Invalidated,
     Closed,
 }
 
-/// Server-initiated notifications that arrive on a persistent stream.
+/// A stream plus the read buffer that owns any partially received frame.
+pub(crate) trait FramedConnection: Send {
+    type Stream: AsyncRead + Unpin + Send;
+
+    fn parts(&mut self) -> (&mut Self::Stream, &mut BytesMut);
+}
+
+impl<S: AsyncRead + Unpin + Send> FramedConnection for (S, BytesMut) {
+    type Stream = S;
+
+    fn parts(&mut self) -> (&mut S, &mut BytesMut) {
+        (&mut self.0, &mut self.1)
+    }
+}
+
+impl<C: FramedConnection> FramedConnection for Box<C> {
+    type Stream = C::Stream;
+
+    fn parts(&mut self) -> (&mut Self::Stream, &mut BytesMut) {
+        (**self).parts()
+    }
+}
+
+/// Server-initiated messages of a lock-step JSON-lines stream transport.
 ///
-/// Pushes captured while an exchange waits for its response are queued here;
-/// while the stream is idle, [`PushInbox::read_idle`] reads them directly.
-/// Exchanges interrupt an idle read through [`PushInbox::interrupt`].
-pub(crate) struct PushInbox {
-    sender: mpsc::UnboundedSender<Bytes>,
-    receiver: Mutex<mpsc::UnboundedReceiver<Bytes>>,
-    wake: Notify,
+/// The connection mutex keeps exchanges strictly request/response. While no
+/// exchange runs, [`StreamIncoming::recv`] owns the connection and reads push
+/// lines; every other user signals contention before locking so the reader
+/// yields immediately. Push lines that arrive while an exchange waits for its
+/// response are diverted into the queue instead of being taken as the reply.
+#[derive(Default)]
+pub(crate) struct StreamIncoming {
+    pub(crate) queue: IncomingQueue,
+    contention: Notify,
 }
 
-pub(crate) enum IdleRead {
-    Interrupted,
-    Push(Bytes),
-    Failed(std::io::Error),
-}
-
-impl PushInbox {
-    pub(crate) fn new() -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        Self {
-            sender,
-            receiver: Mutex::new(receiver),
-            wake: Notify::new(),
-        }
-    }
-
-    pub(crate) fn interrupt(&self) {
-        self.wake.notify_one();
-    }
-
-    pub(crate) fn try_take(&self) -> Option<Bytes> {
-        self.receiver.try_lock().ok()?.try_recv().ok()
-    }
-
-    /// Queues `frame` and returns true when it is a push, not a response.
-    pub(crate) fn capture(
+impl StreamIncoming {
+    /// Lock the connection, asking an idle incoming reader to yield first.
+    pub(crate) async fn lock<'a, C>(
         &self,
-        frame: &Bytes,
-        framing: Option<&dyn json_rpc_2_transport::StreamFraming>,
-    ) -> bool {
-        if framing.is_none() && is_notification(frame) {
-            let _ = self.sender.send(frame.clone());
-            return true;
-        }
-        false
+        connection: &'a Mutex<ConnectionState<C>>,
+    ) -> MutexGuard<'a, ConnectionState<C>> {
+        self.contention.notify_one();
+        connection.lock().await
     }
 
-    /// Reads one frame while no exchange owns the stream.
-    pub(crate) async fn read_idle<R>(
+    /// Read the reply to the exchange in flight, queueing push lines.
+    pub(crate) async fn read_response<C: FramedConnection>(
         &self,
-        reader: &mut R,
-        buffer: &mut BytesMut,
-        framing: Option<&dyn json_rpc_2_transport::StreamFraming>,
-    ) -> IdleRead
-    where
-        R: AsyncRead + Unpin,
-    {
-        tokio::select! {
-            biased;
-            _ = self.wake.notified() => IdleRead::Interrupted,
-            frame = read_frame(reader, buffer, framing) => match frame {
-                Ok(Some(frame)) if self.capture(&frame, framing) => {
-                    IdleRead::Push(self.try_take().unwrap_or(frame))
+        framed: &mut C,
+        framing: Option<&dyn StreamFraming>,
+    ) -> std::io::Result<Option<Bytes>> {
+        let (stream, buffer) = framed.parts();
+        loop {
+            match read_frame(stream, buffer, framing).await? {
+                Some(frame) if framing.is_none() && is_incoming_message(&frame) => {
+                    self.queue.push(frame);
                 }
-                Ok(Some(frame)) if framing.is_some() => IdleRead::Push(frame),
-                Ok(Some(_)) => IdleRead::Failed(invalid_frame("unexpected message while idle")),
-                Ok(None) => IdleRead::Failed(std::io::ErrorKind::UnexpectedEof.into()),
-                Err(error) => IdleRead::Failed(error),
-            },
+                other => return Ok(other),
+            }
         }
     }
-}
 
-fn is_notification(frame: &[u8]) -> bool {
-    if frame.first() != Some(&b'{') {
-        return false;
-    }
-    match serde_json::from_slice::<serde_json::Value>(frame) {
-        Ok(serde_json::Value::Object(object)) => {
-            object.contains_key("method") && !object.contains_key("id")
+    /// Wait for the next push line. Cancel-safe: the partial frame stays in
+    /// the connection buffer. A broken connection is invalidated and the wait
+    /// continues until an exchange or reconnect opens a new one.
+    pub(crate) async fn recv<C: FramedConnection>(
+        &self,
+        connection: &Mutex<ConnectionState<C>>,
+        framing: Option<&dyn StreamFraming>,
+    ) -> Result<Bytes, TransportError> {
+        if framing.is_some() {
+            return Err(TransportError::new(
+                "server-initiated messages require JSON-lines framing",
+            ));
         }
-        _ => false,
-    }
-}
-
-/// Reads frames until a response arrives, queueing any pushes seen on the way.
-pub(crate) async fn read_response<R>(
-    inbox: &PushInbox,
-    reader: &mut R,
-    buffer: &mut BytesMut,
-    framing: Option<&dyn json_rpc_2_transport::StreamFraming>,
-) -> std::io::Result<Option<Bytes>>
-where
-    R: AsyncRead + Unpin,
-{
-    loop {
-        match read_frame(reader, buffer, framing).await? {
-            Some(frame) if inbox.capture(&frame, framing) => continue,
-            other => return Ok(other),
+        loop {
+            let changed = self.queue.changed();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(message) = self.queue.try_pop() {
+                return Ok(message);
+            }
+            let mut guard = tokio::select! {
+                guard = connection.lock() => guard,
+                _ = &mut changed => continue,
+            };
+            let frame = match &mut *guard {
+                ConnectionState::Closed => return Err(closed()),
+                ConnectionState::Invalidated => {
+                    drop(guard);
+                    changed.await;
+                    continue;
+                }
+                ConnectionState::Ready(framed) => {
+                    let (stream, buffer) = framed.parts();
+                    tokio::select! {
+                        biased;
+                        _ = self.contention.notified() => continue,
+                        frame = read_frame(stream, buffer, None) => frame,
+                    }
+                }
+            };
+            match frame {
+                Ok(Some(frame)) if is_incoming_message(&frame) => return Ok(frame),
+                // No exchange is in flight, so this cannot answer a request.
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => *guard = ConnectionState::Invalidated,
+            }
         }
     }
 }
@@ -138,8 +148,8 @@ pub struct TcpClientTransport {
     address: SocketAddr,
     tuning: TcpTuningConfig,
     framing: Option<std::sync::Arc<dyn json_rpc_2_transport::StreamFraming>>,
-    connection: Mutex<ConnectionState>,
-    inbox: PushInbox,
+    connection: Mutex<ConnectionState<Connection>>,
+    incoming: StreamIncoming,
 }
 
 impl TcpClientTransport {
@@ -156,7 +166,7 @@ impl TcpClientTransport {
             connection: Mutex::new(ConnectionState::Ready(Self::open(address, &tuning).await?)),
             tuning,
             framing: None,
-            inbox: PushInbox::new(),
+            incoming: StreamIncoming::default(),
         })
     }
 
@@ -221,17 +231,29 @@ impl RpcClientTransport for TcpClientTransport {
         "tcp"
     }
 
+    fn supports_incoming(&self) -> bool {
+        self.framing.is_none()
+    }
+
+    fn recv_incoming<'a>(&'a self) -> ClientIncomingFuture<'a> {
+        Box::pin(
+            self.incoming
+                .recv(&self.connection, self.framing.as_deref()),
+        )
+    }
+
     fn peer(&self) -> Option<String> {
         Some(self.address.to_string())
     }
 
     fn reconnect<'a>(&'a self) -> ClientRecoverFuture<'a> {
         Box::pin(async move {
-            let mut connection = self.connection.lock().await;
+            let mut connection = self.incoming.lock(&self.connection).await;
             let replacement = Self::open(self.address, &self.tuning).await?;
             // There are no in-flight exchanges while this lock is held. Drop
             // the old socket synchronously so cancellation cannot strand it.
             *connection = ConnectionState::Ready(replacement);
+            self.incoming.queue.wake();
             Ok(())
         })
     }
@@ -239,10 +261,10 @@ impl RpcClientTransport for TcpClientTransport {
     /// Send FIN and wait until the server closes its side too.
     fn close<'a>(&'a self) -> ClientCloseFuture<'a> {
         Box::pin(async move {
-            let mut connection = self.connection.lock().await;
-            let ConnectionState::Ready(framed) =
-                std::mem::replace(&mut *connection, ConnectionState::Closed)
-            else {
+            let mut connection = self.incoming.lock(&self.connection).await;
+            let previous = std::mem::replace(&mut *connection, ConnectionState::Closed);
+            self.incoming.queue.close();
+            let ConnectionState::Ready(framed) = previous else {
                 return Ok(());
             };
             let (mut stream, _) = framed;
@@ -257,34 +279,6 @@ impl RpcClientTransport for TcpClientTransport {
 }
 
 impl TcpClientTransport {
-    /// Waits for the next server-initiated message on this connection.
-    ///
-    /// Safe to cancel. Requests sent meanwhile take over the stream first.
-    pub async fn recv_push(&self) -> Result<Bytes, TransportError> {
-        loop {
-            if let Some(push) = self.inbox.try_take() {
-                return Ok(push);
-            }
-            let mut connection = self.connection.lock().await;
-            let ConnectionState::Ready(framed) = &mut *connection else {
-                return Err(closed());
-            };
-            let (stream, buffer) = framed;
-            match self
-                .inbox
-                .read_idle(stream, buffer, self.framing.as_deref())
-                .await
-            {
-                IdleRead::Interrupted => {}
-                IdleRead::Push(push) => return Ok(push),
-                IdleRead::Failed(error) => {
-                    *connection = ConnectionState::Invalidated;
-                    return Err(transport_error(error));
-                }
-            }
-        }
-    }
-
     async fn send_line(
         &self,
         message: Bytes,
@@ -299,8 +293,7 @@ impl TcpClientTransport {
         expects_response: bool,
     ) -> Result<Option<Bytes>, TransportError> {
         validate_message(&message, self.framing.as_deref()).map_err(transport_error)?;
-        self.inbox.interrupt();
-        let mut connection = self.connection.lock().await;
+        let mut connection = self.incoming.lock(&self.connection).await;
         if matches!(*connection, ConnectionState::Closed) {
             return Err(closed());
         }
@@ -317,13 +310,10 @@ impl TcpClientTransport {
             .await
             .map_err(transport_error)?;
         let response = if expects_response {
-            match read_response(
-                &self.inbox,
-                &mut framed.0,
-                &mut framed.1,
-                self.framing.as_deref(),
-            )
-            .await
+            match self
+                .incoming
+                .read_response(&mut framed, self.framing.as_deref())
+                .await
                 .map_err(transport_error)?
             {
                 Some(response) => Some(response),
@@ -333,6 +323,7 @@ impl TcpClientTransport {
             None
         };
         *connection = ConnectionState::Ready(framed);
+        self.incoming.queue.wake();
         Ok(response)
     }
 }
@@ -490,5 +481,7 @@ where
     writer.flush().await
 }
 
-#[cfg(test)]
+// Explicit path: this file is also included from tls.rs in TLS-only builds.
+#[cfg(all(test, feature = "tcp"))]
+#[path = "tcp/tests.rs"]
 mod tests;

@@ -3,19 +3,21 @@
 mod client_transport;
 mod datagram_receiver;
 mod framing;
+mod incoming;
 mod message;
 mod server_transport;
 mod udplite;
 
 pub use datagram_receiver::{DatagramReceiver, OwnedDatagram, ReceivedDatagram};
 pub use framing::{FrameBoundary, StreamFraming};
+pub use incoming::{DEFAULT_INCOMING_CAPACITY, IncomingQueue, is_incoming_message};
 pub use message::TransportMessage;
 pub use udplite::apply_udp_lite_coverage;
 
 pub use client_transport::{
-    ClientCloseFuture, ClientPingFuture, ClientRecoverFuture, ClientTransportFuture,
-    RpcClientTransport, TransportError, closed, connect_tcp_stream, expects_response,
-    transport_error,
+    ClientCloseFuture, ClientIncomingFuture, ClientPingFuture, ClientRecoverFuture,
+    ClientTransportFuture, RpcClientTransport, TransportError, closed, connect_tcp_stream,
+    expects_response, transport_error,
 };
 pub use server_transport::{
     CancellationToken, H3_NO_ERROR, JsonRpcProtocol, ProtocolFuture, ProtocolMessageFuture,
