@@ -29,7 +29,7 @@ srt = ["json-rpc-2/srt"]
 udplite = ["json-rpc-2/udplite"]
 dccp = ["json-rpc-2/dccp"]
 sctp = ["json-rpc-2/sctp"]
-quic = ["json-rpc-2/quic"]
+quic = ["json-rpc-2/quic", "dep:json-rpc-2-callback"]
 http1 = ["json-rpc-2/http1"]
 http3 = ["json-rpc-2/http3"]
 mqtt = ["json-rpc-2/mqtt"]
@@ -45,6 +45,7 @@ bytes = "1"
 # (tcp, tls, udp, rtp, dccp, sctp, http1, quic, http3, ws-tcp, ws-udp, ws-rtp, ws-dccp, ws-sctp, ws-quic, ws-http1, ws-tls, ws-http3) is wrapped
 # here, no protocol or transport logic is duplicated.
 json-rpc-2 = { path = "../json-rpc-2", default-features = false }
+json-rpc-2-callback = { path = "../json-rpc-2-callback", optional = true, features = ["quic"] }
 
 uniffi = "0.32"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync"] }

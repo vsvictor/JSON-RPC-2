@@ -1,0 +1,22 @@
+[package]
+name = "json-rpc-2-callback"
+version = "0.1.0"
+edition = "2024"
+description = "Server-to-client JSON-RPC 2.0 callback notifications delivered centrally through the gateway Control Plane"
+
+[features]
+default = []
+quic = ["dep:json-rpc-2-quic"]
+
+[dependencies]
+bytes = "1"
+json-rpc-2-quic = { path = "../json-rpc-2-quic", optional = true, default-features = false, features = ["quic"] }
+json-rpc-2-transport = { path = "../json-rpc-2-transport" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

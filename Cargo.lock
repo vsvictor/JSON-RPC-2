@@ -1890,6 +1890,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-rpc-2-callback"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "json-rpc-2-quic",
+ "json-rpc-2-transport 0.1.0",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "json-rpc-2-cli"
 version = "0.1.0"
 dependencies = [
@@ -1982,6 +1996,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "json-rpc-2",
+ "json-rpc-2-callback",
  "quinn",
  "rcgen",
  "serde_json",

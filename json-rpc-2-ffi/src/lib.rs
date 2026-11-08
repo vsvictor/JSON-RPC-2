@@ -1599,6 +1599,8 @@ fn unspecified(ip: IpAddr) -> IpAddr {
 fn wrap_client(transport: AnyTransport) -> Arc<RpcClient> {
     Arc::new(RpcClient {
         inner: CoreClient::new(transport),
+        #[cfg(feature = "quic")]
+        callbacks: std::sync::Mutex::new(None),
     })
 }
 
@@ -1916,6 +1918,8 @@ impl RpcClientBuilder {
 #[derive(uniffi::Object)]
 pub struct RpcClient {
     inner: CoreClient<AnyTransport>,
+    #[cfg(feature = "quic")]
+    callbacks: std::sync::Mutex<Option<json_rpc_2_callback::CallbackListener>>,
 }
 
 #[uniffi::export]
@@ -2610,3 +2614,71 @@ pub fn connect_ws_http3(options: QuicConnectOptions) -> Result<Arc<RpcClient>, F
 
 #[cfg(test)]
 mod tests;
+
+/// Receives server-to-client JSON-RPC 2.0 notifications pushed through the gateway.
+#[cfg(feature = "quic")]
+#[uniffi::export(with_foreign)]
+pub trait CallbackHandler: Send + Sync {
+    /// `params_json` is the notification's `params` serialized as JSON, if present.
+    fn on_callback(&self, method: String, params_json: Option<String>);
+
+    /// The push channel broke; the listener keeps retrying until stopped.
+    fn on_interrupted(&self);
+}
+
+#[cfg(feature = "quic")]
+impl json_rpc_2_callback::PushSource for AnyTransport {
+    fn recv_push(&self) -> json_rpc_2_callback::PushFuture<'_> {
+        match self {
+            Self::Quic(transport) => {
+                json_rpc_2_callback::PushSource::recv_push(transport)
+            }
+            _ => Box::pin(std::future::ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "server push requires the QUIC transport",
+            )))),
+        }
+    }
+}
+
+#[cfg(feature = "quic")]
+struct ForeignCallbacks(Arc<dyn CallbackHandler>);
+
+#[cfg(feature = "quic")]
+impl json_rpc_2_callback::CallbackHandler for ForeignCallbacks {
+    fn on_message(&self, message: json_rpc_2_callback::CallbackMessage) {
+        let params = message.params.map(|params| params.to_string());
+        self.0.on_callback(message.method, params);
+    }
+
+    fn on_closed(&self) {
+        self.0.on_interrupted();
+    }
+}
+
+#[cfg(feature = "quic")]
+#[uniffi::export]
+impl RpcClient {
+    /// Starts listening for server callbacks (QUIC only), replacing any previous listener.
+    pub fn start_callbacks(&self, handler: Arc<dyn CallbackHandler>) -> Result<(), FfiError> {
+        if !matches!(*self.inner.transport(), AnyTransport::Quic(_)) {
+            return Err(FfiError::InvalidConfiguration {
+                details: "callbacks require the QUIC transport".into(),
+            });
+        }
+        let _guard = runtime().enter();
+        let listener = json_rpc_2_callback::CallbackListener::spawn(
+            self.inner.transport(),
+            Arc::new(ForeignCallbacks(handler)),
+        );
+        *self.callbacks.lock().expect("callbacks lock") = Some(listener);
+        Ok(())
+    }
+
+    /// Stops the callback listener, if any.
+    pub fn stop_callbacks(&self) {
+        if let Some(listener) = self.callbacks.lock().expect("callbacks lock").take() {
+            listener.stop();
+        }
+    }
+}

@@ -280,6 +280,12 @@ where
         })
     }
 
+    /// Shared handle to the underlying transport, for transport-specific
+    /// capabilities such as receiving server pushes.
+    pub fn transport(&self) -> Arc<T> {
+        Arc::clone(&self.state.transport)
+    }
+
     /// Immutable snapshot of the current client policy.
     pub fn config(&self) -> RpcClientConfig {
         self.state
